@@ -29,4 +29,17 @@ defmodule SymphonyElixir.ConfigSchemaTest do
     assert settings.tracker.identifier_prefix == "SYM"
     assert settings.tracker.handoff_states == ["Human Review", "Merging"]
   end
+
+  test "Tracker struct inspect redacts api_token" do
+    tracker = %SymphonyElixir.Config.Schema.Tracker{
+      kind: "monday",
+      api_token: "supersecrettoken1234567890",
+      board_id: 1,
+      symphony_status_column_id: "x"
+    }
+
+    rendered = inspect(tracker)
+    refute rendered =~ "supersecrettoken1234567890"
+    assert rendered =~ "<redacted:"
+  end
 end

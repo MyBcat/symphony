@@ -106,6 +106,24 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defimpl Inspect, for: SymphonyElixir.Config.Schema.Tracker do
+    @moduledoc false
+
+    def inspect(tracker, opts) do
+      redacted = %{tracker | api_token: redact(tracker.api_token)}
+      Inspect.Any.inspect(redacted, opts)
+    end
+
+    defp redact(nil), do: nil
+    defp redact(""), do: ""
+
+    defp redact(token) when is_binary(token) do
+      "<redacted:#{byte_size(token)}_bytes>"
+    end
+
+    defp redact(other), do: other
+  end
+
   defmodule Polling do
     @moduledoc false
     use Ecto.Schema

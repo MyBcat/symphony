@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   alias SymphonyElixir.Monday.{Client, Item, PHIDetector}
 
   @items_page_query """
-  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!], $statusColumnId: String!, $states: [String!]) {
+  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!], $statusColumnId: ID!, $states: CompareValue!) {
     boards(ids: [$boardId]) {
       items_page(
         limit: 100,
