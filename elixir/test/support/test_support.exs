@@ -8,7 +8,7 @@ defmodule SymphonyElixir.TestSupport do
 
       alias SymphonyElixir.AgentRunner
       alias SymphonyElixir.CLI
-      alias SymphonyElixir.Codex.AppServer
+      alias SymphonyElixir.Codex.Adapter
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
       alias SymphonyElixir.Orchestrator
@@ -69,21 +69,27 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    # When tests run with `--no-start`, the OTP supervisor isn't up; nothing to
+    # stop. Guard the lookup so test setup remains identical across both modes.
+    if Process.whereis(SymphonyElixir.Supervisor) do
+      case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+             {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
+             _child -> false
+           end) do
+        {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
+          :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
+          if Process.alive?(pid) do
+            Process.exit(pid, :normal)
+          end
 
-        :ok
+          :ok
 
-      _ ->
-        :ok
+        _ ->
+          :ok
+      end
+    else
+      :ok
     end
   end
 

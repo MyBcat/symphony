@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Codex.Adapter
   alias SymphonyElixir.{Config, Monday.PRDetector, Monday.Workpad, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
@@ -114,7 +114,7 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- Adapter.start_session(workspace, worker_host: worker_host) do
       try do
         do_run_codex_turns(
           session,
@@ -128,7 +128,7 @@ defmodule SymphonyElixir.AgentRunner do
           writer_pid
         )
       after
-        AppServer.stop_session(session)
+        Adapter.stop_session(session)
       end
     end
   end
@@ -147,7 +147,7 @@ defmodule SymphonyElixir.AgentRunner do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           Adapter.run_turn(
              app_session,
              prompt,
              issue,
