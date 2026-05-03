@@ -42,4 +42,53 @@ defmodule SymphonyElixir.ConfigSchemaTest do
     refute rendered =~ "supersecrettoken1234567890"
     assert rendered =~ "<redacted:"
   end
+
+  test "schema accepts profiles map and agent.default_profile" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "test-token",
+        "board_id" => 1,
+        "symphony_status_column_id" => "x",
+        "heartbeat_item_id" => 999,
+        "profile_column_id" => "dropdown_mm30zep"
+      },
+      "profiles" => %{
+        "claude_opus" => %{
+          "kind" => "claude",
+          "max_concurrent" => 2,
+          "claude" => %{
+            "command" => "claude --print --output-format stream-json",
+            "model" => "claude-opus-4-7",
+            "permission_mode" => "acceptEdits"
+          }
+        },
+        "codex_gpt55_xhigh" => %{
+          "kind" => "codex",
+          "max_concurrent" => 4,
+          "codex" => %{
+            "command" => "codex app-server",
+            "approval_policy" => "never",
+            "thread_sandbox" => "workspace-write"
+          }
+        }
+      },
+      "agent" => %{
+        "default_profile" => "claude_opus",
+        "sandbox_safety_floor" => %{
+          "claude" => %{"permission_mode" => "acceptEdits"},
+          "codex" => %{"thread_sandbox" => "workspace-write", "approval_policy" => "never"}
+        }
+      }
+    }
+
+    assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+    assert settings.tracker.profile_column_id == "dropdown_mm30zep"
+    assert settings.agent.default_profile == "claude_opus"
+    assert is_map(settings.profiles)
+    assert Map.has_key?(settings.profiles, "claude_opus")
+    assert settings.profiles["claude_opus"].kind == :claude
+    assert settings.profiles["claude_opus"].max_concurrent == 2
+    assert settings.profiles["claude_opus"].config["model"] == "claude-opus-4-7"
+  end
 end
