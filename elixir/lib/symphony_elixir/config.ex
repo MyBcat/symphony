@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
-  You are working on a Linear issue.
+  You are working on a Monday.com item.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
