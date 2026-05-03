@@ -66,4 +66,61 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     assert item.identifier == "SYM-9482736152"
     assert item.state == "Symphony Ready"
   end
+
+  describe "write paths" do
+    defmodule WriteCapturingClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "change_simple_column_value" ->
+            {:ok, %{"data" => %{"change_simple_column_value" => %{"id" => "1"}}}}
+
+          query =~ "create_update" ->
+            {:ok, %{"data" => %{"create_update" => %{"id" => "u-1", "body" => Map.get(vars, "body")}}}}
+
+          query =~ "edit_update" ->
+            {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
+
+          query =~ "items" and query =~ "updates" ->
+            {:ok, %{"data" => %{"items" => [%{"updates" => []}]}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, WriteCapturingClient)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
+      :ok
+    end
+
+    test "update_issue_state issues change_simple_column_value mutation" do
+      assert :ok = Adapter.update_issue_state("9482736152", "In Progress")
+      assert_received {:graphql, query, %{"itemId" => "9482736152", "columnId" => "symphony_status_xyz", "value" => "In Progress"}}
+      assert query =~ "change_simple_column_value"
+    end
+
+    test "set_pr_url writes to configured pr_column_id" do
+      cfg = Application.get_env(:symphony_elixir, :test_config_override).tracker
+      Application.put_env(:symphony_elixir, :test_config_override, %{tracker: Map.put(cfg, :pr_column_id, "link_pr_x")})
+
+      assert :ok = Adapter.set_pr_url("9482736152", "https://github.com/x/y/pull/42")
+      assert_received {:graphql, _query, %{"itemId" => "9482736152", "columnId" => "link_pr_x", "value" => v}}
+      assert v =~ "github.com"
+    end
+
+    test "post_failure_update creates a Monday Update with a marker header" do
+      assert :ok = Adapter.post_failure_update("9482736152", "Stranded after 5 attempts")
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+      assert body =~ "## Symphony Failures"
+      assert body =~ "Stranded after 5 attempts"
+    end
+  end
 end
