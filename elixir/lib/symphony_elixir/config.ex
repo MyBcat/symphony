@@ -114,7 +114,9 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp validate_semantics(settings) do
+  @doc false
+  @spec validate_semantics(Schema.t()) :: :ok | {:error, term()}
+  def validate_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
@@ -137,6 +139,16 @@ defmodule SymphonyElixir.Config do
       handoff_active_overlap(settings.tracker) != [] ->
         {:error, {:handoff_states_overlap_active_states, handoff_active_overlap(settings.tracker)}}
 
+      settings.agent.default_profile not in [nil, ""] and
+          not Map.has_key?(settings.profiles, settings.agent.default_profile) ->
+        {:error, {:default_profile_not_in_profiles_map, settings.agent.default_profile}}
+
+      unknown_kind_profile(settings.profiles) != nil ->
+        {:error, {:unknown_profile_kind, unknown_kind_profile(settings.profiles)}}
+
+      profile_safety_floor_violation(settings) != nil ->
+        {:error, {:profile_safety_floor_violation, profile_safety_floor_violation(settings)}}
+
       true ->
         :ok
     end
@@ -149,6 +161,42 @@ defmodule SymphonyElixir.Config do
     active
     |> MapSet.intersection(handoff)
     |> MapSet.to_list()
+  end
+
+  defp unknown_kind_profile(profiles) when is_map(profiles) do
+    valid_kinds = [:codex, :claude, :gemini]
+
+    Enum.find_value(profiles, fn {name, profile} ->
+      if profile.kind in valid_kinds, do: nil, else: name
+    end)
+  end
+
+  defp unknown_kind_profile(_), do: nil
+
+  defp profile_safety_floor_violation(settings) do
+    floor = settings.agent.sandbox_safety_floor || %{}
+
+    adapter_for_kind = %{
+      codex: SymphonyElixir.Codex.Adapter,
+      claude: SymphonyElixir.Claude.Adapter,
+      gemini: SymphonyElixir.Gemini.Adapter
+    }
+
+    Enum.find_value(settings.profiles, fn {name, profile} ->
+      case Map.get(adapter_for_kind, profile.kind) do
+        nil ->
+          nil
+
+        adapter ->
+          kind_floor = Map.get(floor, Atom.to_string(profile.kind), %{})
+
+          if adapter.passes_safety_floor?(profile.config, kind_floor) do
+            nil
+          else
+            name
+          end
+      end
+    end)
   end
 
   defp format_config_error(reason) do

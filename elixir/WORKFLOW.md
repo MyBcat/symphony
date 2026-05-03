@@ -6,6 +6,7 @@ tracker:
   board_id: 8173460438
   identifier_prefix: "SYM"
   symphony_status_column_id: "color_mm30c3vb"
+  profile_column_id: "dropdown_mm30zep"
   pr_column_id: "link_mm30ak49"
   heartbeat_item_id: 11909898073
   heartbeat_ttl_ms: 60000
@@ -39,7 +40,47 @@ hooks:
     fi
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
+profiles:
+  claude_opus:
+    kind: claude
+    max_concurrent: 2
+    claude:
+      command: "claude --print --output-format stream-json --input-format stream-json"
+      model: "claude-opus-4-7"
+      permission_mode: "acceptEdits"
+      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(make:*)", "Bash(mix:*)"]
+  claude_sonnet:
+    kind: claude
+    max_concurrent: 6
+    claude:
+      command: "claude --print --output-format stream-json --input-format stream-json"
+      model: "claude-sonnet-4-6"
+      permission_mode: "acceptEdits"
+      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(make:*)", "Bash(mix:*)"]
+  codex_gpt55_xhigh:
+    kind: codex
+    max_concurrent: 4
+    codex:
+      command: "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=xhigh app-server"
+      approval_policy: never
+      thread_sandbox: workspace-write
+  gemini_long_context:
+    kind: gemini
+    max_concurrent: 3
+    gemini:
+      command: "gemini --model gemini-2.5-pro --output-format stream-json --sandbox"
 agent:
+  default_profile: claude_opus
+  sandbox_safety_floor:
+    codex:
+      thread_sandbox: workspace-write
+      approval_policy: never
+    claude:
+      permission_mode: acceptEdits
+      bash_denylist: ["*sudo*", "*rm -rf*", "*chmod 777*", "*curl * | sh*", "*wget * | sh*"]
+    gemini:
+      require_sandbox: true
+      forbid_yolo: true
   max_concurrent_agents: 10
   max_turns: 20
 codex:

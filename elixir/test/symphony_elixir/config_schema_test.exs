@@ -91,4 +91,73 @@ defmodule SymphonyElixir.ConfigSchemaTest do
     assert settings.profiles["claude_opus"].max_concurrent == 2
     assert settings.profiles["claude_opus"].config["model"] == "claude-opus-4-7"
   end
+
+  test "validate_semantics rejects default_profile not in profiles map" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "x",
+        "board_id" => 1,
+        "symphony_status_column_id" => "y",
+        "heartbeat_item_id" => 999
+      },
+      "profiles" => %{
+        "claude_opus" => %{
+          "kind" => "claude",
+          "claude" => %{"command" => "claude --print", "permission_mode" => "acceptEdits"}
+        }
+      },
+      "agent" => %{"default_profile" => "missing_profile"}
+    }
+
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+    assert {:error, {:default_profile_not_in_profiles_map, "missing_profile"}} =
+             SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
+
+  test "validate_semantics rejects unknown profile kind" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "x",
+        "board_id" => 1,
+        "symphony_status_column_id" => "y",
+        "heartbeat_item_id" => 999
+      },
+      "profiles" => %{"weird" => %{"kind" => "perplexity", "perplexity" => %{"command" => "px"}}},
+      "agent" => %{}
+    }
+
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+    assert {:error, {:unknown_profile_kind, "weird"}} =
+             SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
+
+  test "validate_semantics rejects profiles violating safety floor" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "x",
+        "board_id" => 1,
+        "symphony_status_column_id" => "y",
+        "heartbeat_item_id" => 999
+      },
+      "profiles" => %{
+        "unsafe" => %{
+          "kind" => "claude",
+          "claude" => %{"command" => "claude --print", "permission_mode" => "bypassPermissions"}
+        }
+      },
+      "agent" => %{
+        "sandbox_safety_floor" => %{"claude" => %{"permission_mode" => "acceptEdits"}}
+      }
+    }
+
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+    assert {:error, {:profile_safety_floor_violation, "unsafe"}} =
+             SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
 end
