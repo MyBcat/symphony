@@ -67,6 +67,7 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   @workpad_marker "## Symphony Workpad"
   @failure_marker "## Symphony Failures"
+  @heartbeat_marker "## Symphony Heartbeat"
 
   @impl true
   def fetch_candidate_issues do
@@ -176,10 +177,40 @@ defmodule SymphonyElixir.Monday.Adapter do
   end
 
   @impl true
-  def acquire_heartbeat, do: {:error, :not_implemented_yet}
+  def acquire_heartbeat do
+    cfg = tracker_config()
+    instance_id = instance_id()
+    body = render_heartbeat_body(instance_id)
+    full_body = "#{@heartbeat_marker}\n\n#{body}"
+
+    case find_update_by_marker(cfg.heartbeat_item_id, @heartbeat_marker) do
+      {:ok, nil} ->
+        create_marked_update(cfg.heartbeat_item_id, full_body)
+
+      {:ok, update_id} ->
+        # v1 simple lock: existing heartbeat present → assume our own (single-instance assumption per Spec 1).
+        # Future hardening (deferred): read body, parse instance_id + timestamp; if different instance AND fresh
+        # within heartbeat_ttl_ms → return {:error, :lock_held_by_other}; else refresh.
+        edit_existing_update(update_id, full_body)
+
+      {:error, :ambiguous} ->
+        {:error, :ambiguous_heartbeat}
+
+      {:error, _} = err ->
+        err
+    end
+  end
 
   @impl true
-  def release_heartbeat, do: {:error, :not_implemented_yet}
+  def release_heartbeat do
+    cfg = tracker_config()
+
+    case find_update_by_marker(cfg.heartbeat_item_id, @heartbeat_marker) do
+      {:ok, nil} -> :ok
+      {:ok, update_id} -> edit_existing_update(update_id, "#{@heartbeat_marker}\n\nreleased\n")
+      {:error, _} = err -> err
+    end
+  end
 
   @impl true
   def validate_no_phi(item) do
@@ -263,6 +294,23 @@ defmodule SymphonyElixir.Monday.Adapter do
     case Application.get_env(:symphony_elixir, :test_config_override) do
       %{tracker: tracker} -> tracker
       _ -> Config.settings!().tracker |> Map.from_struct()
+    end
+  end
+
+  defp render_heartbeat_body(instance_id) do
+    ts = DateTime.utc_now() |> DateTime.to_iso8601()
+    "instance_id: #{instance_id}\ntimestamp: #{ts}\n"
+  end
+
+  defp instance_id do
+    case Application.get_env(:symphony_elixir, :instance_id) do
+      nil ->
+        id = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+        Application.put_env(:symphony_elixir, :instance_id, id)
+        id
+
+      id ->
+        id
     end
   end
 end

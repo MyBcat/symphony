@@ -123,4 +123,57 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert body =~ "Stranded after 5 attempts"
     end
   end
+
+  describe "heartbeat" do
+    defmodule HeartbeatClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          # Find existing heartbeat — return none in this scenario
+          query =~ "items" and query =~ "updates" ->
+            {:ok, %{"data" => %{"items" => [%{"updates" => []}]}}}
+
+          # Create heartbeat update
+          query =~ "create_update" ->
+            {:ok, %{"data" => %{"create_update" => %{"id" => "u-heartbeat-1", "body" => Map.get(vars, "body")}}}}
+
+          # Edit existing
+          query =~ "edit_update" ->
+            {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, HeartbeatClient)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
+      :ok
+    end
+
+    test "acquire_heartbeat creates fresh heartbeat update when sentinel has no recent one" do
+      assert :ok = Adapter.acquire_heartbeat()
+      # Expect a get_item_updates query, then a create_update
+      assert_received {:graphql, q1, _}
+      assert q1 =~ "items"
+      assert_received {:graphql, q2, %{"itemId" => 999_000, "body" => body}}
+      assert q2 =~ "create_update"
+      assert body =~ "## Symphony Heartbeat"
+      assert body =~ "instance_id:"
+      assert body =~ "timestamp:"
+    end
+
+    test "release_heartbeat marks the existing heartbeat as released (or no-op if none)" do
+      assert :ok = Adapter.release_heartbeat()
+      # No existing heartbeat → no-op (no edit_update mutation)
+      assert_received {:graphql, q1, _}
+      assert q1 =~ "items"
+    end
+  end
 end
