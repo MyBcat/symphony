@@ -221,6 +221,60 @@ defmodule SymphonyElixir.OrchestratorTest do
     end
   end
 
+  describe "per-profile concurrency caps" do
+    alias SymphonyElixir.Tracker.MemoryMonday
+
+    setup do
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      MemoryMonday.reset()
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :tracker_adapter_override) end)
+      :ok
+    end
+
+    test "running_by_profile counter starts empty" do
+      state = SymphonyElixir.Orchestrator.State.new()
+      assert SymphonyElixir.Orchestrator.running_by_profile_count(state, "claude_opus") == 0
+    end
+
+    test "running_by_profile_count returns the count for a profile name" do
+      state = SymphonyElixir.Orchestrator.State.new()
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "codex_default")
+
+      assert SymphonyElixir.Orchestrator.running_by_profile_count(state, "claude_opus") == 2
+      assert SymphonyElixir.Orchestrator.running_by_profile_count(state, "codex_default") == 1
+      assert SymphonyElixir.Orchestrator.running_by_profile_count(state, "gemini_long_context") == 0
+    end
+
+    test "decrement_profile_count decrements a profile counter and floors at 0" do
+      state = SymphonyElixir.Orchestrator.State.new()
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.decrement_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.decrement_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.decrement_profile_count(state, "claude_opus")
+
+      assert SymphonyElixir.Orchestrator.running_by_profile_count(state, "claude_opus") == 0
+    end
+
+    test "profile_capacity_available?/3 returns false when cap reached" do
+      state = SymphonyElixir.Orchestrator.State.new()
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+
+      refute SymphonyElixir.Orchestrator.profile_capacity_available?(state, "claude_opus", 2)
+      assert SymphonyElixir.Orchestrator.profile_capacity_available?(state, "claude_opus", 3)
+    end
+
+    test "profile_capacity_available?/3 returns true when cap is nil (no cap)" do
+      state = SymphonyElixir.Orchestrator.State.new()
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+      state = SymphonyElixir.Orchestrator.increment_profile_count(state, "claude_opus")
+
+      assert SymphonyElixir.Orchestrator.profile_capacity_available?(state, "claude_opus", nil)
+    end
+  end
+
   defp write_workflow!(path) do
     yaml = """
     ---

@@ -37,6 +37,7 @@ defmodule SymphonyElixir.Orchestrator do
       :heartbeat_ttl_ms,
       :heartbeat_timer_ref,
       running: %{},
+      running_by_profile: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
@@ -44,12 +45,75 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: nil,
       codex_rate_limits: nil
     ]
+
+    @type t :: %__MODULE__{}
+
+    @doc """
+    Builds a default `State` struct.
+
+    Used by orchestrator helpers and tests that need a state value
+    without booting the full GenServer.
+    """
+    @spec new() :: t()
+    def new, do: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Returns the count of currently-running agents resolved to the given profile name.
+
+  Per Spec 2 DL-009, profiles can declare a `max_concurrent` cap that supplements
+  the global `agent.max_concurrent_agents` cap. The orchestrator tracks per-profile
+  running counts in `state.running_by_profile` so dispatch can hold items back
+  when a profile's cap is reached, even if global capacity remains.
+  """
+  @spec running_by_profile_count(State.t(), String.t()) :: non_neg_integer()
+  def running_by_profile_count(%State{running_by_profile: by_profile}, profile_name)
+      when is_binary(profile_name) and is_map(by_profile) do
+    Map.get(by_profile, profile_name, 0)
+  end
+
+  @doc """
+  Increments the running-count for `profile_name` and returns the updated state.
+  """
+  @spec increment_profile_count(State.t(), String.t()) :: State.t()
+  def increment_profile_count(%State{running_by_profile: by_profile} = state, profile_name)
+      when is_binary(profile_name) and is_map(by_profile) do
+    %{state | running_by_profile: Map.update(by_profile, profile_name, 1, &(&1 + 1))}
+  end
+
+  @doc """
+  Decrements the running-count for `profile_name`. Floors at 0 so a stray
+  decrement on an unknown or already-zero profile cannot drive the counter
+  negative.
+  """
+  @spec decrement_profile_count(State.t(), String.t()) :: State.t()
+  def decrement_profile_count(%State{running_by_profile: by_profile} = state, profile_name)
+      when is_binary(profile_name) and is_map(by_profile) do
+    %{state | running_by_profile: Map.update(by_profile, profile_name, 0, &max(0, &1 - 1))}
+  end
+
+  @doc """
+  Returns `true` when the profile has capacity for one more dispatch.
+
+  When `cap` is `nil`, the profile has no per-profile cap and capacity is always
+  considered available (the global `agent.max_concurrent_agents` cap still
+  applies upstream).
+
+  When `cap` is a positive integer, returns `true` only if the current
+  running-count for `profile_name` is strictly less than `cap`.
+  """
+  @spec profile_capacity_available?(State.t(), String.t(), pos_integer() | nil) :: boolean()
+  def profile_capacity_available?(_state, _profile_name, nil), do: true
+
+  def profile_capacity_available?(%State{} = state, profile_name, cap)
+      when is_binary(profile_name) and is_integer(cap) and cap > 0 do
+    running_by_profile_count(state, profile_name) < cap
   end
 
   @impl true
