@@ -220,10 +220,6 @@ defmodule SymphonyElixir.CoreTest do
     GenServer.stop(pid)
   end
 
-  test "linear issue state reconciliation fetch with no running issues is a no-op" do
-    assert {:ok, []} = Client.fetch_issue_states_by_ids([])
-  end
-
   test "non-active issue state stops running agent without cleaning workspace" do
     test_root =
       Path.join(
@@ -759,10 +755,6 @@ defmodule SymphonyElixir.CoreTest do
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
-
-  test "fetch issues by states with empty state set is a no-op" do
-    assert {:ok, []} = Client.fetch_issues_by_states([])
-  end
 
   test "prompt builder renders issue and attempt values from workflow template" do
     workflow_prompt =

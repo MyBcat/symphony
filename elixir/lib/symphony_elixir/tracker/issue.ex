@@ -1,6 +1,10 @@
-defmodule SymphonyElixir.Linear.Issue do
+defmodule SymphonyElixir.Tracker.Issue do
   @moduledoc """
-  Normalized Linear issue representation used by the orchestrator.
+  Normalized tracker issue representation used by the orchestrator and agent
+  runner. Tracker-agnostic — mirrors the prior `Linear.Issue` shape so the
+  orchestrator pipeline and per-issue prompt builder can keep operating on a
+  single struct regardless of which backend (Monday, Linear, Memory, ...) the
+  adapter is talking to.
   """
 
   defstruct [

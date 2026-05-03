@@ -22,9 +22,9 @@ defmodule SymphonyElixir.LiveE2ETest do
   require Logger
 
   alias SymphonyElixir.AgentRunner
-  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Monday.Client
   alias SymphonyElixir.SSH
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Workflow
 
   @moduletag :live_e2e

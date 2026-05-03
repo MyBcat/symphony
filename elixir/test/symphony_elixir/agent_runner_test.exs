@@ -2,7 +2,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.AgentRunner
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Tracker.MemoryMonday
 
   describe "Tracker writes triggered by event stream" do

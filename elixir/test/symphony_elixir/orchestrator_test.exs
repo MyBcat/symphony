@@ -3,8 +3,8 @@ defmodule SymphonyElixir.OrchestratorTest do
 
   import ExUnit.CaptureLog
 
-  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Tracker.MemoryMonday
   alias SymphonyElixir.Workflow
 
