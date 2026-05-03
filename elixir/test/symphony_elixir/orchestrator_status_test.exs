@@ -1389,7 +1389,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {"item/fileChange/outputDelta", %{"params" => %{"outputDelta" => "changed"}}, "file change output streaming"},
       {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}}, "command approval requested (git status)"},
       {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}}, "file change approval requested (2 files)"},
-      {"item/tool/call", %{"params" => %{"tool" => "linear_graphql"}}, "dynamic tool call requested (linear_graphql)"},
+      {"item/tool/call", %{"params" => %{"tool" => "legacy_tracker_graphql"}}, "dynamic tool call requested (legacy_tracker_graphql)"},
       {"item/tool/requestUserInput", %{"params" => %{"question" => "Continue?"}}, "tool requires user input: Continue?"}
     ]
 
@@ -1407,14 +1407,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     completed = %{
       event: :tool_call_completed,
       message: %{
-        payload: %{"method" => "item/tool/call", "params" => %{"name" => "linear_graphql"}}
+        payload: %{"method" => "item/tool/call", "params" => %{"name" => "legacy_tracker_graphql"}}
       }
     }
 
     failed = %{
       event: :tool_call_failed,
       message: %{
-        payload: %{"method" => "item/tool/call", "params" => %{"tool" => "linear_graphql"}}
+        payload: %{"method" => "item/tool/call", "params" => %{"tool" => "legacy_tracker_graphql"}}
       }
     }
 
@@ -1426,10 +1426,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     assert StatusDashboard.humanize_codex_message(completed) =~
-             "dynamic tool call completed (linear_graphql)"
+             "dynamic tool call completed (legacy_tracker_graphql)"
 
     assert StatusDashboard.humanize_codex_message(failed) =~
-             "dynamic tool call failed (linear_graphql)"
+             "dynamic tool call failed (legacy_tracker_graphql)"
 
     assert StatusDashboard.humanize_codex_message(unsupported) =~
              "unsupported dynamic tool call rejected (unknown_tool)"

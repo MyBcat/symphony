@@ -4,6 +4,52 @@ defmodule SymphonyElixir.Monday.AdapterTest do
   alias SymphonyElixir.Monday.Adapter
 
   defmodule FakeMondayClient do
+    def graphql(query, vars, _opts) do
+      send(self_pid(), {:graphql, query, vars})
+
+      cond do
+        query =~ "SymphonyItemsByIds" ->
+          {:ok,
+           %{
+             "data" => %{
+               "items" => [raw_item()]
+             }
+           }}
+
+        true ->
+          {:ok,
+           %{
+             "data" => %{
+               "boards" => [
+                 %{
+                   "items_page" => %{
+                     "cursor" => nil,
+                     "items" => [raw_item()]
+                   }
+                 }
+               ]
+             }
+           }}
+      end
+    end
+
+    defp raw_item do
+      %{
+        "id" => "9482736152",
+        "name" => "Fix bug",
+        "url" => "https://example.com",
+        "created_at" => "2026-05-01T00:00:00Z",
+        "updated_at" => "2026-05-03T00:00:00Z",
+        "column_values" => [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+        ]
+      }
+    end
+
+    defp self_pid, do: Process.get(:test_pid)
+  end
+
+  defmodule PHIClient do
     def graphql(_query, _vars, _opts) do
       {:ok,
        %{
@@ -15,7 +61,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
                  "items" => [
                    %{
                      "id" => "9482736152",
-                     "name" => "Fix bug",
+                     "name" => "Patient John Smith needs follow-up",
                      "url" => "https://example.com",
                      "created_at" => "2026-05-01T00:00:00Z",
                      "updated_at" => "2026-05-03T00:00:00Z",
@@ -33,6 +79,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
   end
 
   setup do
+    Process.put(:test_pid, self())
     Application.put_env(:symphony_elixir, :monday_client_module, FakeMondayClient)
     on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
 
@@ -63,8 +110,31 @@ defmodule SymphonyElixir.Monday.AdapterTest do
 
   test "fetch_candidate_issues returns normalized items in active and handoff states" do
     assert {:ok, [item]} = Adapter.fetch_candidate_issues()
+    assert %SymphonyElixir.Tracker.Issue{} = item
     assert item.identifier == "SYM-9482736152"
     assert item.state == "Symphony Ready"
+
+    assert_received {:graphql, query,
+                     %{
+                       "statusColumnId" => "symphony_status_xyz",
+                       "states" => ["Symphony Ready", "In Progress", "Rework", "Human Review", "Merging"]
+                     }}
+
+    assert query =~ "query_params"
+  end
+
+  test "fetch_issue_states_by_ids returns normalized items for revalidation" do
+    assert {:ok, [item]} = Adapter.fetch_issue_states_by_ids(["9482736152"])
+    assert %SymphonyElixir.Tracker.Issue{} = item
+    assert item.id == "9482736152"
+    assert_received {:graphql, query, %{"itemIds" => ["9482736152"]}}
+    assert query =~ "SymphonyItemsByIds"
+  end
+
+  test "fetch_candidate_issues rejects PHI items without returning PHI findings" do
+    Application.put_env(:symphony_elixir, :monday_client_module, PHIClient)
+
+    assert {:error, {:phi_detected, "9482736152"}} = Adapter.fetch_candidate_issues()
   end
 
   describe "write paths" do
@@ -153,6 +223,17 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     setup do
       Process.put(:test_pid, self())
       Application.put_env(:symphony_elixir, :monday_client_module, HeartbeatClient)
+      previous_instance_id = Application.get_env(:symphony_elixir, :instance_id)
+      Application.put_env(:symphony_elixir, :instance_id, "test-instance")
+
+      on_exit(fn ->
+        if is_nil(previous_instance_id) do
+          Application.delete_env(:symphony_elixir, :instance_id)
+        else
+          Application.put_env(:symphony_elixir, :instance_id, previous_instance_id)
+        end
+      end)
+
       on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
       :ok
     end
@@ -174,6 +255,61 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       # No existing heartbeat → no-op (no edit_update mutation)
       assert_received {:graphql, q1, _}
       assert q1 =~ "items"
+    end
+  end
+
+  describe "heartbeat conflict detection" do
+    defmodule ConflictingHeartbeatClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "items" and query =~ "updates" ->
+            body = "## Symphony Heartbeat\n\ninstance_id: other-instance\ntimestamp: #{DateTime.utc_now() |> DateTime.to_iso8601()}\n"
+            {:ok, %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-other", "body" => body}]}]}}}
+
+          query =~ "edit_update" ->
+            {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, ConflictingHeartbeatClient)
+      previous_instance_id = Application.get_env(:symphony_elixir, :instance_id)
+      Application.put_env(:symphony_elixir, :instance_id, "test-instance")
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :monday_client_module)
+
+        if is_nil(previous_instance_id) do
+          Application.delete_env(:symphony_elixir, :instance_id)
+        else
+          Application.put_env(:symphony_elixir, :instance_id, previous_instance_id)
+        end
+      end)
+
+      :ok
+    end
+
+    test "acquire_heartbeat fails cleanly when a fresh heartbeat belongs to another instance" do
+      assert {:error, {:lock_held_by_other, "other-instance", timestamp}} = Adapter.acquire_heartbeat()
+      assert is_binary(timestamp)
+      assert_received {:graphql, q1, _}
+      assert q1 =~ "updates"
+
+      {:messages, messages} = Process.info(self(), :messages)
+
+      refute Enum.any?(messages, fn
+               {:graphql, query, _vars} -> query =~ "edit_update"
+               _ -> false
+             end)
     end
   end
 end

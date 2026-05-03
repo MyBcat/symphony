@@ -91,14 +91,17 @@ defmodule SymphonyElixir.TestSupport do
     config =
       Keyword.merge(
         [
-          tracker_kind: "linear",
-          tracker_endpoint: "https://api.linear.app/graphql",
+          tracker_kind: "monday",
+          tracker_endpoint: "https://api.monday.com/v2",
           tracker_api_token: "token",
-          tracker_project_slug: "project",
-          tracker_assignee: nil,
-          tracker_active_states: ["Todo", "In Progress"],
+          tracker_board_id: 123_456_789,
+          tracker_identifier_prefix: "SYM",
+          tracker_status_column_id: "symphony_status",
+          tracker_pr_column_id: "pr_link",
+          tracker_heartbeat_item_id: 987_654_321,
+          tracker_active_states: ["Symphony Ready", "In Progress", "Rework"],
           tracker_handoff_states: ["Human Review", "Merging"],
-          tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
+          tracker_terminal_states: ["Done", "Cancelled"],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
@@ -132,8 +135,11 @@ defmodule SymphonyElixir.TestSupport do
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
-    tracker_project_slug = Keyword.get(config, :tracker_project_slug)
-    tracker_assignee = Keyword.get(config, :tracker_assignee)
+    tracker_board_id = Keyword.get(config, :tracker_board_id)
+    tracker_identifier_prefix = Keyword.get(config, :tracker_identifier_prefix)
+    tracker_status_column_id = Keyword.get(config, :tracker_status_column_id)
+    tracker_pr_column_id = Keyword.get(config, :tracker_pr_column_id)
+    tracker_heartbeat_item_id = Keyword.get(config, :tracker_heartbeat_item_id)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_handoff_states = Keyword.get(config, :tracker_handoff_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
@@ -170,9 +176,12 @@ defmodule SymphonyElixir.TestSupport do
         "tracker:",
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
-        "  api_key: #{yaml_value(tracker_api_token)}",
-        "  project_slug: #{yaml_value(tracker_project_slug)}",
-        "  assignee: #{yaml_value(tracker_assignee)}",
+        "  api_token: #{yaml_value(tracker_api_token)}",
+        "  board_id: #{yaml_value(tracker_board_id)}",
+        "  identifier_prefix: #{yaml_value(tracker_identifier_prefix)}",
+        "  symphony_status_column_id: #{yaml_value(tracker_status_column_id)}",
+        "  pr_column_id: #{yaml_value(tracker_pr_column_id)}",
+        "  heartbeat_item_id: #{yaml_value(tracker_heartbeat_item_id)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  handoff_states: #{yaml_value(tracker_handoff_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",

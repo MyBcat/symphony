@@ -80,9 +80,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, state}
 
       {:error, reason} ->
-        Logger.error(
-          "Orchestrator unable to acquire tracker heartbeat lock: #{inspect(reason)}; refusing to start"
-        )
+        Logger.error("Orchestrator unable to acquire tracker heartbeat lock: #{inspect(reason)}; refusing to start")
 
         {:stop, :heartbeat_unavailable}
     end
@@ -96,17 +94,13 @@ defmodule SymphonyElixir.Orchestrator do
           :ok
 
         {:error, reason} ->
-          Logger.warning(
-            "Orchestrator failed to release tracker heartbeat lock: #{inspect(reason)}"
-          )
+          Logger.warning("Orchestrator failed to release tracker heartbeat lock: #{inspect(reason)}")
 
           :ok
       end
     catch
       kind, reason ->
-        Logger.warning(
-          "Orchestrator terminate could not release tracker heartbeat lock: #{inspect(kind)} #{inspect(reason)}"
-        )
+        Logger.warning("Orchestrator terminate could not release tracker heartbeat lock: #{inspect(kind)} #{inspect(reason)}")
 
         :ok
     end
@@ -272,9 +266,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
 
         {:error, reason} ->
-          Logger.warning(
-            "Orchestrator failed to refresh tracker heartbeat lock: #{inspect(reason)}; will retry on next interval"
-          )
+          Logger.warning("Orchestrator failed to refresh tracker heartbeat lock: #{inspect(reason)}; will retry on next interval")
 
           state
       end
@@ -295,12 +287,20 @@ defmodule SymphonyElixir.Orchestrator do
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Tracker API token missing in WORKFLOW.md")
+      {:error, :missing_monday_api_token} ->
+        Logger.error("Monday API token missing in WORKFLOW.md")
         state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Tracker project slug missing in WORKFLOW.md")
+      {:error, :missing_monday_board_id} ->
+        Logger.error("Monday board_id missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_monday_status_column} ->
+        Logger.error("Monday symphony_status_column_id missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_monday_heartbeat_item_id} ->
+        Logger.error("Monday heartbeat_item_id missing in WORKFLOW.md")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -614,9 +614,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_binary(issue_state) do
     if MapSet.member?(claimed, issue_id) and not Map.has_key?(running, issue_id) and
          active_issue_state?(issue_state, active_states) do
-      Logger.debug(
-        "Releasing stale handoff claim now that issue is active: issue_id=#{issue_id} state=#{issue_state}"
-      )
+      Logger.debug("Releasing stale handoff claim now that issue is active: issue_id=#{issue_id} state=#{issue_state}")
 
       %{state | claimed: MapSet.delete(claimed, issue_id)}
     else
@@ -647,9 +645,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp claim_handoff_issue(%State{} = state, %Issue{id: issue_id} = issue)
        when is_binary(issue_id) do
-    Logger.debug(
-      "Claiming handoff issue without dispatch: #{issue_context(issue)} state=#{issue.state}"
-    )
+    Logger.debug("Claiming handoff issue without dispatch: #{issue_context(issue)} state=#{issue.state}")
 
     %{state | claimed: MapSet.put(state.claimed, issue_id)}
   end
@@ -822,9 +818,7 @@ defmodule SymphonyElixir.Orchestrator do
         do_dispatch_issue_after_phi(state, issue, attempt, preferred_worker_host)
 
       {:error, reason} ->
-        Logger.error(
-          "PHI detected in tracker item; skipping dispatch (operator must redact): #{issue_context(issue)} reason=#{inspect(reason)}"
-        )
+        Logger.error("PHI detected in tracker item; skipping dispatch (operator must redact): #{issue_context(issue)} reason=#{inspect(reason)}")
 
         state
     end
@@ -938,18 +932,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_stranded_ttl(%State{} = state, issue_id, count, reason)
        when is_binary(issue_id) and is_integer(count) and is_binary(reason) do
-    Logger.warning(
-      "Stranded item TTL reached for issue_id=#{issue_id} consecutive_failures=#{count}; cancelling and posting failure update"
-    )
+    Logger.warning("Stranded item TTL reached for issue_id=#{issue_id} consecutive_failures=#{count}; cancelling and posting failure update")
 
     case Tracker.update_issue_state(issue_id, "Cancelled") do
       :ok ->
         :ok
 
       {:error, status_reason} ->
-        Logger.error(
-          "Tracker failed to mark stranded issue as Cancelled: issue_id=#{issue_id} reason=#{inspect(status_reason)}"
-        )
+        Logger.error("Tracker failed to mark stranded issue as Cancelled: issue_id=#{issue_id} reason=#{inspect(status_reason)}")
     end
 
     body = "Stranded after #{count} consecutive failures: #{reason}"
@@ -959,9 +949,7 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
 
       {:error, post_reason} ->
-        Logger.error(
-          "Tracker failed to post stranded failure update: issue_id=#{issue_id} reason=#{inspect(post_reason)}"
-        )
+        Logger.error("Tracker failed to post stranded failure update: issue_id=#{issue_id} reason=#{inspect(post_reason)}")
     end
 
     state =

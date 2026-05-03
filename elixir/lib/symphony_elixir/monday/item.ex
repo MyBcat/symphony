@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Monday.Item do
   """
 
   alias SymphonyElixir.Monday.PHIDetector
+  alias SymphonyElixir.Tracker.Issue
 
   @type config :: %{
           identifier_prefix: String.t(),
@@ -20,20 +21,7 @@ defmodule SymphonyElixir.Monday.Item do
           labels_column_id: String.t() | nil
         }
 
-  @type t :: %{
-          id: String.t(),
-          identifier: String.t(),
-          title: String.t(),
-          description: String.t() | nil,
-          priority: integer() | nil,
-          state: String.t(),
-          branch_name: String.t(),
-          url: String.t() | nil,
-          labels: [String.t()],
-          blocked_by: [map()],
-          created_at: String.t() | nil,
-          updated_at: String.t() | nil
-        }
+  @type t :: Issue.t()
 
   @spec from_monday(map(), config()) ::
           {:ok, t()} | {:error, {:missing_column, String.t()} | {:phi_detected, [PHIDetector.finding()]}}
@@ -46,7 +34,7 @@ defmodule SymphonyElixir.Monday.Item do
          {:ok, state} <- require_column_text(raw, config.symphony_status_column_id) do
       identifier = "#{config.identifier_prefix}-#{raw["id"]}"
 
-      item = %{
+      item = %Issue{
         id: raw["id"],
         identifier: identifier,
         title: title,
@@ -57,8 +45,8 @@ defmodule SymphonyElixir.Monday.Item do
         url: Map.get(raw, "url"),
         labels: labels_value(raw, config[:labels_column_id]),
         blocked_by: [],
-        created_at: Map.get(raw, "created_at"),
-        updated_at: Map.get(raw, "updated_at")
+        created_at: parse_datetime(Map.get(raw, "created_at")),
+        updated_at: parse_datetime(Map.get(raw, "updated_at"))
       }
 
       {:ok, item}
@@ -116,4 +104,13 @@ defmodule SymphonyElixir.Monday.Item do
       text -> text |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.downcase/1)
     end
   end
+
+  defp parse_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
+  defp parse_datetime(_value), do: nil
 end

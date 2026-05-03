@@ -9,9 +9,15 @@ defmodule SymphonyElixir.Monday.Adapter do
   alias SymphonyElixir.Monday.{Client, Item, PHIDetector}
 
   @items_page_query """
-  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!]) {
+  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!], $statusColumnId: String!, $states: [String!]) {
     boards(ids: [$boardId]) {
-      items_page(limit: 100) {
+      items_page(
+        limit: 100,
+        query_params: {
+          rules: [{column_id: $statusColumnId, compare_value: $states, operator: any_of}],
+          operator: and
+        }
+      ) {
         cursor
         items {
           id
@@ -24,6 +30,22 @@ defmodule SymphonyElixir.Monday.Adapter do
             text
           }
         }
+      }
+    }
+  }
+  """
+
+  @items_by_ids_query """
+  query SymphonyItemsByIds($itemIds: [ID!], $columnIds: [String!]) {
+    items(ids: $itemIds) {
+      id
+      name
+      url
+      created_at
+      updated_at
+      column_values(ids: $columnIds) {
+        id
+        text
       }
     }
   }
@@ -80,24 +102,53 @@ defmodule SymphonyElixir.Monday.Adapter do
   def fetch_issues_by_states(states), do: fetch_issues_filtered(tracker_config(), states)
 
   @impl true
-  def fetch_issue_states_by_ids(_ids) do
-    # In v1, used only for reconciliation — same path as candidates filtered by id list.
-    # Implementing agent: extend with a separate `items` query if performance demands.
-    {:ok, []}
+  def fetch_issue_states_by_ids(ids) when is_list(ids) do
+    item_ids = Enum.filter(ids, &is_binary/1)
+
+    if item_ids == [] do
+      {:ok, []}
+    else
+      cfg = tracker_config()
+      column_ids = collect_column_ids(cfg)
+
+      case client_module().graphql(@items_by_ids_query, %{"itemIds" => item_ids, "columnIds" => column_ids}, []) do
+        {:ok, %{"data" => %{"items" => raw_items}}} ->
+          normalize_items(raw_items, cfg, :all)
+
+        {:error, _} = err ->
+          err
+
+        other ->
+          {:error, {:unexpected_response, other}}
+      end
+    end
   end
+
+  def fetch_issue_states_by_ids(_ids), do: {:ok, []}
 
   defp fetch_issues_filtered(cfg, allowed_states) do
     column_ids = collect_column_ids(cfg)
 
-    case client_module().graphql(@items_page_query, %{"boardId" => cfg.board_id, "columnIds" => column_ids}, []) do
-      {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
-        normalize_items(raw_items, cfg, allowed_states)
+    if allowed_states == [] do
+      {:ok, []}
+    else
+      variables = %{
+        "boardId" => cfg.board_id,
+        "columnIds" => column_ids,
+        "statusColumnId" => cfg.symphony_status_column_id,
+        "states" => allowed_states
+      }
 
-      {:error, _} = err ->
-        err
+      case client_module().graphql(@items_page_query, variables, []) do
+        {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
+          normalize_items(raw_items, cfg, allowed_states)
 
-      other ->
-        {:error, {:unexpected_response, other}}
+        {:error, _} = err ->
+          err
+
+        other ->
+          {:error, {:unexpected_response, other}}
+      end
     end
   end
 
@@ -115,17 +166,33 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   defp normalize_items(raw_items, cfg, allowed_states) do
     raw_items
-    |> Enum.map(&Item.from_monday(&1, cfg))
-    |> Enum.reduce([], &keep_allowed(&1, &2, allowed_states))
-    |> Enum.reverse()
-    |> then(&{:ok, &1})
+    |> Enum.reduce_while([], fn raw_item, acc ->
+      case Item.from_monday(raw_item, cfg) do
+        {:ok, item} ->
+          if item_allowed?(item, allowed_states) do
+            {:cont, [item | acc]}
+          else
+            {:cont, acc}
+          end
+
+        {:error, {:phi_detected, _findings}} ->
+          {:halt, {:error, {:phi_detected, Map.get(raw_item, "id")}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:error, _reason} = err -> err
+      items -> {:ok, Enum.reverse(items)}
+    end
   end
 
-  defp keep_allowed({:ok, item}, acc, allowed_states) do
-    if item.state in allowed_states, do: [item | acc], else: acc
-  end
+  defp item_allowed?(_item, :all), do: true
 
-  defp keep_allowed({:error, _reason}, acc, _allowed_states), do: acc
+  defp item_allowed?(item, allowed_states) do
+    item.state in allowed_states
+  end
 
   # Write paths (Tracker primitive owns these per DL-005).
   @impl true
@@ -187,11 +254,14 @@ defmodule SymphonyElixir.Monday.Adapter do
       {:ok, nil} ->
         create_marked_update(cfg.heartbeat_item_id, full_body)
 
-      {:ok, update_id} ->
-        # v1 simple lock: existing heartbeat present → assume our own (single-instance assumption per Spec 1).
-        # Future hardening (deferred): read body, parse instance_id + timestamp; if different instance AND fresh
-        # within heartbeat_ttl_ms → return {:error, :lock_held_by_other}; else refresh.
-        edit_existing_update(update_id, full_body)
+      {:ok, %{"id" => update_id, "body" => existing_body}} ->
+        case heartbeat_acquire_decision(existing_body, instance_id, cfg.heartbeat_ttl_ms) do
+          :refresh ->
+            edit_existing_update(update_id, full_body)
+
+          {:conflict, other_instance_id, timestamp} ->
+            {:error, {:lock_held_by_other, other_instance_id, timestamp}}
+        end
 
       {:error, :ambiguous} ->
         {:error, :ambiguous_heartbeat}
@@ -206,9 +276,18 @@ defmodule SymphonyElixir.Monday.Adapter do
     cfg = tracker_config()
 
     case find_update_by_marker(cfg.heartbeat_item_id, @heartbeat_marker) do
-      {:ok, nil} -> :ok
-      {:ok, update_id} -> edit_existing_update(update_id, "#{@heartbeat_marker}\n\nreleased\n")
-      {:error, _} = err -> err
+      {:ok, nil} ->
+        :ok
+
+      {:ok, %{"id" => update_id, "body" => existing_body}} ->
+        if heartbeat_releasable?(existing_body, instance_id()) do
+          edit_existing_update(update_id, "#{@heartbeat_marker}\n\nreleased\n")
+        else
+          :ok
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -221,18 +300,18 @@ defmodule SymphonyElixir.Monday.Adapter do
       :clean ->
         case PHIDetector.scan(description) do
           :clean -> :ok
-          {:phi, findings} -> {:error, {:phi_in_description, findings}}
+          {:phi, _findings} -> {:error, :phi_in_description}
         end
 
-      {:phi, findings} ->
-        {:error, {:phi_in_title, findings}}
+      {:phi, _findings} ->
+        {:error, :phi_in_title}
     end
   end
 
   defp upsert_marked_update(item_id, marker, body) do
     case find_update_by_marker(item_id, marker) do
       {:ok, nil} -> create_marked_update(item_id, body)
-      {:ok, update_id} -> edit_existing_update(update_id, body)
+      {:ok, %{"id" => update_id}} -> edit_existing_update(update_id, body)
       {:error, :ambiguous} -> {:error, :ambiguous_workpad}
       {:error, _} = err -> err
     end
@@ -245,9 +324,12 @@ defmodule SymphonyElixir.Monday.Adapter do
 
         case matches do
           [] -> {:ok, nil}
-          [single] -> {:ok, single["id"]}
+          [single] -> {:ok, single}
           _multiple -> {:error, :ambiguous}
         end
+
+      {:ok, %{"data" => %{"items" => []}}} ->
+        {:error, :sentinel_missing}
 
       {:error, _} = err ->
         err
@@ -301,6 +383,69 @@ defmodule SymphonyElixir.Monday.Adapter do
     ts = DateTime.utc_now() |> DateTime.to_iso8601()
     "instance_id: #{instance_id}\ntimestamp: #{ts}\n"
   end
+
+  defp heartbeat_acquire_decision(existing_body, current_instance_id, ttl_ms) do
+    heartbeat = parse_heartbeat(existing_body)
+
+    cond do
+      heartbeat.released? ->
+        :refresh
+
+      heartbeat.instance_id in [nil, ""] ->
+        :refresh
+
+      heartbeat.instance_id == current_instance_id ->
+        :refresh
+
+      heartbeat_fresh?(heartbeat.timestamp, ttl_ms) ->
+        {:conflict, heartbeat.instance_id, DateTime.to_iso8601(heartbeat.timestamp)}
+
+      true ->
+        :refresh
+    end
+  end
+
+  defp heartbeat_releasable?(existing_body, current_instance_id) do
+    heartbeat = parse_heartbeat(existing_body)
+
+    heartbeat.instance_id in [nil, "", current_instance_id]
+  end
+
+  defp heartbeat_fresh?(%DateTime{} = timestamp, ttl_ms) when is_integer(ttl_ms) and ttl_ms > 0 do
+    DateTime.diff(DateTime.utc_now(), timestamp, :millisecond) < ttl_ms
+  end
+
+  defp heartbeat_fresh?(_timestamp, _ttl_ms), do: false
+
+  defp parse_heartbeat(body) when is_binary(body) do
+    %{
+      released?: String.contains?(body, "released"),
+      instance_id: heartbeat_field(body, "instance_id"),
+      timestamp: parse_heartbeat_timestamp(heartbeat_field(body, "timestamp"))
+    }
+  end
+
+  defp parse_heartbeat(_body), do: %{released?: false, instance_id: nil, timestamp: nil}
+
+  defp heartbeat_field(body, field_name) do
+    body
+    |> String.split("\n")
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [^field_name, value] -> String.trim(value)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp parse_heartbeat_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, timestamp, _offset} -> timestamp
+      _ -> nil
+    end
+  end
+
+  defp parse_heartbeat_timestamp(_value), do: nil
 
   defp instance_id do
     case Application.get_env(:symphony_elixir, :instance_id) do
