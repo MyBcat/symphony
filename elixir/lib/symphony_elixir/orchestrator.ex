@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls the configured tracker and dispatches repository copies to
+  Codex-backed workers.
   """
 
   use GenServer
@@ -8,7 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -33,10 +34,13 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :heartbeat_ttl_ms,
+      :heartbeat_timer_ref,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      failure_counts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -52,6 +56,7 @@ defmodule SymphonyElixir.Orchestrator do
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
+    heartbeat_ttl_ms = config.tracker.heartbeat_ttl_ms
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -60,14 +65,45 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      heartbeat_ttl_ms: heartbeat_ttl_ms,
+      heartbeat_timer_ref: nil,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
 
-    run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+    case Tracker.acquire_heartbeat() do
+      :ok ->
+        Process.flag(:trap_exit, true)
+        state = schedule_heartbeat_refresh(state)
+        run_terminal_workspace_cleanup()
+        state = schedule_tick(state, 0)
+        {:ok, state}
 
-    {:ok, state}
+      {:error, reason} ->
+        Logger.error("Orchestrator unable to acquire tracker heartbeat lock: #{inspect(reason)}; refusing to start")
+
+        {:stop, :heartbeat_unavailable}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    try do
+      case Tracker.release_heartbeat() do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Orchestrator failed to release tracker heartbeat lock: #{inspect(reason)}")
+
+          :ok
+      end
+    catch
+      kind, reason ->
+        Logger.warning("Orchestrator terminate could not release tracker heartbeat lock: #{inspect(kind)} #{inspect(reason)}")
+
+        :ok
+    end
   end
 
   @impl true
@@ -147,13 +183,20 @@ defmodule SymphonyElixir.Orchestrator do
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
+              reason_summary = "agent exited: #{inspect(reason)}"
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
+              case record_dispatch_failure(state, issue_id, reason_summary) do
+                {:stranded, state} ->
+                  state
+
+                {:continue, state} ->
+                  schedule_issue_retry(state, issue_id, next_attempt, %{
+                    identifier: running_entry.identifier,
+                    error: reason_summary,
+                    worker_host: Map.get(running_entry, :worker_host),
+                    workspace_path: Map.get(running_entry, :workspace_path)
+                  })
+              end
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -216,6 +259,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  def handle_info(:heartbeat_refresh, state) do
+    state =
+      case Tracker.acquire_heartbeat() do
+        :ok ->
+          state
+
+        {:error, reason} ->
+          Logger.warning("Orchestrator failed to refresh tracker heartbeat lock: #{inspect(reason)}; will retry on next interval")
+
+          state
+      end
+
+    {:noreply, schedule_heartbeat_refresh(state)}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -229,12 +287,20 @@ defmodule SymphonyElixir.Orchestrator do
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
+      {:error, :missing_monday_api_token} ->
+        Logger.error("Monday API token missing in WORKFLOW.md")
         state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
+      {:error, :missing_monday_board_id} ->
+        Logger.error("Monday board_id missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_monday_status_column} ->
+        Logger.error("Monday symphony_status_column_id missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_monday_heartbeat_item_id} ->
+        Logger.error("Monday heartbeat_item_id missing in WORKFLOW.md")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -264,7 +330,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
 
       false ->
@@ -519,17 +585,78 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    handoff_states = handoff_state_set()
 
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
+      state_acc =
+        maybe_release_stale_handoff_claim(state_acc, issue, active_states)
+
+      cond do
+        should_dispatch_issue?(issue, state_acc, active_states, terminal_states) ->
+          dispatch_issue(state_acc, issue)
+
+        handoff_only_issue?(issue, state_acc, active_states, handoff_states, terminal_states) ->
+          claim_handoff_issue(state_acc, issue)
+
+        true ->
+          state_acc
       end
     end)
   end
+
+  defp maybe_release_stale_handoff_claim(
+         %State{running: running, claimed: claimed} = state,
+         %Issue{id: issue_id, state: issue_state},
+         active_states
+       )
+       when is_binary(issue_id) and is_binary(issue_state) do
+    if MapSet.member?(claimed, issue_id) and not Map.has_key?(running, issue_id) and
+         active_issue_state?(issue_state, active_states) do
+      Logger.debug("Releasing stale handoff claim now that issue is active: issue_id=#{issue_id} state=#{issue_state}")
+
+      %{state | claimed: MapSet.delete(claimed, issue_id)}
+    else
+      state
+    end
+  end
+
+  defp maybe_release_stale_handoff_claim(state, _issue, _active_states), do: state
+
+  defp handoff_only_issue?(
+         %Issue{} = issue,
+         %State{running: running, claimed: claimed},
+         active_states,
+         handoff_states,
+         terminal_states
+       ) do
+    is_binary(issue.id) and
+      issue_routable_to_worker?(issue) and
+      handoff_issue_state?(issue.state, handoff_states) and
+      !active_issue_state?(issue.state, active_states) and
+      !terminal_issue_state?(issue.state, terminal_states) and
+      !MapSet.member?(claimed, issue.id) and
+      !Map.has_key?(running, issue.id)
+  end
+
+  defp handoff_only_issue?(_issue, _state, _active_states, _handoff_states, _terminal_states),
+    do: false
+
+  defp claim_handoff_issue(%State{} = state, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
+    Logger.debug("Claiming handoff issue without dispatch: #{issue_context(issue)} state=#{issue.state}")
+
+    %{state | claimed: MapSet.put(state.claimed, issue_id)}
+  end
+
+  defp claim_handoff_issue(state, _issue), do: state
+
+  defp handoff_issue_state?(state_name, handoff_states) when is_binary(state_name) do
+    MapSet.member?(handoff_states, normalize_issue_state(state_name))
+  end
+
+  defp handoff_issue_state?(_state_name, _handoff_states), do: false
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
@@ -657,6 +784,14 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
+  defp handoff_state_set do
+    Config.settings!().tracker.handoff_states
+    |> List.wrap()
+    |> Enum.map(&normalize_issue_state/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
+  end
+
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
@@ -678,6 +813,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+    case Tracker.validate_no_phi(issue) do
+      :ok ->
+        do_dispatch_issue_after_phi(state, issue, attempt, preferred_worker_host)
+
+      {:error, reason} ->
+        Logger.error("PHI detected in tracker item; skipping dispatch (operator must redact): #{issue_context(issue)} reason=#{inspect(reason)}")
+
+        state
+    end
+  end
+
+  defp do_dispatch_issue_after_phi(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -727,18 +874,99 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            retry_attempts: Map.delete(state.retry_attempts, issue.id),
+            failure_counts: Map.delete(state.failure_counts, issue.id)
         }
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
+        reason_summary = "failed to spawn agent: #{inspect(reason)}"
 
-        schedule_issue_retry(state, issue.id, next_attempt, %{
-          identifier: issue.identifier,
-          error: "failed to spawn agent: #{inspect(reason)}",
-          worker_host: worker_host
-        })
+        case record_dispatch_failure(state, issue.id, reason_summary) do
+          {:stranded, state} ->
+            state
+
+          {:continue, state} ->
+            schedule_issue_retry(state, issue.id, next_attempt, %{
+              identifier: issue.identifier,
+              error: reason_summary,
+              worker_host: worker_host
+            })
+        end
+    end
+  end
+
+  @doc false
+  @spec record_dispatch_failure_for_test(term(), String.t(), String.t()) ::
+          {:stranded, term()} | {:continue, term()}
+  def record_dispatch_failure_for_test(%State{} = state, issue_id, reason)
+      when is_binary(issue_id) and is_binary(reason) do
+    record_dispatch_failure(state, issue_id, reason)
+  end
+
+  defp record_dispatch_failure(%State{} = state, issue_id, reason)
+       when is_binary(issue_id) and is_binary(reason) do
+    threshold = failure_ttl_count()
+    previous = Map.get(state.failure_counts, issue_id, %{count: 0, last_reason: nil})
+    next_count = previous.count + 1
+
+    state =
+      %{
+        state
+        | failure_counts:
+            Map.put(state.failure_counts, issue_id, %{
+              count: next_count,
+              last_reason: reason
+            })
+      }
+
+    if is_integer(threshold) and threshold > 0 and next_count >= threshold do
+      apply_stranded_ttl(state, issue_id, next_count, reason)
+    else
+      {:continue, state}
+    end
+  end
+
+  defp record_dispatch_failure(state, _issue_id, _reason), do: {:continue, state}
+
+  defp apply_stranded_ttl(%State{} = state, issue_id, count, reason)
+       when is_binary(issue_id) and is_integer(count) and is_binary(reason) do
+    Logger.warning("Stranded item TTL reached for issue_id=#{issue_id} consecutive_failures=#{count}; cancelling and posting failure update")
+
+    case Tracker.update_issue_state(issue_id, "Cancelled") do
+      :ok ->
+        :ok
+
+      {:error, status_reason} ->
+        Logger.error("Tracker failed to mark stranded issue as Cancelled: issue_id=#{issue_id} reason=#{inspect(status_reason)}")
+    end
+
+    body = "Stranded after #{count} consecutive failures: #{reason}"
+
+    case Tracker.post_failure_update(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, post_reason} ->
+        Logger.error("Tracker failed to post stranded failure update: issue_id=#{issue_id} reason=#{inspect(post_reason)}")
+    end
+
+    state =
+      %{
+        state
+        | claimed: MapSet.delete(state.claimed, issue_id),
+          retry_attempts: Map.delete(state.retry_attempts, issue_id),
+          failure_counts: Map.delete(state.failure_counts, issue_id)
+      }
+
+    {:stranded, state}
+  end
+
+  defp failure_ttl_count do
+    case Config.settings!() do
+      %{tracker: %{failure_ttl_count: count}} when is_integer(count) and count > 0 -> count
+      _ -> 5
     end
   end
 
@@ -1263,6 +1491,19 @@ defmodule SymphonyElixir.Orchestrator do
     :timer.send_after(@poll_transition_render_delay_ms, self(), :run_poll_cycle)
     :ok
   end
+
+  defp schedule_heartbeat_refresh(%State{heartbeat_ttl_ms: ttl_ms} = state)
+       when is_integer(ttl_ms) and ttl_ms > 0 do
+    if is_reference(state.heartbeat_timer_ref) do
+      Process.cancel_timer(state.heartbeat_timer_ref)
+    end
+
+    delay_ms = max(div(ttl_ms, 2), 1)
+    timer_ref = Process.send_after(self(), :heartbeat_refresh, delay_ms)
+    %{state | heartbeat_timer_ref: timer_ref}
+  end
+
+  defp schedule_heartbeat_refresh(%State{} = state), do: state
 
   defp next_poll_in_ms(nil, _now_ms), do: nil
 

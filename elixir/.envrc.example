@@ -1,0 +1,1 @@
+export MONDAY_API_TOKEN="$(secret-get mybcat/integrations/api-keys/monday)"

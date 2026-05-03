@@ -46,12 +46,26 @@ defmodule SymphonyElixir.Config.Schema do
 
     embedded_schema do
       field(:kind, :string)
-      field(:endpoint, :string, default: "https://api.linear.app/graphql")
-      field(:api_key, :string)
-      field(:project_slug, :string)
-      field(:assignee, :string)
-      field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
-      field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:endpoint, :string, default: "https://api.monday.com/v2")
+      field(:api_token, :string)
+      field(:board_id, :integer)
+      field(:identifier_prefix, :string, default: "SYM")
+      field(:symphony_status_column_id, :string)
+      field(:profile_column_id, :string)
+      field(:priority_column_id, :string)
+      field(:description_column_id, :string)
+      field(:branch_column_id, :string)
+      field(:labels_column_id, :string)
+      field(:pr_column_id, :string)
+      field(:heartbeat_item_id, :integer)
+      field(:heartbeat_ttl_ms, :integer, default: 60_000)
+      field(:complexity_budget_per_tick, :integer, default: 500)
+      field(:backoff_factor, :float, default: 2.0)
+      field(:max_polling_interval_ms, :integer, default: 60_000)
+      field(:failure_ttl_count, :integer, default: 5)
+      field(:active_states, {:array, :string}, default: ["Symphony Ready", "In Progress", "Rework"])
+      field(:handoff_states, {:array, :string}, default: ["Human Review", "Merging"])
+      field(:terminal_states, {:array, :string}, default: ["Done", "Cancelled"])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -59,10 +73,55 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_token,
+          :board_id,
+          :identifier_prefix,
+          :symphony_status_column_id,
+          :profile_column_id,
+          :priority_column_id,
+          :description_column_id,
+          :branch_column_id,
+          :labels_column_id,
+          :pr_column_id,
+          :heartbeat_item_id,
+          :heartbeat_ttl_ms,
+          :complexity_budget_per_tick,
+          :backoff_factor,
+          :max_polling_interval_ms,
+          :failure_ttl_count,
+          :active_states,
+          :handoff_states,
+          :terminal_states
+        ],
         empty_values: []
       )
+      |> validate_number(:heartbeat_ttl_ms, greater_than: 0)
+      |> validate_number(:complexity_budget_per_tick, greater_than: 0)
+      |> validate_number(:backoff_factor, greater_than: 1.0)
+      |> validate_number(:max_polling_interval_ms, greater_than: 0)
+      |> validate_number(:failure_ttl_count, greater_than: 0)
     end
+  end
+
+  defimpl Inspect, for: SymphonyElixir.Config.Schema.Tracker do
+    @moduledoc false
+
+    def inspect(tracker, opts) do
+      redacted = %{tracker | api_token: redact(tracker.api_token)}
+      Inspect.Any.inspect(redacted, opts)
+    end
+
+    defp redact(nil), do: nil
+    defp redact(""), do: ""
+
+    defp redact(token) when is_binary(token) do
+      "<redacted:#{byte_size(token)}_bytes>"
+    end
+
+    defp redact(other), do: other
   end
 
   defmodule Polling do
@@ -368,8 +427,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+      | api_token: resolve_secret_setting(settings.tracker.api_token, System.get_env("MONDAY_API_TOKEN"))
     }
 
     workspace = %{

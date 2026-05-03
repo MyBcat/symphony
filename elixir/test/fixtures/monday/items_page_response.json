@@ -1,0 +1,24 @@
+{
+  "data": {
+    "boards": [
+      {
+        "items_page": {
+          "cursor": null,
+          "items": [
+            {
+              "id": "9482736152",
+              "name": "Fix tool injection bug",
+              "url": "https://mybcat-squad.monday.com/boards/8173460438/pulses/9482736152",
+              "created_at": "2026-05-01T10:00:00Z",
+              "updated_at": "2026-05-03T08:00:00Z",
+              "column_values": [
+                {"id": "symphony_status_xyz", "text": "Symphony Ready"},
+                {"id": "priority_abc", "text": "High"}
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,522 +1,476 @@
 defmodule SymphonyElixir.LiveE2ETest do
-  use SymphonyElixir.TestSupport
+  @moduledoc """
+  Live end-to-end test against the real Monday.com GraphQL API.
+
+  Lifecycle:
+    1. Create a disposable Monday board (private, named `Symphony E2E <ts>`).
+    2. Create the Symphony columns (`Symphony Status` status; `Symphony PR` link).
+    3. Create a heartbeat sentinel item.
+    4. Write a temporary WORKFLOW.md pointing at the disposable board.
+    5. Boot Symphony with that WORKFLOW.md.
+    6. Create one item with `Symphony Status = Symphony Ready`.
+    7. Wait for the orchestrator to dispatch and verify Symphony-side writes:
+         - Symphony wrote `In Progress` on the status column.
+         - A `## Symphony Workpad` Update appeared on the item.
+    8. Tear down: archive the disposable board.
+
+  Skipped unless `SYMPHONY_RUN_LIVE_E2E=1` AND `MONDAY_API_TOKEN` is set.
+  """
+
+  use ExUnit.Case, async: false
 
   require Logger
+
+  alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.Monday.Client
   alias SymphonyElixir.SSH
+  alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Workflow
 
   @moduletag :live_e2e
-  @moduletag timeout: 300_000
+  @moduletag timeout: 600_000
 
-  @default_team_key "SYME2E"
-  @default_docker_auth_json Path.join(System.user_home!(), ".codex/auth.json")
   @docker_worker_count 2
   @docker_support_dir Path.expand("../support/live_e2e_docker", __DIR__)
   @docker_compose_file Path.join(@docker_support_dir, "docker-compose.yml")
-  @result_file "LIVE_E2E_RESULT.txt"
-  @live_e2e_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1",
-                          do: "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
-                        )
+  @default_docker_auth_json Path.join(System.user_home!(), ".codex/auth.json")
 
-  @team_query """
-  query SymphonyLiveE2ETeam($key: String!) {
-    teams(filter: {key: {eq: $key}}, first: 1) {
-      nodes {
-        id
-        key
-        name
-        states(first: 50) {
-          nodes {
-            id
-            name
-            type
-          }
-        }
-      }
-    }
-  }
-  """
+  @live_e2e_skip_reason (cond do
+                           System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1" ->
+                             "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Monday/Codex end-to-end test"
 
-  @create_project_mutation """
-  mutation SymphonyLiveE2ECreateProject($name: String!, $teamIds: [String!]!) {
-    projectCreate(input: {name: $name, teamIds: $teamIds}) {
-      success
-      project {
-        id
-        name
-        slugId
-        url
-      }
-    }
-  }
-  """
+                           is_nil(System.get_env("MONDAY_API_TOKEN")) or
+                               System.get_env("MONDAY_API_TOKEN") == "" ->
+                             "set MONDAY_API_TOKEN to enable the real Monday/Codex end-to-end test"
 
-  @create_issue_mutation """
-  mutation SymphonyLiveE2ECreateIssue(
-    $teamId: String!
-    $projectId: String!
-    $title: String!
-    $description: String!
-    $stateId: String
-  ) {
-    issueCreate(
-      input: {
-        teamId: $teamId
-        projectId: $projectId
-        title: $title
-        description: $description
-        stateId: $stateId
-      }
-    ) {
-      success
-      issue {
-        id
-        identifier
-        title
-        description
-        url
-        state {
-          name
-        }
-      }
-    }
-  }
-  """
+                           true ->
+                             nil
+                         end)
 
-  @project_statuses_query """
-  query SymphonyLiveE2EProjectStatuses {
-    projectStatuses(first: 50) {
-      nodes {
-        id
-        name
-        type
-      }
-    }
-  }
-  """
+  # --- canonical Symphony status labels (kept aligned with Monday adapter defaults) ---
+  @symphony_status_labels [
+    "Symphony Ready",
+    "In Progress",
+    "Human Review",
+    "Merging",
+    "Rework",
+    "Done",
+    "Cancelled"
+  ]
 
-  @issue_details_query """
-  query SymphonyLiveE2EIssueDetails($id: String!) {
-    issue(id: $id) {
+  @active_states ["Symphony Ready", "In Progress", "Rework"]
+  @handoff_states ["Human Review", "Merging"]
+  @terminal_states ["Done", "Cancelled"]
+
+  # --- Monday GraphQL operations (inline; pragmatic per Spec 1 task scope) ---
+
+  @create_board_mutation """
+  mutation SymphonyE2ECreateBoard($name: String!) {
+    create_board(board_name: $name, board_kind: private) {
       id
-      identifier
-      state {
-        name
-        type
+    }
+  }
+  """
+
+  @create_column_mutation """
+  mutation SymphonyE2ECreateColumn($boardId: ID!, $title: String!, $type: ColumnType!, $defaults: JSON) {
+    create_column(board_id: $boardId, title: $title, column_type: $type, defaults: $defaults) {
+      id
+      title
+    }
+  }
+  """
+
+  @create_item_mutation """
+  mutation SymphonyE2ECreateItem($boardId: ID!, $name: String!, $columnValues: JSON) {
+    create_item(board_id: $boardId, item_name: $name, column_values: $columnValues) {
+      id
+      name
+    }
+  }
+  """
+
+  @archive_board_mutation """
+  mutation SymphonyE2EArchiveBoard($boardId: ID!) {
+    archive_board(board_id: $boardId) {
+      id
+    }
+  }
+  """
+
+  @item_status_query """
+  query SymphonyE2EItemStatus($itemId: ID!, $columnIds: [String!]) {
+    items(ids: [$itemId]) {
+      id
+      name
+      column_values(ids: $columnIds) {
+        id
+        text
       }
-      comments(first: 20) {
-        nodes {
-          body
-        }
+      updates(limit: 25) {
+        id
+        body
       }
     }
   }
   """
 
-  @complete_project_mutation """
-  mutation SymphonyLiveE2ECompleteProject($id: String!, $statusId: String!, $completedAt: DateTime!) {
-    projectUpdate(id: $id, input: {statusId: $statusId, completedAt: $completedAt}) {
-      success
-    }
-  }
-  """
-
   @tag skip: @live_e2e_skip_reason
-  test "creates a real Linear project and issue with a local worker" do
-    run_live_issue_flow!(:local)
+  test "Symphony drives a disposable Monday board with a local worker" do
+    run_live_monday_flow!(:local)
   end
 
   @tag skip: @live_e2e_skip_reason
-  test "creates a real Linear project and issue with an ssh worker" do
-    run_live_issue_flow!(:ssh)
+  test "Symphony drives a disposable Monday board with an ssh worker" do
+    run_live_monday_flow!(:ssh)
   end
 
-  defp fetch_team!(team_key) do
-    @team_query
-    |> graphql_data!(%{key: team_key})
-    |> get_in(["teams", "nodes"])
-    |> case do
-      [team | _] ->
-        team
+  # --- main flow ---
 
-      _ ->
-        flunk("expected Linear team #{inspect(team_key)} to exist")
-    end
-  end
-
-  defp active_state!(%{"states" => %{"nodes" => states}}) when is_list(states) do
-    Enum.find(states, &(&1["type"] == "started")) ||
-      Enum.find(states, &(&1["type"] == "unstarted")) ||
-      Enum.find(states, &(&1["type"] not in ["completed", "canceled"])) ||
-      flunk("expected team to expose at least one non-terminal workflow state")
-  end
-
-  defp terminal_state_names(%{"states" => %{"nodes" => states}}) when is_list(states) do
-    states
-    |> Enum.filter(&(&1["type"] in ["completed", "canceled"]))
-    |> Enum.map(& &1["name"])
-    |> case do
-      [] -> ["Done", "Canceled", "Cancelled"]
-      names -> names
-    end
-  end
-
-  defp active_state_names(%{"states" => %{"nodes" => states}}) when is_list(states) do
-    states
-    |> Enum.reject(&(&1["type"] in ["completed", "canceled"]))
-    |> Enum.map(& &1["name"])
-    |> case do
-      [] -> ["Todo", "In Progress", "In Review"]
-      names -> names
-    end
-  end
-
-  defp completed_project_status! do
-    @project_statuses_query
-    |> graphql_data!(%{})
-    |> get_in(["projectStatuses", "nodes"])
-    |> case do
-      statuses when is_list(statuses) ->
-        Enum.find(statuses, &(&1["type"] == "completed")) ||
-          flunk("expected workspace to expose a completed project status")
-
-      payload ->
-        flunk("expected project statuses list, got: #{inspect(payload)}")
-    end
-  end
-
-  defp create_project!(team_id, name) do
-    @create_project_mutation
-    |> graphql_data!(%{teamIds: [team_id], name: name})
-    |> fetch_successful_entity!("projectCreate", "project")
-  end
-
-  defp create_issue!(team_id, project_id, state_id, title) do
-    issue =
-      @create_issue_mutation
-      |> graphql_data!(%{
-        teamId: team_id,
-        projectId: project_id,
-        title: title,
-        description: title,
-        stateId: state_id
-      })
-      |> fetch_successful_entity!("issueCreate", "issue")
-
-    %Issue{
-      id: issue["id"],
-      identifier: issue["identifier"],
-      title: issue["title"],
-      description: issue["description"],
-      state: get_in(issue, ["state", "name"]),
-      url: issue["url"],
-      labels: [],
-      blocked_by: []
-    }
-  end
-
-  defp complete_project(project_id, completed_status_id)
-       when is_binary(project_id) and is_binary(completed_status_id) do
-    update_entity(
-      @complete_project_mutation,
-      %{
-        id: project_id,
-        statusId: completed_status_id,
-        completedAt: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-      },
-      "projectUpdate",
-      "project"
-    )
-  end
-
-  defp fetch_issue_details!(issue_id) when is_binary(issue_id) do
-    @issue_details_query
-    |> graphql_data!(%{id: issue_id})
-    |> get_in(["issue"])
-    |> case do
-      %{} = issue -> issue
-      payload -> flunk("expected issue details payload, got: #{inspect(payload)}")
-    end
-  end
-
-  defp issue_completed?(%{"state" => %{"type" => type}}), do: type in ["completed", "canceled"]
-  defp issue_completed?(_issue), do: false
-
-  defp issue_has_comment?(%{"comments" => %{"nodes" => comments}}, expected_body) when is_list(comments) do
-    Enum.any?(comments, &(&1["body"] == expected_body))
-  end
-
-  defp issue_has_comment?(_issue, _expected_body), do: false
-
-  defp update_entity(mutation, variables, mutation_name, entity_name) do
-    case Client.graphql(mutation, variables) do
-      {:ok, %{"data" => %{^mutation_name => %{"success" => true}}}} ->
-        :ok
-
-      {:ok, %{"errors" => errors}} ->
-        Logger.warning("Live e2e finalization failed for #{entity_name}: #{inspect(errors)}")
-        :ok
-
-      {:ok, payload} ->
-        Logger.warning("Live e2e finalization failed for #{entity_name}: #{inspect(payload)}")
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Live e2e finalization failed for #{entity_name}: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  defp graphql_data!(query, variables) when is_binary(query) and is_map(variables) do
-    case Client.graphql(query, variables) do
-      {:ok, %{"data" => data, "errors" => errors}} when is_map(data) and is_list(errors) ->
-        flunk("Linear GraphQL returned partial errors: #{inspect(errors)}")
-
-      {:ok, %{"errors" => errors}} when is_list(errors) ->
-        flunk("Linear GraphQL failed: #{inspect(errors)}")
-
-      {:ok, %{"data" => data}} when is_map(data) ->
-        data
-
-      {:ok, payload} ->
-        flunk("Linear GraphQL returned unexpected payload: #{inspect(payload)}")
-
-      {:error, reason} ->
-        flunk("Linear GraphQL request failed: #{inspect(reason)}")
-    end
-  end
-
-  defp fetch_successful_entity!(data, mutation_name, entity_name)
-       when is_map(data) and is_binary(mutation_name) and is_binary(entity_name) do
-    case data do
-      %{^mutation_name => %{"success" => true, ^entity_name => %{} = entity}} ->
-        entity
-
-      _ ->
-        flunk("expected successful #{mutation_name} response, got: #{inspect(data)}")
-    end
-  end
-
-  defp live_prompt(project_slug) do
-    """
-    You are running a real Symphony end-to-end test.
-
-    The current working directory is the workspace root.
-
-    Step 1:
-    Create a file named #{@result_file} in the current working directory by running exactly:
-
-    ```sh
-    cat > #{@result_file} <<'EOF'
-    identifier={{ issue.identifier }}
-    project_slug=#{project_slug}
-    EOF
-    ```
-
-    Then verify it by running:
-
-    ```sh
-    cat #{@result_file}
-    ```
-
-    The file content must be exactly:
-    identifier={{ issue.identifier }}
-    project_slug=#{project_slug}
-
-    Step 2:
-    You must use the `linear_graphql` tool to query the current issue by `{{ issue.id }}` and read:
-    - existing comments
-    - team workflow states
-
-    A turn that only creates the file is incomplete. Do not stop after Step 1.
-
-    If the exact comment body below is not already present, post exactly one comment on the current issue with this exact body:
-    #{expected_comment("{{ issue.identifier }}", project_slug)}
-
-    Use these exact GraphQL operations:
-
-    ```graphql
-    query IssueContext($id: String!) {
-      issue(id: $id) {
-        comments(first: 20) {
-          nodes {
-            body
-          }
-        }
-        team {
-          states(first: 50) {
-            nodes {
-              id
-              name
-              type
-            }
-          }
-        }
-      }
-    }
-    ```
-
-    ```graphql
-    mutation AddComment($issueId: String!, $body: String!) {
-      commentCreate(input: {issueId: $issueId, body: $body}) {
-        success
-      }
-    }
-    ```
-
-    Step 3:
-    Use the same issue-context query result to choose a workflow state whose `type` is `completed`.
-    Then move the current issue to that state with this exact mutation:
-
-    ```graphql
-    mutation CompleteIssue($id: String!, $stateId: String!) {
-      issueUpdate(id: $id, input: {stateId: $stateId}) {
-        success
-      }
-    }
-    ```
-
-    Step 4:
-    Verify all outcomes with one final `linear_graphql` query against `{{ issue.id }}`:
-    - the exact comment body is present
-    - the issue state type is `completed`
-
-    Do not ask for approval.
-    Stop only after all three conditions are true:
-    1. the file exists with the exact contents above
-    2. the Linear comment exists with the exact body above
-    3. the Linear issue is in a completed terminal state
-    """
-  end
-
-  defp expected_result(issue_identifier, project_slug) do
-    "identifier=#{issue_identifier}\nproject_slug=#{project_slug}\n"
-  end
-
-  defp expected_comment(issue_identifier, project_slug) do
-    "Symphony live e2e comment\nidentifier=#{issue_identifier}\nproject_slug=#{project_slug}"
-  end
-
-  defp receive_runtime_info!(issue_id) do
-    receive do
-      {:worker_runtime_info, ^issue_id, %{workspace_path: workspace_path} = runtime_info}
-      when is_binary(workspace_path) ->
-        runtime_info
-
-      {:codex_worker_update, ^issue_id, _message} ->
-        receive_runtime_info!(issue_id)
-    after
-      5_000 ->
-        flunk("timed out waiting for worker runtime info for #{inspect(issue_id)}")
-    end
-  end
-
-  defp read_worker_result!(%{worker_host: nil, workspace_path: workspace_path}, result_file)
-       when is_binary(workspace_path) and is_binary(result_file) do
-    File.read!(Path.join(workspace_path, result_file))
-  end
-
-  defp read_worker_result!(%{worker_host: worker_host, workspace_path: workspace_path}, result_file)
-       when is_binary(worker_host) and is_binary(workspace_path) and is_binary(result_file) do
-    remote_result_path = Path.join(workspace_path, result_file)
-
-    case SSH.run(worker_host, "cat #{shell_escape(remote_result_path)}", stderr_to_stdout: true) do
-      {:ok, {output, 0}} ->
-        output
-
-      {:ok, {output, status}} ->
-        flunk("failed to read remote result from #{worker_host}:#{remote_result_path} (status #{status}): #{inspect(output)}")
-
-      {:error, reason} ->
-        flunk("failed to read remote result from #{worker_host}:#{remote_result_path}: #{inspect(reason)}")
-    end
-  end
-
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
-  end
-
-  defp run_live_issue_flow!(backend) when backend in [:local, :ssh] do
-    run_id = "symphony-live-e2e-#{backend}-#{System.unique_integer([:positive])}"
+  defp run_live_monday_flow!(backend) when backend in [:local, :ssh] do
+    run_id = "symphony-live-e2e-monday-#{backend}-#{System.unique_integer([:positive])}"
     test_root = Path.join(System.tmp_dir!(), run_id)
     workflow_root = Path.join(test_root, "workflow")
     workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+    File.mkdir_p!(workflow_root)
+
     worker_setup = live_worker_setup!(backend, run_id, test_root)
-    team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
     original_workflow_path = Workflow.workflow_file_path()
     orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
 
-    File.mkdir_p!(workflow_root)
+    # Track the board id in a process dictionary slot so the `after` block can read
+    # it without an unused-variable warning when assignment happens mid-flow.
+    Process.put(:live_e2e_board_id, nil)
 
     try do
       if is_pid(orchestrator_pid) do
         assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
       end
 
+      # 1. Disposable board.
+      board_id = create_disposable_board!(backend)
+      Process.put(:live_e2e_board_id, board_id)
+
+      # 2. Three Symphony columns.
+      symphony_status_column_id =
+        create_column!(board_id, "Symphony Status", "status", status_defaults_json(@symphony_status_labels))
+
+      symphony_pr_column_id = create_column!(board_id, "Symphony PR", "link", nil)
+
+      # 3. Heartbeat sentinel item.
+      heartbeat_item_id =
+        create_item!(board_id, "[Symphony Heartbeat — DO NOT EDIT]", %{})
+
+      # 4. Disposable WORKFLOW.md pointing at this board.
       Workflow.set_workflow_file_path(workflow_file)
 
-      write_workflow_file!(workflow_file,
-        tracker_api_token: "$LINEAR_API_KEY",
-        tracker_project_slug: "bootstrap",
+      write_monday_workflow_file!(workflow_file,
+        board_id: board_id,
+        symphony_status_column_id: symphony_status_column_id,
+        pr_column_id: symphony_pr_column_id,
+        heartbeat_item_id: heartbeat_item_id,
         workspace_root: worker_setup.workspace_root,
         worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        codex_command: worker_setup.codex_command,
-        codex_approval_policy: "never",
-        observability_enabled: false
+        codex_command: worker_setup.codex_command
       )
 
-      team = fetch_team!(team_key)
-      active_state = active_state!(team)
-      completed_project_status = completed_project_status!()
-      terminal_states = terminal_state_names(team)
+      reload_workflow_store()
 
-      project =
-        create_project!(
-          team["id"],
-          "Symphony Live E2E #{backend} #{System.unique_integer([:positive])}"
-        )
+      # 5. Boot Symphony (real Monday.Adapter via tracker.kind=monday).
+      Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+
+      # 6. Create a disposable item with Symphony Ready.
+      column_values = %{
+        symphony_status_column_id => %{"label" => "Symphony Ready"}
+      }
+
+      item_id = create_item!(board_id, "Symphony E2E #{backend} item", column_values)
 
       issue =
-        create_issue!(
-          team["id"],
-          project["id"],
-          active_state["id"],
-          "Symphony live e2e #{backend} issue for #{project["name"]}"
-        )
+        %Issue{
+          id: item_id,
+          identifier: "SYM-#{item_id}",
+          title: "Symphony E2E #{backend} item",
+          description: "Live e2e disposable item",
+          state: "Symphony Ready",
+          url: nil,
+          labels: [],
+          blocked_by: []
+        }
 
-      write_workflow_file!(workflow_file,
-        tracker_api_token: "$LINEAR_API_KEY",
-        tracker_project_slug: project["slugId"],
-        tracker_active_states: active_state_names(team),
-        tracker_terminal_states: terminal_states,
-        workspace_root: worker_setup.workspace_root,
-        worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        codex_command: worker_setup.codex_command,
-        codex_approval_policy: "never",
-        codex_turn_timeout_ms: 600_000,
-        codex_stall_timeout_ms: 600_000,
-        observability_enabled: false,
-        prompt: live_prompt(project["slugId"])
-      )
-
+      # 7. Wait for Symphony to dispatch — assert Symphony-side writes.
+      #
+      # Per Spec 1 DL-005, AgentRunner exercises the Tracker primitive directly;
+      # the orchestrator owns the polling loop, but for a deterministic E2E we
+      # invoke the runner once and then poll Monday for the resulting writes.
       assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
 
-      runtime_info = receive_runtime_info!(issue.id)
+      assert wait_until_status_is(item_id, symphony_status_column_id, "In Progress", 30_000),
+             "expected Symphony to write status='In Progress' on item #{item_id}"
 
-      assert read_worker_result!(runtime_info, @result_file) ==
-               expected_result(issue.identifier, project["slugId"])
-
-      issue_snapshot = fetch_issue_details!(issue.id)
-      assert issue_completed?(issue_snapshot)
-      assert issue_has_comment?(issue_snapshot, expected_comment(issue.identifier, project["slugId"]))
-
-      assert :ok = complete_project(project["id"], completed_project_status["id"])
+      assert wait_until_workpad_present(item_id, 30_000),
+             "expected Symphony to post a `## Symphony Workpad` Update on item #{item_id}"
     after
       restart_orchestrator_if_needed()
       cleanup_live_worker_setup(worker_setup)
       Workflow.set_workflow_file_path(original_workflow_path)
+      reload_workflow_store()
+      _ = archive_board_safe(Process.get(:live_e2e_board_id))
+      Process.delete(:live_e2e_board_id)
       File.rm_rf(test_root)
     end
   end
+
+  # --- Monday GraphQL helpers (real API; bare-token auth via Client.graphql/3) ---
+
+  defp create_disposable_board!(backend) do
+    name = "Symphony E2E #{backend} #{System.system_time(:second)}"
+
+    @create_board_mutation
+    |> graphql_data!(%{"name" => name})
+    |> get_in(["create_board", "id"])
+    |> case do
+      nil -> flunk("expected create_board to return an id, got nil")
+      id when is_binary(id) -> id
+      id -> to_string(id)
+    end
+  end
+
+  defp create_column!(board_id, title, type, defaults_json) do
+    vars = %{"boardId" => board_id, "title" => title, "type" => type, "defaults" => defaults_json}
+
+    @create_column_mutation
+    |> graphql_data!(vars)
+    |> get_in(["create_column", "id"])
+    |> case do
+      nil -> flunk("expected create_column to return an id, got nil for #{title}")
+      id -> to_string(id)
+    end
+  end
+
+  defp create_item!(board_id, name, column_values) when is_map(column_values) do
+    vars = %{
+      "boardId" => board_id,
+      "name" => name,
+      "columnValues" => Jason.encode!(column_values)
+    }
+
+    @create_item_mutation
+    |> graphql_data!(vars)
+    |> get_in(["create_item", "id"])
+    |> case do
+      nil -> flunk("expected create_item to return an id, got nil for #{name}")
+      id -> to_string(id)
+    end
+  end
+
+  defp archive_board_safe(nil), do: :ok
+
+  defp archive_board_safe(board_id) when is_binary(board_id) do
+    case Client.graphql(@archive_board_mutation, %{"boardId" => board_id}, []) do
+      {:ok, %{"data" => %{"archive_board" => %{"id" => _}}}} ->
+        :ok
+
+      other ->
+        Logger.warning("Failed to archive disposable Monday board #{board_id}: #{inspect(other)}")
+        :ok
+    end
+  end
+
+  defp wait_until_status_is(item_id, column_id, expected_text, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until_status_is(item_id, column_id, expected_text, deadline)
+  end
+
+  defp do_wait_until_status_is(item_id, column_id, expected_text, deadline) do
+    case fetch_item_snapshot(item_id, [column_id]) do
+      {:ok, item} ->
+        if status_text(item, column_id) == expected_text do
+          true
+        else
+          maybe_retry(fn ->
+            do_wait_until_status_is(item_id, column_id, expected_text, deadline)
+          end, deadline)
+        end
+
+      {:error, _reason} ->
+        maybe_retry(fn ->
+          do_wait_until_status_is(item_id, column_id, expected_text, deadline)
+        end, deadline)
+    end
+  end
+
+  defp wait_until_workpad_present(item_id, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until_workpad_present(item_id, deadline)
+  end
+
+  defp do_wait_until_workpad_present(item_id, deadline) do
+    case fetch_item_snapshot(item_id, []) do
+      {:ok, item} ->
+        if has_workpad_update?(item) do
+          true
+        else
+          maybe_retry(fn -> do_wait_until_workpad_present(item_id, deadline) end, deadline)
+        end
+
+      {:error, _reason} ->
+        maybe_retry(fn -> do_wait_until_workpad_present(item_id, deadline) end, deadline)
+    end
+  end
+
+  defp maybe_retry(fun, deadline) do
+    if System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(2_000)
+      fun.()
+    else
+      false
+    end
+  end
+
+  defp fetch_item_snapshot(item_id, column_ids) do
+    vars = %{"itemId" => item_id, "columnIds" => column_ids}
+
+    case Client.graphql(@item_status_query, vars, []) do
+      {:ok, %{"data" => %{"items" => [item]}}} -> {:ok, item}
+      {:ok, payload} -> {:error, {:unexpected_payload, payload}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp status_text(item, column_id) when is_map(item) and is_binary(column_id) do
+    item
+    |> Map.get("column_values", [])
+    |> Enum.find_value(fn col ->
+      if col["id"] == column_id, do: Map.get(col, "text"), else: nil
+    end)
+  end
+
+  defp has_workpad_update?(item) when is_map(item) do
+    item
+    |> Map.get("updates", [])
+    |> Enum.any?(fn update ->
+      String.starts_with?(update["body"] || "", "## Symphony Workpad")
+    end)
+  end
+
+  defp graphql_data!(query, variables) do
+    case Client.graphql(query, variables, []) do
+      {:ok, %{"data" => data, "errors" => errors}} when is_map(data) and is_list(errors) and errors != [] ->
+        flunk("Monday GraphQL returned partial errors: #{inspect(errors)}")
+
+      {:ok, %{"errors" => errors}} when is_list(errors) and errors != [] ->
+        flunk("Monday GraphQL failed: #{inspect(errors)}")
+
+      {:ok, %{"data" => data}} when is_map(data) ->
+        data
+
+      {:ok, payload} ->
+        flunk("Monday GraphQL returned unexpected payload: #{inspect(payload)}")
+
+      {:error, reason} ->
+        flunk("Monday GraphQL request failed: #{inspect(reason)}")
+    end
+  end
+
+  # --- WORKFLOW.md writer (Monday config; minimal & inline per task scope) ---
+
+  defp write_monday_workflow_file!(path, opts) do
+    board_id = Keyword.fetch!(opts, :board_id)
+    symphony_status_column_id = Keyword.fetch!(opts, :symphony_status_column_id)
+    pr_column_id = Keyword.fetch!(opts, :pr_column_id)
+    heartbeat_item_id = Keyword.fetch!(opts, :heartbeat_item_id)
+    workspace_root = Keyword.fetch!(opts, :workspace_root)
+    worker_ssh_hosts = Keyword.get(opts, :worker_ssh_hosts, [])
+    codex_command = Keyword.get(opts, :codex_command, "codex app-server")
+
+    yaml = """
+    ---
+    tracker:
+      kind: "monday"
+      endpoint: "https://api.monday.com/v2"
+      api_token: "$MONDAY_API_TOKEN"
+      board_id: #{board_id}
+      identifier_prefix: "SYM"
+      symphony_status_column_id: "#{symphony_status_column_id}"
+      pr_column_id: "#{pr_column_id}"
+      heartbeat_item_id: #{heartbeat_item_id}
+      heartbeat_ttl_ms: 60000
+      complexity_budget_per_tick: 500
+      backoff_factor: 2.0
+      max_polling_interval_ms: 60000
+      failure_ttl_count: 5
+      active_states: #{yaml_string_list(@active_states)}
+      handoff_states: #{yaml_string_list(@handoff_states)}
+      terminal_states: #{yaml_string_list(@terminal_states)}
+    polling:
+      interval_ms: 5000
+    workspace:
+      root: "#{workspace_root}"
+    #{worker_yaml(worker_ssh_hosts)}
+    agent:
+      max_concurrent_agents: 2
+      max_turns: 3
+      max_retry_backoff_ms: 30000
+      max_concurrent_agents_by_state: {}
+    codex:
+      command: "#{codex_command}"
+      approval_policy: "never"
+      thread_sandbox: "workspace-write"
+      turn_sandbox_policy: null
+      turn_timeout_ms: 600000
+      read_timeout_ms: 5000
+      stall_timeout_ms: 600000
+    hooks:
+      timeout_ms: 60000
+    observability:
+      dashboard_enabled: false
+      refresh_ms: 1000
+      render_interval_ms: 16
+    ---
+    You are running a real Symphony end-to-end test against Monday.com.
+
+    The orchestrator has dispatched you because the item's Symphony Status was set to
+    "Symphony Ready". Your job for this test is just to record progress; the test
+    harness verifies that Symphony's tracker writes (status -> "In Progress" and
+    a Workpad Update on the item) occurred.
+
+    Stop after writing a one-line summary; do not loop.
+    """
+
+    File.write!(path, yaml)
+    :ok
+  end
+
+  defp yaml_string_list(values) when is_list(values) do
+    "[" <> Enum.map_join(values, ", ", fn v -> "\"" <> v <> "\"" end) <> "]"
+  end
+
+  defp worker_yaml([]), do: "worker:\n  ssh_hosts: []"
+
+  defp worker_yaml(hosts) when is_list(hosts) do
+    "worker:\n  ssh_hosts: " <> yaml_string_list(hosts)
+  end
+
+  # The Monday `defaults` field on a Status column is a JSON-encoded string of
+  # label-id -> %{name, color} pairs. We assign deterministic colors that map
+  # naturally to Symphony's lifecycle (ready=blue, in progress=yellow, done=green,
+  # etc.) — Monday will accept any valid color string.
+  defp status_defaults_json(labels) when is_list(labels) do
+    palette = ~w(blue grass orange red purple green saladish lipstick navy bright-green dark-purple)
+
+    labels_map =
+      labels
+      |> Enum.with_index()
+      |> Enum.into(%{}, fn {name, idx} ->
+        color = Enum.at(palette, rem(idx, length(palette)))
+        {Integer.to_string(idx), %{"name" => name, "color" => color}}
+      end)
+
+    Jason.encode!(%{"labels" => labels_map})
+  end
+
+  # --- worker setup (preserved from prior Linear test; backends are tracker-agnostic) ---
 
   defp live_worker_setup!(:local, _run_id, test_root) when is_binary(test_root) do
     %{
@@ -548,8 +502,21 @@ defmodule SymphonyElixir.LiveE2ETest do
       case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
         {:ok, _pid} -> :ok
         {:error, {:already_started, _pid}} -> :ok
+        _other -> :ok
       end
     end
+  end
+
+  defp reload_workflow_store do
+    if Process.whereis(SymphonyElixir.WorkflowStore) do
+      try do
+        SymphonyElixir.WorkflowStore.force_reload()
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+
+    :ok
   end
 
   defp live_ssh_worker_setup!(run_id) when is_binary(run_id) do
@@ -671,6 +638,13 @@ defmodule SymphonyElixir.LiveE2ETest do
         flunk("failed to resolve remote home for #{worker_host}: #{inspect(reason)}")
     end
   end
+
+  defp shell_escape(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 
   defp reserve_tcp_ports(count) when is_integer(count) and count > 0 do
     reserve_tcp_ports(count, MapSet.new(), [])

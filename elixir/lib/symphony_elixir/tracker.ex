@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Tracker do
   @moduledoc """
-  Adapter boundary for issue tracker reads and writes.
+  Tracker primitive contract. Symphony owns all Monday writes per Spec 1 DL-005.
+  Adapter dispatch resolved at call time from config + optional override.
   """
 
   alias SymphonyElixir.Config
@@ -8,39 +9,56 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback upsert_workpad(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback set_pr_url(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback post_failure_update(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback acquire_heartbeat() :: :ok | {:error, term()}
+  @callback release_heartbeat() :: :ok | {:error, term()}
+  @callback validate_no_phi(map()) :: :ok | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
-  def fetch_candidate_issues do
-    adapter().fetch_candidate_issues()
-  end
+  def fetch_candidate_issues, do: adapter().fetch_candidate_issues()
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issues_by_states(states) do
-    adapter().fetch_issues_by_states(states)
-  end
+  def fetch_issues_by_states(states), do: adapter().fetch_issues_by_states(states)
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) do
-    adapter().fetch_issue_states_by_ids(issue_ids)
-  end
-
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
-    adapter().create_comment(issue_id, body)
-  end
+  def fetch_issue_states_by_ids(issue_ids), do: adapter().fetch_issue_states_by_ids(issue_ids)
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
-  def update_issue_state(issue_id, state_name) do
-    adapter().update_issue_state(issue_id, state_name)
-  end
+  def update_issue_state(issue_id, state_name), do: adapter().update_issue_state(issue_id, state_name)
+
+  @spec upsert_workpad(String.t(), String.t()) :: :ok | {:error, term()}
+  def upsert_workpad(issue_id, body), do: adapter().upsert_workpad(issue_id, body)
+
+  @spec set_pr_url(String.t(), String.t()) :: :ok | {:error, term()}
+  def set_pr_url(issue_id, url), do: adapter().set_pr_url(issue_id, url)
+
+  @spec post_failure_update(String.t(), String.t()) :: :ok | {:error, term()}
+  def post_failure_update(issue_id, body), do: adapter().post_failure_update(issue_id, body)
+
+  @spec acquire_heartbeat() :: :ok | {:error, term()}
+  def acquire_heartbeat, do: adapter().acquire_heartbeat()
+
+  @spec release_heartbeat() :: :ok | {:error, term()}
+  def release_heartbeat, do: adapter().release_heartbeat()
+
+  @spec validate_no_phi(map()) :: :ok | {:error, term()}
+  def validate_no_phi(item), do: adapter().validate_no_phi(item)
 
   @spec adapter() :: module()
   def adapter do
+    case Application.get_env(:symphony_elixir, :tracker_adapter_override) do
+      nil -> default_adapter_for_kind()
+      module -> module
+    end
+  end
+
+  defp default_adapter_for_kind do
     case Config.settings!().tracker.kind do
-      "memory" -> SymphonyElixir.Tracker.Memory
-      _ -> SymphonyElixir.Linear.Adapter
+      "memory" -> SymphonyElixir.Tracker.MemoryMonday
+      _ -> SymphonyElixir.Monday.Adapter
     end
   end
 end

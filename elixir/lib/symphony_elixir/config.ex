@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
-  You are working on a Linear issue.
+  You are working on a Monday.com item.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
@@ -119,18 +119,36 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in ["monday", "memory"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
+      settings.tracker.kind == "monday" and not is_binary(settings.tracker.api_token) ->
+        {:error, :missing_monday_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
+      settings.tracker.kind == "monday" and not is_integer(settings.tracker.board_id) ->
+        {:error, :missing_monday_board_id}
+
+      settings.tracker.kind == "monday" and not is_binary(settings.tracker.symphony_status_column_id) ->
+        {:error, :missing_monday_status_column}
+
+      settings.tracker.kind == "monday" and not is_integer(settings.tracker.heartbeat_item_id) ->
+        {:error, :missing_monday_heartbeat_item_id}
+
+      handoff_active_overlap(settings.tracker) != [] ->
+        {:error, {:handoff_states_overlap_active_states, handoff_active_overlap(settings.tracker)}}
 
       true ->
         :ok
     end
+  end
+
+  defp handoff_active_overlap(%{active_states: active_states, handoff_states: handoff_states}) do
+    active = MapSet.new(Enum.map(active_states || [], &Schema.normalize_issue_state/1))
+    handoff = MapSet.new(Enum.map(handoff_states || [], &Schema.normalize_issue_state/1))
+
+    active
+    |> MapSet.intersection(handoff)
+    |> MapSet.to_list()
   end
 
   defp format_config_error(reason) do
