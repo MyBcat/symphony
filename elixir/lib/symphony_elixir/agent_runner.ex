@@ -5,7 +5,11 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, Monday.PRDetector, Monday.Workpad, PromptBuilder, Tracker, Workspace}
+
+  @summary_filename "_symphony_summary.md"
+  @summary_max_bytes 32_768
+  @default_profile_name "codex_default"
 
   @type worker_host :: String.t() | nil
 
@@ -35,7 +39,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            run_codex_turns_with_tracker(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -46,8 +50,37 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
+  # Wraps the codex turn loop with tracker write triggers (session start,
+  # PR URL detection, completion summary, crash handler).
+  defp run_codex_turns_with_tracker(workspace, issue, codex_update_recipient, opts, worker_host) do
+    session = build_session(issue, workspace, worker_host)
+    {:ok, writer_pid} = start_session_writer(session)
+
+    try do
+      run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, writer_pid)
+    rescue
+      error ->
+        finalize_crash(writer_pid, issue, error)
+        reraise error, __STACKTRACE__
+    catch
+      kind, reason ->
+        finalize_crash(writer_pid, issue, {kind, reason})
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    else
+      {:error, reason} = err ->
+        finalize_crash(writer_pid, issue, reason)
+        err
+
+      other ->
+        other
+    after
+      stop_session_writer(writer_pid)
+    end
+  end
+
+  defp codex_message_handler(recipient, issue, writer_pid) do
     fn message ->
+      observe_codex_message(writer_pid, issue, message)
       send_codex_update(recipient, issue, message)
     end
   end
@@ -76,20 +109,40 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, writer_pid) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(
+          session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          1,
+          max_turns,
+          writer_pid
+        )
       after
         AppServer.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns,
+         writer_pid
+       ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -97,7 +150,7 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(codex_update_recipient, issue, writer_pid)
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
@@ -113,7 +166,8 @@ defmodule SymphonyElixir.AgentRunner do
             opts,
             issue_state_fetcher,
             turn_number + 1,
-            max_turns
+            max_turns,
+            writer_pid
           )
 
         {:continue, refreshed_issue} ->
@@ -200,4 +254,281 @@ defmodule SymphonyElixir.AgentRunner do
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
+
+  ## ---------------------------------------------------------------------------
+  ## Tracker write triggers (Spec 1: Symphony owns Monday writes)
+  ## ---------------------------------------------------------------------------
+
+  @doc """
+  Build a session map suitable for `SymphonyElixir.Monday.Workpad` rendering.
+  """
+  @spec build_session(map(), Path.t() | nil, worker_host()) :: map()
+  def build_session(issue, workspace, worker_host) do
+    %{
+      identifier: issue_identifier(issue),
+      profile_name: profile_name(),
+      host: host_for_session(worker_host),
+      workspace_path: workspace || "",
+      short_sha: short_sha_for_workspace(workspace, worker_host),
+      started_at: DateTime.utc_now()
+    }
+  end
+
+  @doc """
+  Start an Agent that tracks per-run state for the tracker writer (whether the
+  PR URL was already written, the session map). Returns the agent pid.
+  """
+  @spec start_session_writer(map()) :: {:ok, pid()}
+  def start_session_writer(session) do
+    Agent.start_link(fn ->
+      %{
+        session: session,
+        pr_url_written?: false,
+        session_started_emitted?: false
+      }
+    end)
+  end
+
+  @doc """
+  Stop a previously started session writer. Safe to call on a stopped pid.
+  """
+  @spec stop_session_writer(pid()) :: :ok
+  def stop_session_writer(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      try do
+        Agent.stop(pid, :normal)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  def stop_session_writer(_), do: :ok
+
+  @doc """
+  Public entry point for handling an arbitrary codex stream message and
+  triggering the appropriate Tracker write. Tests drive this directly to
+  validate behavior without needing a real Codex subprocess.
+  """
+  @spec observe_codex_message(pid(), map(), map()) :: :ok
+  def observe_codex_message(writer_pid, issue, %{event: event} = message)
+      when is_pid(writer_pid) do
+    case event do
+      :session_started ->
+        on_session_started(writer_pid, issue)
+
+      :turn_completed ->
+        on_turn_completed(writer_pid, issue)
+
+      _ ->
+        :ok
+    end
+
+    maybe_detect_pr_url(writer_pid, issue, message)
+    :ok
+  end
+
+  def observe_codex_message(_writer_pid, _issue, _message), do: :ok
+
+  @doc """
+  Render and write the crash workpad + status when the agent run errored or
+  raised. Used both by the inline crash trap and tests.
+  """
+  @spec finalize_crash(pid(), map(), term()) :: :ok
+  def finalize_crash(writer_pid, issue, reason) when is_pid(writer_pid) do
+    if Process.alive?(writer_pid) do
+      session = Agent.get(writer_pid, fn state -> state.session end)
+      issue_id = issue_id(issue)
+
+      if is_binary(issue_id) do
+        body = Workpad.render_crash(session, inspect(reason))
+        _ = Tracker.upsert_workpad(issue_id, body)
+        _ = Tracker.update_issue_state(issue_id, "Cancelled")
+      end
+    end
+
+    :ok
+  end
+
+  def finalize_crash(_writer_pid, _issue, _reason), do: :ok
+
+  defp on_session_started(writer_pid, issue) do
+    issue_id = issue_id(issue)
+
+    {already_emitted?, session} =
+      Agent.get_and_update(writer_pid, fn state ->
+        {{state.session_started_emitted?, state.session}, %{state | session_started_emitted?: true}}
+      end)
+
+    if !already_emitted? and is_binary(issue_id) do
+      _ = Tracker.update_issue_state(issue_id, "In Progress")
+      _ = Tracker.upsert_workpad(issue_id, Workpad.render_session_start(session))
+    end
+
+    :ok
+  end
+
+  defp on_turn_completed(writer_pid, issue) do
+    issue_id = issue_id(issue)
+
+    if is_binary(issue_id) do
+      {session, pr_url_written?} =
+        Agent.get(writer_pid, fn state -> {state.session, state.pr_url_written?} end)
+
+      case read_summary(Map.get(session, :workspace_path)) do
+        {:ok, summary_body} ->
+          body = Workpad.render_completion(session, summary_body)
+          _ = Tracker.upsert_workpad(issue_id, body)
+
+          if pr_url_written? do
+            _ = Tracker.update_issue_state(issue_id, "Human Review")
+          end
+
+          :ok
+
+        :no_summary ->
+          # Spec: if no summary present, leave workpad/status as-is so the
+          # orchestrator's continuation logic can re-evaluate on next poll.
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to read #{@summary_filename} for issue_id=#{issue_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp maybe_detect_pr_url(writer_pid, issue, message) do
+    issue_id = issue_id(issue)
+
+    if is_binary(issue_id) do
+      already_written? = Agent.get(writer_pid, fn state -> state.pr_url_written? end)
+
+      if !already_written? do
+        case scan_message_for_pr(message) do
+          {:ok, url} ->
+            updated? =
+              Agent.get_and_update(writer_pid, fn state ->
+                if state.pr_url_written? do
+                  {false, state}
+                else
+                  {true, %{state | pr_url_written?: true}}
+                end
+              end)
+
+            if updated? do
+              _ = Tracker.set_pr_url(issue_id, url)
+            end
+
+            :ok
+
+          :no_match ->
+            :ok
+        end
+      end
+    end
+
+    :ok
+  end
+
+  defp scan_message_for_pr(message) when is_map(message) do
+    [Map.get(message, :raw), Map.get(message, :payload)]
+    |> Enum.reduce_while(:no_match, fn candidate, acc ->
+      case scan_value_for_pr(candidate) do
+        {:ok, _url} = hit -> {:halt, hit}
+        :no_match -> {:cont, acc}
+      end
+    end)
+  end
+
+  defp scan_message_for_pr(_), do: :no_match
+
+  defp scan_value_for_pr(value) when is_binary(value), do: PRDetector.scan(value)
+
+  defp scan_value_for_pr(value) when is_map(value) or is_list(value) do
+    PRDetector.scan(safe_inspect(value))
+  end
+
+  defp scan_value_for_pr(_), do: :no_match
+
+  defp safe_inspect(value) do
+    try do
+      Jason.encode!(value)
+    rescue
+      _ -> inspect(value)
+    end
+  end
+
+  defp read_summary(workspace_path) when is_binary(workspace_path) and workspace_path != "" do
+    path = Path.join(workspace_path, @summary_filename)
+
+    case File.read(path) do
+      {:ok, body} when byte_size(body) > @summary_max_bytes ->
+        {:ok, binary_part(body, 0, @summary_max_bytes) <> "\n\n... (truncated)\n"}
+
+      {:ok, body} ->
+        {:ok, body}
+
+      {:error, :enoent} ->
+        :no_summary
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  defp read_summary(_workspace_path), do: :no_summary
+
+  defp issue_id(%Issue{id: issue_id}), do: issue_id
+  defp issue_id(%{id: issue_id}), do: issue_id
+  defp issue_id(_), do: nil
+
+  defp issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier), do: identifier
+  defp issue_identifier(%{identifier: identifier}) when is_binary(identifier), do: identifier
+  defp issue_identifier(_), do: "unknown"
+
+  defp profile_name do
+    Application.get_env(:symphony_elixir, :agent_profile_name, @default_profile_name)
+  end
+
+  defp host_for_session(nil) do
+    case :inet.gethostname() do
+      {:ok, hostname} -> to_string(hostname)
+      _ -> "local"
+    end
+  end
+
+  defp host_for_session(host) when is_binary(host), do: host
+
+  defp short_sha_for_workspace(workspace, nil) when is_binary(workspace) and workspace != "" do
+    case File.dir?(workspace) do
+      true ->
+        try do
+          {output, status} = System.cmd("git", ["rev-parse", "--short", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+          if status == 0 do
+            output |> String.trim() |> trim_to_short_sha()
+          else
+            "no-sha"
+          end
+        rescue
+          _ -> "no-sha"
+        end
+
+      false ->
+        "no-sha"
+    end
+  end
+
+  defp short_sha_for_workspace(_workspace, _worker_host), do: "no-sha"
+
+  defp trim_to_short_sha(""), do: "no-sha"
+  defp trim_to_short_sha(sha) when is_binary(sha), do: sha
 end
