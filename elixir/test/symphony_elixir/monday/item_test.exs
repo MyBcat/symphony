@@ -22,7 +22,8 @@ defmodule SymphonyElixir.Monday.ItemTest do
     priority_column_id: "priority_abc",
     description_column_id: "description_def",
     branch_column_id: nil,
-    labels_column_id: nil
+    labels_column_id: nil,
+    profile_column_id: nil
   }
 
   describe "from_monday/2" do
@@ -70,6 +71,37 @@ defmodule SymphonyElixir.Monday.ItemTest do
       end)
 
       assert {:error, {:missing_column, "symphony_status_xyz"}} = Item.from_monday(raw, @config)
+    end
+  end
+
+  describe "profile extraction" do
+    test "extracts profile from configured profile_column_id when present" do
+      raw = put_in(@raw_item["column_values"], [
+        %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+        %{"id" => "profile_dropdown_xyz", "text" => "claude_opus"}
+      ])
+
+      config = Map.put(@config, :profile_column_id, "profile_dropdown_xyz")
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.profile == "claude_opus"
+    end
+
+    test "profile is nil when column not configured" do
+      assert {:ok, item} = Item.from_monday(@raw_item, @config)
+      assert item.profile == nil
+    end
+
+    test "profile is nil when column is empty string" do
+      raw = put_in(@raw_item["column_values"], [
+        %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+        %{"id" => "profile_dropdown_xyz", "text" => ""}
+      ])
+
+      config = Map.put(@config, :profile_column_id, "profile_dropdown_xyz")
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.profile == nil
     end
   end
 end

@@ -18,7 +18,8 @@ defmodule SymphonyElixir.Monday.Item do
           priority_column_id: String.t() | nil,
           description_column_id: String.t() | nil,
           branch_column_id: String.t() | nil,
-          labels_column_id: String.t() | nil
+          labels_column_id: String.t() | nil,
+          profile_column_id: String.t() | nil
         }
 
   @type t :: Issue.t()
@@ -44,6 +45,7 @@ defmodule SymphonyElixir.Monday.Item do
         branch_name: branch_value(raw, config[:branch_column_id], identifier),
         url: Map.get(raw, "url"),
         labels: labels_value(raw, config[:labels_column_id]),
+        profile: profile_value(raw, config[:profile_column_id]),
         blocked_by: [],
         created_at: parse_datetime(Map.get(raw, "created_at")),
         updated_at: parse_datetime(Map.get(raw, "updated_at"))
@@ -113,4 +115,14 @@ defmodule SymphonyElixir.Monday.Item do
   end
 
   defp parse_datetime(_value), do: nil
+
+  defp profile_value(_raw, nil), do: nil
+
+  defp profile_value(raw, column_id) when is_binary(column_id) do
+    case column_text(raw, column_id) do
+      nil -> nil
+      "" -> nil
+      text -> text
+    end
+  end
 end
