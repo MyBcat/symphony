@@ -22,6 +22,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.CLI,
           SymphonyElixir.Claude.Adapter,
           SymphonyElixir.Codex.Adapter,
+          SymphonyElixir.Gemini.Adapter,
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
