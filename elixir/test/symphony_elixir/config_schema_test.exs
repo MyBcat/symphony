@@ -99,6 +99,7 @@ defmodule SymphonyElixir.ConfigSchemaTest do
         "api_token" => "x",
         "board_id" => 1,
         "symphony_status_column_id" => "y",
+        "profile_column_id" => "profile",
         "heartbeat_item_id" => 999
       },
       "profiles" => %{
@@ -123,6 +124,7 @@ defmodule SymphonyElixir.ConfigSchemaTest do
         "api_token" => "x",
         "board_id" => 1,
         "symphony_status_column_id" => "y",
+        "profile_column_id" => "profile",
         "heartbeat_item_id" => 999
       },
       "profiles" => %{"weird" => %{"kind" => "perplexity", "perplexity" => %{"command" => "px"}}},
@@ -142,6 +144,7 @@ defmodule SymphonyElixir.ConfigSchemaTest do
         "api_token" => "x",
         "board_id" => 1,
         "symphony_status_column_id" => "y",
+        "profile_column_id" => "profile",
         "heartbeat_item_id" => 999
       },
       "profiles" => %{
@@ -158,6 +161,48 @@ defmodule SymphonyElixir.ConfigSchemaTest do
     {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
 
     assert {:error, {:profile_safety_floor_violation, "unsafe"}} =
+             SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
+
+  test "validate_semantics rejects missing Monday profile column" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "x",
+        "board_id" => 1,
+        "symphony_status_column_id" => "y",
+        "heartbeat_item_id" => 999
+      }
+    }
+
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+    assert {:error, :missing_monday_profile_column} =
+             SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
+
+  test "validate_semantics rejects non-positive profile max_concurrent" do
+    attrs = %{
+      "tracker" => %{
+        "kind" => "monday",
+        "api_token" => "x",
+        "board_id" => 1,
+        "symphony_status_column_id" => "y",
+        "profile_column_id" => "profile",
+        "heartbeat_item_id" => 999
+      },
+      "profiles" => %{
+        "claude_opus" => %{
+          "kind" => "claude",
+          "max_concurrent" => 0,
+          "claude" => %{"command" => "claude --print", "permission_mode" => "acceptEdits"}
+        }
+      }
+    }
+
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+    assert {:error, {:invalid_profile_max_concurrent, "claude_opus"}} =
              SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
   end
 end

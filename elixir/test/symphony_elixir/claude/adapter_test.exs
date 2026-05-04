@@ -41,6 +41,45 @@ defmodule SymphonyElixir.Claude.AdapterTest do
     end
   end
 
+  describe "start_session/2 and stream_events/1" do
+    test "refuses unsafe config before opening a port" do
+      config = %{
+        command: "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}'",
+        permission_mode: "bypassPermissions",
+        _safety_floor: %{"permission_mode" => "acceptEdits"}
+      }
+
+      assert {:error, {:sandbox_floor_violation, :claude, :config}} =
+               Adapter.start_session(System.tmp_dir!(), config)
+    end
+
+    test "stream_events halts after emitting port exit" do
+      config = %{
+        command:
+          "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess_stream\"}'",
+        permission_mode: "acceptEdits",
+        allowed_tools: ["Read"],
+        _safety_floor: %{"permission_mode" => "acceptEdits"}
+      }
+
+      task =
+        Task.async(fn ->
+          {:ok, session} = Adapter.start_session(System.tmp_dir!(), config)
+
+          try do
+            Enum.to_list(Adapter.stream_events(session))
+          after
+            Adapter.stop_session(session)
+          end
+        end)
+
+      events = Task.await(task, 1_000)
+
+      assert Enum.map(events, & &1.kind) == [:session_started, :exit]
+      assert List.last(events).status == 0
+    end
+  end
+
   describe "parse_event_line/1" do
     setup do
       lines =
@@ -93,7 +132,8 @@ defmodule SymphonyElixir.Claude.AdapterTest do
     end
 
     test "returns zeros when session has no tokens accumulated" do
-      assert %{input: 0, output: 0, total: 0} = Adapter.runtime_native_tokens(%{tokens: %{input: 0, output: 0, total: 0}})
+      assert %{input: 0, output: 0, total: 0} =
+               Adapter.runtime_native_tokens(%{tokens: %{input: 0, output: 0, total: 0}})
     end
   end
 end

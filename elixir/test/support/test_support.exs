@@ -21,7 +21,12 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0
+        ]
 
       setup do
         workflow_root =
@@ -34,7 +39,10 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+        if Process.whereis(SymphonyElixir.WorkflowStore),
+          do: SymphonyElixir.WorkflowStore.force_reload()
+
         stop_default_http_server()
 
         on_exit(fn ->
@@ -103,6 +111,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_board_id: 123_456_789,
           tracker_identifier_prefix: "SYM",
           tracker_status_column_id: "symphony_status",
+          tracker_profile_column_id: "symphony_profile",
           tracker_pr_column_id: "pr_link",
           tracker_heartbeat_item_id: 987_654_321,
           tracker_active_states: ["Symphony Ready", "In Progress", "Rework"],
@@ -117,7 +126,9 @@ defmodule SymphonyElixir.TestSupport do
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
           codex_command: "codex app-server",
-          codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
+          codex_approval_policy: %{
+            reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
+          },
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,
@@ -144,6 +155,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_board_id = Keyword.get(config, :tracker_board_id)
     tracker_identifier_prefix = Keyword.get(config, :tracker_identifier_prefix)
     tracker_status_column_id = Keyword.get(config, :tracker_status_column_id)
+    tracker_profile_column_id = Keyword.get(config, :tracker_profile_column_id)
     tracker_pr_column_id = Keyword.get(config, :tracker_pr_column_id)
     tracker_heartbeat_item_id = Keyword.get(config, :tracker_heartbeat_item_id)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
@@ -152,7 +164,10 @@ defmodule SymphonyElixir.TestSupport do
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
-    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
+    worker_max_concurrent_agents_per_host =
+      Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -186,6 +201,7 @@ defmodule SymphonyElixir.TestSupport do
         "  board_id: #{yaml_value(tracker_board_id)}",
         "  identifier_prefix: #{yaml_value(tracker_identifier_prefix)}",
         "  symphony_status_column_id: #{yaml_value(tracker_status_column_id)}",
+        "  profile_column_id: #{yaml_value(tracker_profile_column_id)}",
         "  pr_column_id: #{yaml_value(tracker_pr_column_id)}",
         "  heartbeat_item_id: #{yaml_value(tracker_heartbeat_item_id)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
@@ -209,8 +225,18 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        hooks_yaml(
+          hook_after_create,
+          hook_before_run,
+          hook_after_run,
+          hook_before_remove,
+          hook_timeout_ms
+        ),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -242,9 +268,16 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
-  defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+  defp hooks_yaml(nil, nil, nil, nil, timeout_ms),
+    do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 
-  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
+  defp hooks_yaml(
+         hook_after_create,
+         hook_before_run,
+         hook_after_run,
+         hook_before_remove,
+         timeout_ms
+       ) do
     [
       "hooks:",
       "  timeout_ms: #{yaml_value(timeout_ms)}",

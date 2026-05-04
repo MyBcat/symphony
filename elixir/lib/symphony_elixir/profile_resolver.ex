@@ -28,12 +28,7 @@ defmodule SymphonyElixir.ProfileResolver do
           {:ok, SymphonyElixir.Profile.t()} | {:error, resolve_error()}
   def resolve(%Tracker.Issue{profile: profile_name}, profiles, default, floor)
       when is_map(profiles) do
-    name =
-      cond do
-        is_binary(profile_name) and profile_name != "" -> profile_name
-        is_binary(default) and default != "" -> default
-        true -> nil
-      end
+    name = first_non_blank([profile_name, default])
 
     cond do
       is_nil(name) ->
@@ -47,7 +42,21 @@ defmodule SymphonyElixir.ProfileResolver do
     end
   end
 
-  defp check_safety_floor(%SymphonyElixir.Profile{kind: kind, config: cfg, name: name} = profile, floor) do
+  defp first_non_blank(values) do
+    Enum.find_value(values, fn
+      value when is_binary(value) ->
+        value = String.trim(value)
+        if value == "", do: nil, else: value
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp check_safety_floor(
+         %SymphonyElixir.Profile{kind: kind, config: cfg, name: name} = profile,
+         floor
+       ) do
     case Map.fetch(@adapter_for_kind, kind) do
       {:ok, adapter} ->
         kind_floor = Map.get(floor, Atom.to_string(kind), %{})
@@ -65,7 +74,8 @@ defmodule SymphonyElixir.ProfileResolver do
 
   @spec validate_drift(map(), [String.t()]) ::
           {:ok, %{missing_in_dropdown: [String.t()], orphan_dropdown_labels: [String.t()]}}
-  def validate_drift(profiles, dropdown_labels) when is_map(profiles) and is_list(dropdown_labels) do
+  def validate_drift(profiles, dropdown_labels)
+      when is_map(profiles) and is_list(dropdown_labels) do
     profile_names = Map.keys(profiles)
     label_set = MapSet.new(dropdown_labels)
     profile_set = MapSet.new(profile_names)

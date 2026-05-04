@@ -23,7 +23,16 @@ defmodule SymphonyElixir.ProfileResolverTest do
 
   test "uses per-issue profile when set" do
     issue = %Tracker.Issue{identifier: "SYM-1", profile: "claude_sonnet"}
-    assert {:ok, @claude_sonnet} = ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
+
+    assert {:ok, @claude_sonnet} =
+             ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
+  end
+
+  test "trims per-issue profile before lookup" do
+    issue = %Tracker.Issue{identifier: "SYM-1", profile: " claude_sonnet "}
+
+    assert {:ok, @claude_sonnet} =
+             ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
   end
 
   test "falls back to default when issue.profile is nil" do
@@ -31,8 +40,14 @@ defmodule SymphonyElixir.ProfileResolverTest do
     assert {:ok, @claude_opus} = ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
   end
 
+  test "falls back to default when issue.profile is blank" do
+    issue = %Tracker.Issue{identifier: "SYM-1", profile: "  "}
+    assert {:ok, @claude_opus} = ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
+  end
+
   test "errors on unknown profile name" do
     issue = %Tracker.Issue{identifier: "SYM-1", profile: "claude_opus_v9"}
+
     assert {:error, {:unknown_profile, "claude_opus_v9"}} =
              ProfileResolver.resolve(issue, @profiles, "claude_opus", @floor)
   end

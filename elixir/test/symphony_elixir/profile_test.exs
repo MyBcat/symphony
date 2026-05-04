@@ -35,6 +35,21 @@ defmodule SymphonyElixir.ProfileTest do
     assert rendered =~ "<redacted-secret-fragment>"
   end
 
+  test "Profile inspect redacts string-key command values from YAML config" do
+    profile = %Profile{
+      name: "claude_with_secret",
+      kind: :claude,
+      max_concurrent: nil,
+      config: %{
+        "command" => "claude --env ANTHROPIC_API_KEY=sk-ant-api03-secret123"
+      }
+    }
+
+    rendered = inspect(profile)
+    refute rendered =~ "sk-ant-api03-secret123"
+    assert rendered =~ "<redacted-secret-fragment>"
+  end
+
   test "Profile inspect leaves non-secret commands intact" do
     profile = %Profile{
       name: "claude_opus",

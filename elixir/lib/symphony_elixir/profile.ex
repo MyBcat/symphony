@@ -34,13 +34,24 @@ end
 
 defimpl Inspect, for: SymphonyElixir.Profile do
   def inspect(profile, opts) do
-    redacted_config =
-      case Map.get(profile.config, :command) do
-        nil -> profile.config
-        cmd -> Map.put(profile.config, :command, SymphonyElixir.Profile.redact_command(cmd))
-      end
+    redacted_config = redact_config(profile.config)
 
     redacted = %{profile | config: redacted_config}
     Inspect.Any.inspect(redacted, opts)
   end
+
+  defp redact_config(config) when is_map(config) do
+    cond do
+      Map.has_key?(config, :command) ->
+        Map.update!(config, :command, &SymphonyElixir.Profile.redact_command/1)
+
+      Map.has_key?(config, "command") ->
+        Map.update!(config, "command", &SymphonyElixir.Profile.redact_command/1)
+
+      true ->
+        config
+    end
+  end
+
+  defp redact_config(config), do: config
 end

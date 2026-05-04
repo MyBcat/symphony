@@ -146,7 +146,11 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       policy_cases = [
         %{"type" => "dangerFullAccess"},
         %{"type" => "externalSandbox", "profile" => "remote-ci"},
-        %{"type" => "workspaceWrite", "writableRoots" => ["relative/path"], "networkAccess" => true},
+        %{
+          "type" => "workspaceWrite",
+          "writableRoots" => ["relative/path"],
+          "networkAccess" => true
+        },
         %{"type" => "futureSandbox", "nested" => %{"flag" => true}}
       ]
 
@@ -439,7 +443,8 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "acceptForSession"
+                 payload["id"] == 99 and
+                   get_in(payload, ["result", "decision"]) == "acceptForSession"
                else
                  false
                end
@@ -537,7 +542,12 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                    |> Jason.decode!()
 
                  payload["id"] == 110 and
-                   get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-717", "answers"]) ==
+                   get_in(payload, [
+                     "result",
+                     "answers",
+                     "mcp_tool_call_approval_call-717",
+                     "answers"
+                   ]) ==
                      ["Approve this Session"]
                else
                  false
@@ -617,7 +627,8 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       assert_received {:app_server_message,
                        %{
                          event: :tool_input_auto_answered,
-                         answer: "This is a non-interactive session. Operator input is unavailable."
+                         answer:
+                           "This is a non-interactive session. Operator input is unavailable."
                        }}
     after
       File.rm_rf(test_root)
@@ -916,7 +927,9 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Handle supported tool calls", issue, tool_executor: tool_executor)
+               Adapter.run(workspace, "Handle supported tool calls", issue,
+                 tool_executor: tool_executor
+               )
 
       assert_received {:tool_called, "legacy_tracker_graphql",
                        %{
@@ -1045,9 +1058,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                  tool_executor: tool_executor
                )
 
-      assert_received {:tool_called, "legacy_tracker_graphql", %{"query" => "query Viewer { viewer { id } }"}}
+      assert_received {:tool_called, "legacy_tracker_graphql",
+                       %{"query" => "query Viewer { viewer { id } }"}}
 
-      assert_received {:app_server_message, %{event: :tool_call_failed, payload: %{"params" => %{"tool" => "legacy_tracker_graphql"}}}}
+      assert_received {:app_server_message,
+                       %{
+                         event: :tool_call_failed,
+                         payload: %{"params" => %{"tool" => "legacy_tracker_graphql"}}
+                       }}
     after
       File.rm_rf(test_root)
     end
@@ -1111,7 +1129,8 @@ defmodule SymphonyElixir.Codex.AdapterTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = Adapter.run(workspace, "Validate newline-delimited buffering", issue)
+      assert {:ok, _result} =
+               Adapter.run(workspace, "Validate newline-delimited buffering", issue)
     after
       File.rm_rf(test_root)
     end
@@ -1254,9 +1273,13 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Capture malformed protocol line", issue, on_message: on_message)
+               Adapter.run(workspace, "Capture malformed protocol line", issue,
+                 on_message: on_message
+               )
 
-      assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
+      assert_received {:app_server_message,
+                       %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
+
       assert_received {:app_server_message, %{event: :turn_completed}}
     after
       File.rm_rf(test_root)
@@ -1412,6 +1435,25 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       config = %{thread_sandbox: "read-only", approval_policy: "never"}
       floor = %{"thread_sandbox" => "workspace-write"}
       assert Adapter.passes_safety_floor?(config, floor)
+    end
+
+    test "fails when workspace-write exceeds a read-only floor" do
+      config = %{thread_sandbox: "workspace-write", approval_policy: "never"}
+      floor = %{"thread_sandbox" => "read-only"}
+      refute Adapter.passes_safety_floor?(config, floor)
+    end
+
+    test "fails when approval_policy is not never even if floor is relaxed" do
+      config = %{thread_sandbox: "workspace-write", approval_policy: "on-request"}
+      floor = %{"thread_sandbox" => "workspace-write", "approval_policy" => "on-request"}
+      refute Adapter.passes_safety_floor?(config, floor)
+    end
+
+    test "start_session refuses unsafe AgentRuntime profile config before launch" do
+      config = %{thread_sandbox: "danger-full-access", approval_policy: "never"}
+
+      assert {:error, {:sandbox_floor_violation, :codex, :config}} =
+               Adapter.start_session("/tmp/not-a-symphony-workspace", config)
     end
 
     test "supports string keys (from YAML parse)" do

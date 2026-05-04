@@ -17,28 +17,24 @@ defmodule SymphonyElixir.Gemini.Adapter do
   def start_session(workspace_path, config) do
     cmd = config[:command] || config["command"]
 
-    if is_nil(cmd) do
-      {:error, :missing_command}
-    else
-      port_opts = [
-        :binary,
-        :exit_status,
-        :hide,
-        :stderr_to_stdout,
-        {:cd, workspace_path},
-        {:line, 16_384}
-      ]
+    cond do
+      not is_binary(cmd) or String.trim(cmd) == "" ->
+        {:error, :missing_command}
 
-      port = Port.open({:spawn, cmd}, port_opts)
+      not passes_safety_floor?(config, safety_floor(config)) ->
+        {:error, {:sandbox_floor_violation, :gemini, :config}}
 
-      {:ok,
-       %{
-         port: port,
-         workspace_path: workspace_path,
-         tokens: %{prompt: 0, candidates: 0, cached: 0, total: 0},
-         session_id: nil,
-         buffer: ""
-       }}
+      true ->
+        with {:ok, port} <- open_bash_port(cmd, workspace_path) do
+          {:ok,
+           %{
+             port: port,
+             workspace_path: workspace_path,
+             tokens: %{prompt: 0, candidates: 0, cached: 0, total: 0},
+             session_id: nil,
+             buffer: ""
+           }}
+        end
     end
   end
 
@@ -53,19 +49,22 @@ defmodule SymphonyElixir.Gemini.Adapter do
 
   @impl SymphonyElixir.AgentRuntime
   def stream_events(%{port: port} = session) when is_port(port) do
-    Stream.unfold(session, fn s ->
-      receive do
-        {^port, {:data, {:eol, line}}} ->
-          {parse_event_line(line), s}
+    Stream.unfold({:open, session}, fn
+      {:done, _s} ->
+        nil
 
-        {^port, {:exit_status, status}} ->
-          {%{kind: :exit, status: status}, nil}
-      after
-        60_000 ->
-          {%{kind: :stalled}, s}
-      end
+      {:open, s} ->
+        receive do
+          {^port, {:data, {:eol, line}}} ->
+            {parse_event_line(line), {:open, s}}
+
+          {^port, {:exit_status, status}} ->
+            {%{kind: :exit, status: status}, {:done, s}}
+        after
+          60_000 ->
+            {%{kind: :stalled}, {:open, s}}
+        end
     end)
-    |> Stream.take_while(&(&1 != nil))
   end
 
   def stream_events(_session), do: Stream.cycle([]) |> Stream.take(0)
@@ -89,8 +88,8 @@ defmodule SymphonyElixir.Gemini.Adapter do
     require_sandbox = Map.get(floor, "require_sandbox", true)
     forbid_yolo = Map.get(floor, "forbid_yolo", true)
 
-    sandbox_present? = String.contains?(cmd, "--sandbox")
-    yolo_present? = String.contains?(cmd, "--yolo")
+    sandbox_present? = flag_present?(cmd, "sandbox")
+    yolo_present? = flag_present?(cmd, "yolo")
 
     (not require_sandbox or sandbox_present?) and (not forbid_yolo or not yolo_present?)
   end
@@ -131,4 +130,39 @@ defmodule SymphonyElixir.Gemini.Adapter do
   end
 
   defp extract_tokens(_), do: %{prompt: 0, candidates: 0, cached: 0, total: 0}
+
+  defp flag_present?(cmd, flag) when is_binary(cmd) and is_binary(flag) do
+    Regex.match?(~r/(^|\s)--#{Regex.escape(flag)}(\s|$)/, cmd)
+  end
+
+  defp safety_floor(config) do
+    config[:_safety_floor] || config["_safety_floor"] || %{}
+  end
+
+  defp open_bash_port(cmd, workspace_path) do
+    case System.find_executable("bash") do
+      nil ->
+        {:error, :bash_not_found}
+
+      bash ->
+        try do
+          {:ok,
+           Port.open(
+             {:spawn_executable, String.to_charlist(bash)},
+             [
+               :binary,
+               :exit_status,
+               :hide,
+               :stderr_to_stdout,
+               args: [~c"-lc", String.to_charlist(cmd)],
+               cd: String.to_charlist(workspace_path),
+               line: 16_384
+             ]
+           )}
+        rescue
+          error in ArgumentError ->
+            {:error, {:port_open_failed, Exception.message(error)}}
+        end
+    end
+  end
 end

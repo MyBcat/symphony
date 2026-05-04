@@ -130,14 +130,19 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "monday" and not is_integer(settings.tracker.board_id) ->
         {:error, :missing_monday_board_id}
 
-      settings.tracker.kind == "monday" and not is_binary(settings.tracker.symphony_status_column_id) ->
+      settings.tracker.kind == "monday" and
+          not is_binary(settings.tracker.symphony_status_column_id) ->
         {:error, :missing_monday_status_column}
 
       settings.tracker.kind == "monday" and not is_integer(settings.tracker.heartbeat_item_id) ->
         {:error, :missing_monday_heartbeat_item_id}
 
+      settings.tracker.kind == "monday" and blank?(settings.tracker.profile_column_id) ->
+        {:error, :missing_monday_profile_column}
+
       handoff_active_overlap(settings.tracker) != [] ->
-        {:error, {:handoff_states_overlap_active_states, handoff_active_overlap(settings.tracker)}}
+        {:error,
+         {:handoff_states_overlap_active_states, handoff_active_overlap(settings.tracker)}}
 
       settings.agent.default_profile not in [nil, ""] and
           not Map.has_key?(settings.profiles, settings.agent.default_profile) ->
@@ -146,6 +151,10 @@ defmodule SymphonyElixir.Config do
       unknown_kind_profile(settings.profiles) != nil ->
         {:error, {:unknown_profile_kind, unknown_kind_profile(settings.profiles)}}
 
+      invalid_profile_max_concurrent(settings.profiles) != nil ->
+        {:error,
+         {:invalid_profile_max_concurrent, invalid_profile_max_concurrent(settings.profiles)}}
+
       profile_safety_floor_violation(settings) != nil ->
         {:error, {:profile_safety_floor_violation, profile_safety_floor_violation(settings)}}
 
@@ -153,6 +162,9 @@ defmodule SymphonyElixir.Config do
         :ok
     end
   end
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: true
 
   defp handoff_active_overlap(%{active_states: active_states, handoff_states: handoff_states}) do
     active = MapSet.new(Enum.map(active_states || [], &Schema.normalize_issue_state/1))
@@ -172,6 +184,18 @@ defmodule SymphonyElixir.Config do
   end
 
   defp unknown_kind_profile(_), do: nil
+
+  defp invalid_profile_max_concurrent(profiles) when is_map(profiles) do
+    Enum.find_value(profiles, fn {name, profile} ->
+      case profile.max_concurrent do
+        nil -> nil
+        value when is_integer(value) and value > 0 -> nil
+        _ -> name
+      end
+    end)
+  end
+
+  defp invalid_profile_max_concurrent(_profiles), do: nil
 
   defp profile_safety_floor_violation(settings) do
     floor = settings.agent.sandbox_safety_floor || %{}

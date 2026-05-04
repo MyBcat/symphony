@@ -66,9 +66,10 @@ defmodule SymphonyElixir.Monday.ItemTest do
     end
 
     test "errors when symphony_status column is not present in column_values" do
-      raw = update_in(@raw_item["column_values"], fn cols ->
-        Enum.reject(cols, &(&1["id"] == "symphony_status_xyz"))
-      end)
+      raw =
+        update_in(@raw_item["column_values"], fn cols ->
+          Enum.reject(cols, &(&1["id"] == "symphony_status_xyz"))
+        end)
 
       assert {:error, {:missing_column, "symphony_status_xyz"}} = Item.from_monday(raw, @config)
     end
@@ -76,10 +77,11 @@ defmodule SymphonyElixir.Monday.ItemTest do
 
   describe "profile extraction" do
     test "extracts profile from configured profile_column_id when present" do
-      raw = put_in(@raw_item["column_values"], [
-        %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
-        %{"id" => "profile_dropdown_xyz", "text" => "claude_opus"}
-      ])
+      raw =
+        put_in(@raw_item["column_values"], [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+          %{"id" => "profile_dropdown_xyz", "text" => "claude_opus"}
+        ])
 
       config = Map.put(@config, :profile_column_id, "profile_dropdown_xyz")
 
@@ -93,12 +95,35 @@ defmodule SymphonyElixir.Monday.ItemTest do
     end
 
     test "profile is nil when column is empty string" do
-      raw = put_in(@raw_item["column_values"], [
-        %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
-        %{"id" => "profile_dropdown_xyz", "text" => ""}
-      ])
+      raw =
+        put_in(@raw_item["column_values"], [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+          %{"id" => "profile_dropdown_xyz", "text" => ""}
+        ])
 
       config = Map.put(@config, :profile_column_id, "profile_dropdown_xyz")
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.profile == nil
+    end
+
+    test "profile is trimmed and nil when whitespace-only" do
+      raw =
+        put_in(@raw_item["column_values"], [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+          %{"id" => "profile_dropdown_xyz", "text" => "  claude_opus  "}
+        ])
+
+      config = Map.put(@config, :profile_column_id, "profile_dropdown_xyz")
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.profile == "claude_opus"
+
+      raw =
+        put_in(@raw_item["column_values"], [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"},
+          %{"id" => "profile_dropdown_xyz", "text" => "  "}
+        ])
 
       assert {:ok, item} = Item.from_monday(raw, config)
       assert item.profile == nil
