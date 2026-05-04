@@ -18,6 +18,11 @@ tracker:
   description_column_id: null
   branch_column_id: null
   labels_column_id: "dropdown_mkwbsh98"
+  # Symphony Repo column (Spec 3) — operator creates a Monday dropdown column
+  # whose labels match keys in the top-level `repos:` map below, then fills in
+  # the column ID here. Leave null to keep single-repo legacy mode (uses the
+  # global hooks.after_create below).
+  repo_column_id: null
   active_states:
     - "Symphony Ready"
     - "In Progress"
@@ -32,6 +37,21 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+# Per-repo dispatch entries (Spec 3). Each key maps to one Monday Symphony Repo
+# dropdown label. clone_url is required; after_create / before_remove / 
+# allowed_profiles / default_branch are optional. When tracker.repo_column_id
+# is set and an item resolves to a key here, this entry's after_create runs
+# instead of the legacy hooks.after_create below. When the column is empty for
+# an item, the legacy hooks.after_create below is used as the default.
+repos:
+  symphony:
+    clone_url: https://github.com/openai/symphony.git
+    after_create: |
+      git clone --depth 1 https://github.com/openai/symphony .
+      if command -v mise >/dev/null 2>&1; then
+        cd elixir && mise trust && mise exec -- mix deps.get
+      fi
+    default_branch: main
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
