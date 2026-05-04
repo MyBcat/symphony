@@ -4,7 +4,7 @@
 **Date:** 2026-05-04
 **Authors:** Ankit Patel + Claude (Opus 4.7, 1M context)
 **Sequencing:** Spec 3. **Depends on Spec 1** (`2026-05-03-symphony-monday-tracker-swap.md`) and **Spec 2** (`2026-05-03-symphony-multi-runtime-profiles.md`) being shipped first. Both merged as of 2026-05-04. PR #4 (`fix: translate Monday status labels to label IDs`) also merged before this spec begins — it unblocked end-to-end dispatch on the Tech Board.
-**Modifies:** `elixir/WORKFLOW.md`, `elixir/lib/symphony_elixir/{config,monday/adapter,monday/item,workspace,profile_resolver,status_dashboard,tracker}*`
+**Modifies:** `elixir/WORKFLOW.md`, `elixir/lib/symphony_elixir/{agent_runner,config,monday/adapter,monday/item,prompt_builder,workspace,profile_resolver,status_dashboard,tracker}*`
 **Does NOT modify:** Agent runtime adapters (Spec 2's responsibility — Claude/Codex/Gemini adapters keep their session contracts); Tracker primitive's Monday-write path (Spec 1 DL-005 stays intact).
 **Skills applied:** `agent_spec_writer` (format), based on Spec 2's per-part context-layer convention.
 
@@ -17,13 +17,13 @@
 | One Symphony per board; multi-board = Spec 4 territory | DL-005 |
 | Operator edits `repos:` map by hand in WORKFLOW.md (no UI) | DL-006 |
 | Startup drift validation of repo-key ↔ Monday dropdown labels | DL-007 |
-| Repo selection is privileged input — clone URL must pass safety check at startup | DL-008 |
+| Repo selection is privileged input — clone URL must pass host allowlist + safe-clone checks at startup | DL-008 |
 
 ---
 
 ## 1. System Overview
 
-Symphony today targets one hardcoded repo via `WORKFLOW.md hooks.after_create`. To run multiple MyBCAT repos through a single Symphony instance, this spec adds per-item repo selection from a new Monday dropdown column. The dropdown's value is a key into a new `repos:` map in WORKFLOW.md; each entry holds the clone URL and an after-create hook tailored to that repo's stack (npm vs pip vs mix, etc.).
+Symphony today targets one hardcoded repo via `WORKFLOW.md hooks.after_create`. To run multiple MyBCAT repos through a single Symphony instance, this spec adds per-item repo selection from a new Monday dropdown column. The dropdown's value is a key into a new `repos:` map in WORKFLOW.md; each entry holds the clone URL and optional post-clone hooks tailored to that repo's stack (npm vs pip vs mix, etc.).
 
 The operator workflow becomes: pick repo from a Monday dropdown, pick AI profile from the existing dropdown (Spec 2), set `Symphony Status = Symphony Ready`. One board, one Symphony, N repos.
 
@@ -34,16 +34,20 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 ## 2. Behavioral Contract (system-level)
 
 ### 2.1 Repo selection per item
-- **When** Symphony dispatches an item, **the system** reads the per-issue Monday `Symphony Repo` dropdown column (column ID configured via `tracker.repo_column_id`). If non-empty, the named repo is used.
-- **When** the per-issue value is empty, **the system** falls back to the existing global `hooks.after_create` block as the "default repo" (preserves Spec 1/2 backward compat).
+- **When** `tracker.repo_column_id` is configured, **the system** reads the per-issue Monday `Symphony Repo` dropdown column through `SymphonyElixir.Monday.Adapter` (read-only; no Monday mutations are added). If non-empty, the named repo is used.
+- **When** `tracker.repo_column_id` is unset, **the system** enters single-repo legacy mode: every issue resolves to `repo=<default>`, the `repos:` map is ignored for dispatch, and the existing global `hooks.after_create` block is used if present. Startup MUST log `repo_column_id unset; multi-repo dispatch disabled`; if `repos:` is non-empty, this MUST be a warning naming that `repos:` is ignored until the column ID is set.
+- **When** `tracker.repo_column_id` is configured and the per-issue value is empty, **the system** falls back to the existing global `hooks.after_create` block as the "default repo" (preserves Spec 1/2 backward compat).
+- **When** an issue resolves to `repo=<default>` and the global `hooks.after_create` block is unset or blank, **the system** skips dispatch for that item and emits an operator-visible error (`{:no_default_repo, issue.identifier}`). It does NOT create an empty "default repo" workspace.
 - **When** the per-issue value resolves to a key that is not defined in WORKFLOW.md `repos`, **the system** skips dispatch for that item and emits an operator-visible error (`{:unknown_repo, repo_key}`). It does NOT silently fall back to the default.
 - **The system** treats the resolved repo key as part of the issue's dispatch context: it is logged, surfaced on the dashboard, and threaded through retry scheduling.
 
 ### 2.2 Per-repo workspace creation
-- **When** the resolved repo entry has its own `after_create` hook, **the system** runs that hook inside the per-issue workspace instead of the global `hooks.after_create`.
+- **When** the resolved repo is a known `repos:` entry, **the system** performs the clone itself using that entry's validated `clone_url`; per-repo `after_create` is a post-clone setup hook only (e.g., `npm ci`, `mix deps.get`) and MUST NOT contain `git clone`, `git submodule`, or another network source checkout.
+- **When** the resolved repo entry has its own non-blank `after_create` hook, **the system** runs that hook inside the cloned per-issue workspace instead of the global `hooks.after_create`.
+- **When** the resolved repo entry omits `after_create` or sets it to an empty/whitespace-only string, **the system** treats setup as an intentional no-op after the clone succeeds.
 - **When** the resolved repo entry has its own `before_remove` hook, **the system** runs that hook on workspace cleanup. (Optional per-repo override of the global `hooks.before_remove`.)
-- **When** the resolved repo has no `after_create` defined but the global one is set, **the system** uses the global hook as fallback within that repo's clone (allows minimal `repos:` entries that just specify `clone_url`).
-- **The system** evaluates hook commands inside the workspace directory after `mkdir`, not before clone.
+- **The global** `hooks.after_create` **is used only for `repo=<default>` legacy dispatch**. It is never run after a known `repos:` clone, because legacy hooks commonly include their own clone command.
+- **The system** evaluates hook commands from the live Symphony WORKFLOW.md loaded by the orchestrator process, never from a WORKFLOW.md file inside the cloned agent workspace.
 
 ### 2.3 Per-repo profile allowlist (HIPAA gate)
 - **When** a repo entry declares `allowed_profiles: [...]`, **the system** asserts the resolved profile name is in that list before dispatch.
@@ -61,16 +65,19 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 - **When** the dashboard renders the global summary, **the system** does NOT aggregate by repo; aggregation by repo is out of scope for v1 (extension territory).
 
 ### 2.6 Startup validation of repo drift
-- **When** Symphony starts, **the system** queries the Monday board for the `Symphony Repo` dropdown column's full list of label options.
+- **When** Symphony starts and `tracker.repo_column_id` is configured, **the system** queries the Monday board for the `Symphony Repo` dropdown column's full list of label options.
 - **When** any repo key in `repos:` is missing from the dropdown labels, **the system** emits an operator warning naming the gap.
 - **When** any dropdown label has no corresponding entry in `repos:`, **the system** emits an operator warning naming the orphan.
 - **When** the dropdown column does not exist on the board AND `tracker.repo_column_id` is configured, **the system** refuses to boot.
-- **When** `tracker.repo_column_id` is unset, **the system** boots without the validation (single-repo legacy mode preserved).
+- **When** `tracker.repo_column_id` is unset, **the system** boots without the Monday drift query (single-repo legacy mode preserved) but MUST log the legacy-mode message from §2.1 so operators do not silently believe multi-repo dispatch is active.
 
 ### 2.7 Clone URL safety floor
-- **When** Symphony starts, **the system** validates each `repos[*].clone_url` matches one of: `git@<host>:<path>.git` (SSH form) or `https://<host>/<path>.git` (HTTPS form). It rejects entries with embedded credentials in the URL (e.g. `https://user:token@host/...`), shell metacharacters, or paths that traverse outside the workspace.
+- **When** Symphony starts, **the system** validates each `repos[*].clone_url` before any dispatch. Accepted forms are `git@<host>:<org>/<repo>.git` (SSH scp form, user MUST be exactly `git`) or `https://<host>/<org>/<repo>.git` (HTTPS form, no userinfo). The raw URL MUST be ASCII-only, NFC-normalized, free of shell metacharacters/control characters, and contain no path traversal, backslashes, URL-encoded path separators, or empty path segments.
+- **When** the parsed host is not an exact lower-case ASCII match for `repo_policy.allowed_clone_hosts` (default `["github.com"]`), **the system** refuses to boot and names the repo key + host. Subdomain suffix matches do not count (`github.com.evil.test` is not `github.com`).
 - **When** any entry fails validation, **the system** refuses to boot and names the offending repo key + reason.
-- **The system** does NOT verify the clone URL is reachable at startup (network-dependent; run-time clone failure is handled via Spec 1's existing workspace-hook-failed retry path).
+- **When** cloning a known repo, **the system** invokes git as argv (no shell interpolation) with the equivalent of: `git -c core.hooksPath=/dev/null -c protocol.file.allow=never -c protocol.ext.allow=never clone --depth 1 --no-recurse-submodules -- <clone_url> .`
+- **The system** does NOT initialize or update git submodules in v1. Repos that require submodules need a future spec with an explicit submodule host allowlist.
+- **The system** does NOT verify the clone URL is reachable at startup (network-dependent; run-time clone failure returns `{:workspace_clone_failed, repo_key, exit_code, output}` and uses the existing dispatch-failure retry path).
 
 ---
 
@@ -83,7 +90,10 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 - The system MUST NOT auto-clone a "default repo" if the column is empty AND the global `hooks.after_create` is unset. Skip + warn is the only valid response in that case.
 - The system MUST NOT fall back across repos on failure. If the resolved repo's clone fails, the orchestrator retries with the same repo, never switches.
 - The system MUST NOT mid-flight swap a running session's workspace if the repo column changes. Change applies on next attempt only.
-- The system MUST NOT inspect or modify `clone_url` beyond the safety-floor format check at startup. The clone command runs verbatim under existing process-spawn semantics.
+- The system MUST NOT run a per-repo clone through `after_create`. Clone execution is owned by Symphony's safe-clone command (§2.7); `after_create` is post-clone setup only.
+- The system MUST NOT support git submodule checkout in v1 (`--no-recurse-submodules`; no `git submodule` in per-repo hooks).
+- The system MUST NOT support env-var indirection in `repos[*].clone_url`; URLs are literal WORKFLOW.md values reviewed in git.
+- The system MUST NOT read hook definitions from files inside the cloned workspace. An agent may edit a repo's WORKFLOW.md copy, but that copy cannot alter the running Symphony instance's repo map or another repo's hook.
 
 ---
 
@@ -93,158 +103,441 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 - **Type:** dropdown (`limit_select: true` — single-select, matching `Symphony Profile`).
 - **Column ID:** TBD at column creation; configured into WORKFLOW.md via `tracker.repo_column_id`.
 - **Labels:** one entry per managed repo (e.g., `mybcat-blog`, `hubspot-daily`, `podcast`, `mybcat-rag`, `OB`, `symphony`).
-- **Symphony reads:** dropdown text value via `Monday.Adapter` items_page query (extension of `collect_column_ids`).
+- **Symphony reads:** dropdown text value via `Monday.Adapter` items_page query (extension of `collect_column_ids`) and dropdown metadata via `SymphonyRepoLabels` at startup. These are read-only GraphQL queries and do not alter Monday board data.
 - **Symphony writes:** never. The column is operator-controlled only.
 - **When unavailable:** if the GraphQL query for the column fails, dispatch falls through Spec 1's existing `{:unexpected_response, ...}` error path; orchestrator retries on next tick.
 
+#### `SymphonyRepoLabels` GraphQL response shape
+
+Query mirrors the existing `SymphonyStatusLabels` metadata query, with a separate operation name so test mocks can distinguish the drift-validation path:
+
+```graphql
+query SymphonyRepoLabels($boardId: ID!, $columnIds: [String!]) {
+  boards(ids: [$boardId]) {
+    columns(ids: $columnIds) {
+      id
+      title
+      settings_str
+    }
+  }
+}
+```
+
+Expected successful response shape:
+
+```elixir
+%{
+  "data" => %{
+    "boards" => [
+      %{
+        "columns" => [
+          %{
+            "id" => "<tracker.repo_column_id>",
+            "title" => "Symphony Repo",
+            "settings_str" => Jason.encode!(%{
+              "labels" => %{"0" => "mybcat-blog", "1" => "hubspot-daily"},
+              "deactivated_labels" => ["1"]
+            })
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Parser contract: decode `settings_str`, read `labels` as a map of label-id string to label text, read `deactivated_labels` as optional label-id strings, and return `%{active_labels: [...], deactivated_labels: [...]}`. Unlike status labels, deactivated repo labels are not dropped; AW-4 defines how they behave.
+
 ### Per-repo git remotes
 - **Auth:** assumed via existing host-level git credentials (SSH key for `git@github.com:MyBcat/...` or HTTPS credential helper). Symphony does not provision credentials per repo.
-- **Clone command:** runs verbatim from `repos[X].after_create` hook inside the workspace dir under existing process-spawn semantics. No shell escaping happens beyond what bash already provides.
-- **When unavailable:** clone failure surfaces as `{:workspace_hook_failed, "after_create", exit_code, output}` per existing Spec 1 behavior; orchestrator retries.
+- **Clone command:** constructed by Symphony from `repos[X].clone_url` after §2.7 validation and executed as argv, not via `bash -lc`.
+- **Post-clone setup:** optional `repos[X].after_create` runs inside the cloned workspace under the existing hook runner. This hook is trusted operator-reviewed WORKFLOW.md code and must not perform checkout/submodule/network-source operations.
+- **When unavailable:** clone failure surfaces as `{:workspace_clone_failed, repo_key, exit_code, output}` and follows the existing dispatch-failure retry path.
 
 ### WORKFLOW.md `repos:` map (new top-level key)
 - **Shape:**
   ```yaml
+  repo_policy:
+    allowed_clone_hosts: [github.com]
   repos:
     mybcat-blog:
       clone_url: git@github.com:MyBcat/mybcat-blog.git
       after_create: |
-        git clone --depth 1 git@github.com:MyBcat/mybcat-blog.git .
         npm ci
       allowed_profiles: [claude_opus, claude_sonnet]
       default_branch: main
     hubspot-daily:
       clone_url: git@github.com:MyBcat/hubspot-daily.git
       after_create: |
-        git clone --depth 1 git@github.com:MyBcat/hubspot-daily.git .
         python3 -m pip install -r requirements.txt
       allowed_profiles: [claude_opus, codex_gpt55_xhigh]
   ```
 - **Required fields:** `clone_url`. (`after_create`, `allowed_profiles`, `default_branch` all optional.)
-- **Validation at startup:** clone_url format check (per §2.7); `allowed_profiles` entries must reference profiles that exist in `profiles` map; `default_branch` is opaque text.
+- **Optional policy:** `repo_policy.allowed_clone_hosts` defaults to `["github.com"]`; every host entry must be lower-case ASCII and exact-match only.
+- **Validation at startup:** clone_url safety check (per §2.7); `allowed_profiles` entries must reference profiles that exist in `profiles` map; per-repo `after_create` must not contain `git clone` or `git submodule`; `default_branch` is opaque text.
 
 ---
 
 ## 5. Behavioral Scenarios (eval-only)
 
 ### S1 — Happy path: per-item Claude Opus on mybcat-blog
-- Setup: `Symphony Repo` = `mybcat-blog`, `Symphony Profile` = `claude_opus`, `Symphony Status` = `Symphony Ready`. WORKFLOW.md has `repos.mybcat-blog.after_create` with `git clone ... && npm ci`.
-- Action: Symphony's next tick.
-- Expected: Workspace created; `repos.mybcat-blog.after_create` hook runs (clones blog repo, installs deps); Claude Code session spawns with prompt rendered against issue title + description; Item status transitions Symphony Ready → In Progress; dashboard shows `repo=mybcat-blog profile=claude_opus`.
+- **Setup:** `Symphony Repo` = `mybcat-blog`, `Symphony Profile` = `claude_opus`, `Symphony Status` = `Symphony Ready`. WORKFLOW.md has `repos.mybcat-blog.clone_url` and `repos.mybcat-blog.after_create` with `npm ci`.
+- **Action:** Symphony's next tick.
+- **Expected:** Workspace created; Symphony safely clones `repos.mybcat-blog.clone_url`; `repos.mybcat-blog.after_create` runs post-clone and installs deps; Claude Code session spawns with prompt rendered against issue title + description; Item status transitions Symphony Ready -> In Progress; dashboard shows `repo=mybcat-blog profile=claude_opus`.
 
 ### S2 — Happy path: empty repo column falls back to global hook
-- Setup: `Symphony Repo` empty, `Symphony Profile` = `claude_opus`. WORKFLOW.md has global `hooks.after_create` set (existing test/single-repo mode).
-- Action: Symphony's next tick.
-- Expected: Workspace created; global `hooks.after_create` runs (legacy openai/symphony clone); session spawns; dashboard shows `repo=<default> profile=claude_opus` (or omits repo with explanatory marker).
+- **Setup:** `Symphony Repo` empty, `Symphony Profile` = `claude_opus`. WORKFLOW.md has global `hooks.after_create` set (existing test/single-repo mode).
+- **Action:** Symphony's next tick.
+- **Expected:** Workspace created; global `hooks.after_create` runs (legacy openai/symphony clone); session spawns; dashboard shows `repo=<default> profile=claude_opus` (or omits repo with explanatory marker).
 
 ### S3 — Happy path: repo flip on retry applies to new attempt
-- Setup: Item starts under `Symphony Repo = mybcat-blog`, attempt 1 fails (after_create hook crashes on `npm ci` due to network blip). Operator changes `Symphony Repo` to `hubspot-daily` mid-retry-backoff.
-- Action: Retry timer fires.
-- Expected: Symphony re-resolves repo, sees `hubspot-daily`, creates a fresh workspace under that key (does not reuse the mybcat-blog workspace), runs hubspot-daily's `after_create` (`pip install`), spawns session.
+- **Setup:** Item starts under `Symphony Repo = mybcat-blog`, attempt 1 fails (post-clone `after_create` crashes on `npm ci` due to network blip). Operator changes `Symphony Repo` to `hubspot-daily` mid-retry-backoff.
+- **Action:** Retry timer fires.
+- **Expected:** Symphony re-resolves repo, sees `hubspot-daily`, cleans up the prior failed workspace, creates a fresh workspace under that key (does not reuse the mybcat-blog workspace), safely clones hubspot-daily, runs hubspot-daily's `after_create` (`pip install`), spawns session.
 
 ### S4 — Error: unknown repo key
-- Setup: `Symphony Repo` = `does-not-exist` (label exists on Monday because operator added it but forgot to add the entry to WORKFLOW.md).
-- Action: Symphony's next tick.
-- Expected: Skip + warn `{:unknown_repo, "does-not-exist"}`; item left in `Symphony Ready`; orchestrator continues to other items; no workspace created; no agent spawned.
+- **Setup:** `Symphony Repo` = `does-not-exist` (label exists on Monday because operator added it but forgot to add the entry to WORKFLOW.md).
+- **Action:** Symphony's next tick.
+- **Expected:** Skip + warn `{:unknown_repo, "does-not-exist"}`; item left in `Symphony Ready`; orchestrator continues to other items; no workspace created; no agent spawned.
 
 ### S5 — Error: profile not in repo's allowlist
-- Setup: `Symphony Repo` = `mybcat-blog` (allowed_profiles = `[claude_opus, claude_sonnet]`), `Symphony Profile` = `gemini_long_context`.
-- Action: Symphony's next tick.
-- Expected: Skip + warn `{:profile_not_allowed_on_repo, "gemini_long_context", "mybcat-blog"}`; no workspace; item left in `Symphony Ready`.
+- **Setup:** `Symphony Repo` = `mybcat-blog` (allowed_profiles = `[claude_opus, claude_sonnet]`), `Symphony Profile` = `gemini_long_context`.
+- **Action:** Symphony's next tick.
+- **Expected:** Skip + warn `{:profile_not_allowed_on_repo, "gemini_long_context", "mybcat-blog"}`; no workspace; item left in `Symphony Ready`.
 
 ### S6 — Error: clone URL safety floor violation at startup
-- Setup: WORKFLOW.md has `repos.bad.clone_url = https://user:t0ken@github.com/x/y.git` (embedded credentials).
-- Action: Symphony boot.
-- Expected: Boot refused with operator error naming `bad` + violation `embedded credentials in URL`. No tick runs.
+- **Setup:** WORKFLOW.md has `repos.bad.clone_url = https://user:t0ken@github.com/x/y.git` (embedded credentials).
+- **Action:** Symphony boot.
+- **Expected:** Boot refused with operator error naming `bad` + violation `embedded credentials in URL`. No tick runs.
 
 ### S7 — Edge: startup detects repo drift between WORKFLOW.md and Monday dropdown
-- Setup: WORKFLOW.md `repos:` has keys `[mybcat-blog, hubspot-daily, podcast]`. Monday dropdown column has labels `[mybcat-blog, hubspot-daily, OB]` (operator added `OB` on Monday but forgot WORKFLOW.md; operator removed `podcast` from Monday but forgot WORKFLOW.md).
-- Action: Symphony boot (with `tracker.repo_column_id` set).
-- Expected: Orchestrator boots; emits two warnings: `repo "podcast" missing from Monday dropdown` and `Monday dropdown label "OB" has no entry in repos: map`. Dispatch proceeds normally for items using `mybcat-blog` or `hubspot-daily`.
+- **Setup:** WORKFLOW.md `repos:` has keys `[mybcat-blog, hubspot-daily, podcast]`. Monday dropdown column has labels `[mybcat-blog, hubspot-daily, OB]` (operator added `OB` on Monday but forgot WORKFLOW.md; operator removed `podcast` from Monday but forgot WORKFLOW.md).
+- **Action:** Symphony boot (with `tracker.repo_column_id` set).
+- **Expected:** Orchestrator boots; emits two warnings: `repo "podcast" missing from Monday dropdown` and `Monday dropdown label "OB" has no entry in repos: map`. Dispatch proceeds normally for items using `mybcat-blog` or `hubspot-daily`.
+
+### S8 — Error: host allowlist rejects Unicode-spoofed clone URL
+- **Setup:** WORKFLOW.md has `repos.bad.clone_url = https://githu\u0432.com/MyBcat/repo.git` (Cyrillic small ve in the host) or `https://github.com.evil.test/MyBcat/repo.git`.
+- **Action:** Symphony boot.
+- **Expected:** Boot refused with operator error naming `bad` + violation `clone host not allowed` (or `non-ASCII clone_url`). The value is never passed to git.
+
+### S9 — Edge: known repo with intentionally empty setup hook
+- **Setup:** `Symphony Repo` = `symphony`, WORKFLOW.md has `repos.symphony.clone_url = git@github.com:MyBcat/symphony.git` and `repos.symphony.after_create = ""`.
+- **Action:** Symphony's next tick.
+- **Expected:** Workspace created; Symphony safely clones the repo; no post-clone hook runs; session spawns normally.
 
 ---
 
 ## 6. Per-Part Context Layers
 
-### Part A — Repo Resolution Layer
+### Part A — Repo Resolution and Workspace Binding Layer
 
 #### A.1 Module Manifest
 
+> Resolves the repository for each Monday item, validates repo config as privileged input, safely clones known repos, and binds profile allowlists to repo selection. Monday remains read-only for repo selection; all Monday writes stay under the Tracker primitive from Spec 1 DL-005.
+
+**Context captured:** 2026-05-04 by Ankit Patel + Claude
+**Last validated:** 2026-05-04
+
+##### Dependencies
+
+| Dependency | Type | Description |
+|---|---|---|
+| WORKFLOW.md `tracker.repo_column_id` | config | Enables multi-repo mode when set; unset means single-repo legacy mode with warning (§2.1, §2.6) |
+| WORKFLOW.md `repo_policy.allowed_clone_hosts` | config | Exact host allowlist for `repos[*].clone_url`; defaults to `["github.com"]` |
+| WORKFLOW.md `repos:` | config | Repo key -> clone/setup/allowlist/default-branch metadata |
+| Monday `Symphony Repo` dropdown | external read | Per-item repo key, read through `Monday.Adapter` only |
+| Git CLI | external process | Invoked by `Workspace` as argv for safe clone, not through `after_create` shell text |
+| `SymphonyElixir.ProfileResolver` | shared library | Resolves Spec 2 profile and enforces repo `allowed_profiles` |
+
+##### Dependents
+
+| Dependent | Type | Description |
+|---|---|---|
+| `SymphonyElixir.Orchestrator` | sync calls | Dispatch gating, retry re-resolution, skip/warn error paths |
+| `SymphonyElixir.AgentRunner` | sync calls | Calls `Workspace.create_for_issue/2` before runtime launch |
+| `SymphonyElixir.StatusDashboard` | read render | Displays resolved repo key for active sessions |
+
+##### Implementation Modules
+
 | Module | Path | Purpose | Consumers |
 |---|---|---|---|
-| `SymphonyElixir.Config` | `lib/symphony_elixir/config.ex` | Loads `repos:` map from WORKFLOW.md; exposes `repos/0`, `repo!/1`, `repo_or_default/1` getters | Orchestrator, ProfileResolver, Workspace |
-| `SymphonyElixir.Config.Schema` | `lib/symphony_elixir/config.ex` (parser) | Validates `repos:` shape at parse time; rejects malformed entries | Config |
-| `SymphonyElixir.Monday.Item` | `lib/symphony_elixir/monday/item.ex` | Extends `from_monday/2` to surface the repo column value as `issue.repo` | Tracker.Issue normalization |
-| `SymphonyElixir.Monday.Adapter` | `lib/symphony_elixir/monday/adapter.ex` | Adds `cfg.repo_column_id` to `collect_column_ids/1`; threads value into normalized issues | Orchestrator dispatch |
-| `SymphonyElixir.ProfileResolver` | `lib/symphony_elixir/profile_resolver.ex` | Adds `allowed_profiles` allowlist check after profile resolution | Orchestrator dispatch |
-| `SymphonyElixir.Workspace` | `lib/symphony_elixir/workspace.ex` | Renders the per-repo `after_create` hook from `Config.repo_or_default(issue.repo)` instead of the global hook | AgentRunner |
-| `SymphonyElixir.StatusDashboard` | `lib/symphony_elixir/status_dashboard.ex` | Renders per-running-issue `repo=` field alongside profile/PID | Operator UI |
+| `SymphonyElixir.Config` | `lib/symphony_elixir/config.ex` | Loads `repo_policy` + `repos:`; exposes `repos/0`, `repo!/1`, `repo_or_default/1`; validates repo semantics | Orchestrator, ProfileResolver, Workspace |
+| `SymphonyElixir.Config.Schema` | `lib/symphony_elixir/config/schema.ex` | Parses `tracker.repo_column_id`, `repo_policy`, and normalized repo entries | Config |
+| `SymphonyElixir.Monday.Item` | `lib/symphony_elixir/monday/item.ex` | Extends `from_monday/2` to surface the repo column text as `issue.repo` | Tracker.Issue normalization |
+| `SymphonyElixir.Monday.Adapter` | `lib/symphony_elixir/monday/adapter.ex` | Adds `cfg.repo_column_id` to `collect_column_ids/1`; adds `SymphonyRepoLabels` metadata query/parser | Orchestrator dispatch, startup validation |
+| `SymphonyElixir.Tracker.Issue` | `lib/symphony_elixir/tracker/issue.ex` | Adds `repo: String.t() | nil` field | Orchestrator, AgentRunner, PromptBuilder |
+| `SymphonyElixir.ProfileResolver` | `lib/symphony_elixir/profile_resolver.ex` | Enforces `allowed_profiles` after Spec 2 profile resolution | AgentRunner dispatch |
+| `SymphonyElixir.Workspace` | `lib/symphony_elixir/workspace.ex` | Resolves repo/default, runs safe clone for known repos, then post-clone hook | AgentRunner |
+| `SymphonyElixir.StatusDashboard` | `lib/symphony_elixir/status_dashboard.ex` | Renders `repo=<key>` in running rows | Operator UI |
+
+##### Data Flows
+
+| Direction | Source/Target | Data | Notes |
+|---|---|---|---|
+| Reads | Monday item column | `Symphony Repo` dropdown text | Read through `Monday.Adapter`; no Monday writes added |
+| Reads | Monday column metadata | repo dropdown `settings_str` | Startup drift validation only |
+| Reads | WORKFLOW.md | `repo_policy`, `repos`, global hooks | Live orchestrator config only; never workspace copy |
+| Writes | Workspace dir | cloned repo contents | `Workspace` safe clone command owns checkout |
+| Writes | Workspace dir | post-clone setup side effects | From trusted WORKFLOW.md `repos[*].after_create` only |
+| (NOT) Writes | Monday | -- | Repo selection is read-only; Spec 1 DL-005 write invariant unchanged |
+
+##### Shared Resources
+
+| Resource | Shared With | Risk Notes |
+|---|---|---|
+| Git credentials on Symphony host | All managed repos | Host allowlist + no embedded URL credentials prevent obvious exfiltration paths |
+| Workspace filesystem | Git clone, post-clone hook, agent runtime | Safe clone disables hooks/submodules; setup hook remains trusted operator code |
+| WORKFLOW.md repo map | All dispatches | Agent workspace edits must not affect live config; deploy/restart is the only config activation path |
+
+> **DARK CODE HOTSPOT:** `clone_url` validation is meaningful only if `Workspace` owns the clone command. Reviewers must reject any implementation that still requires per-repo `after_create` to run `git clone`, because that bypasses host allowlist, Unicode spoof checks, no-submodule policy, and no-hook clone flags.
+
+##### Deployment Model
+
+- **Type:** Modules inside Symphony Elixir (`lib/symphony_elixir/{config,monday,workspace,profile_resolver,status_dashboard}*`)
+- **Runtime:** Elixir 1.19 / OTP 28; git subprocess spawned by `Workspace` using argv
+- **Infrastructure:** Same single BEAM node and workspace root as Spec 1/2
+
+##### Ownership
+
+- **Team:** Symphony reference implementation (MyBCAT)
+- **On-call:** Ankit Patel
 
 #### A.2 Behavioral Contracts
 
-- `Config.repos/0 :: %{String.t() => repo_entry}` — returns the parsed repos map; empty if unset.
-- `Config.repo!/1` — raises if key not present.
-- `Config.repo_or_default/1` — returns `{:ok, repo_entry}` for known keys; `{:default, %{after_create: <global>}}` if key is empty/nil and global hook is set; `{:error, :unknown_repo}` if key is non-empty but not in `repos:` map; `{:error, :no_default}` if key is empty AND no global hook is set.
-- `Item.from_monday/2` returns `%Tracker.Issue{}` with new field `:repo` (String.t() | nil). nil means column is empty or column ID not configured.
-- `Workspace.create_for_issue/2` consults `Config.repo_or_default(issue.repo)` and runs the resolved hook. Existing behavior preserved when issue.repo is nil and global hook exists.
-- `ProfileResolver.resolve/1` extends to take the resolved repo as input; emits `{:error, {:profile_not_allowed_on_repo, profile, repo_key}}` if `allowed_profiles` is set and resolved profile is not in it.
+**Context captured:** 2026-05-04 by Ankit Patel + Claude
+
+---
+
+##### `Config.repo_or_default(repo_key)`
+
+> Resolves a raw Monday repo value into either a known repo entry or the legacy default hook.
+
+| Property | Value |
+|---|---|
+| **Idempotent** | Yes. Pure read of parsed config. |
+| **Failure behavior** | `{:error, {:unknown_repo, repo_key}}` for non-empty unknown keys; `{:error, :no_default_repo}` for empty/nil key with no global `hooks.after_create`. |
+| **Performance envelope** | O(1) map lookup. |
+| **Side effects** | None. |
+| **Retry guidance** | Safe; callers re-run at every attempt boundary to pick up Monday repo changes. |
+| **Data classification** | Internal config. |
+
+##### Return Shape
+
+- `{:ok, {:repo, repo_key, repo_entry}}` for known repo keys.
+- `{:ok, {:default, %{repo_key: "<default>", after_create: global_hook}}}` for nil/blank repo key when global hook is present.
+- `{:error, {:unknown_repo, repo_key}}` for non-empty missing keys.
+- `{:error, :no_default_repo}` for nil/blank repo key when no global hook exists.
+
+##### Warnings
+
+- Repo key comparison is case-sensitive. `mybcat-blog` and `MyBCAT-Blog` are different keys.
+- Whitespace-only Monday values normalize to nil.
+
+---
+
+##### `Config.validate_repo_semantics(settings)`
+
+> Validates repo config at startup before the first poll tick can dispatch work.
+
+| Property | Value |
+|---|---|
+| **Idempotent** | Yes, except for logging warnings. |
+| **Failure behavior** | Returns `{:error, reason}` for malformed repo entries, unsafe clone URLs, unknown profiles in `allowed_profiles`, forbidden clone/submodule commands in per-repo `after_create`, or missing configured repo column. |
+| **Performance envelope** | O(repo count + allowed profile count); no network except optional Monday dropdown metadata fetch when `tracker.repo_column_id` is set. |
+| **Side effects** | Logs warnings for drift and legacy-mode footguns. |
+| **Retry guidance** | Safe at startup and per-poll config validation. |
+| **Data classification** | Internal config; clone URLs may reveal private repo names but no credentials are allowed. |
+
+##### Failure Modes
+
+| Failure | Caller Sees | Recovery |
+|---|---|---|
+| Clone URL has embedded credentials | `{:error, {:unsafe_clone_url, repo_key, :embedded_credentials}}` | Remove credentials; rely on host-level git auth |
+| Clone host not allowlisted | `{:error, {:unsafe_clone_url, repo_key, {:host_not_allowed, host}}}` | Add a reviewed host to `repo_policy.allowed_clone_hosts` or fix typo |
+| Unicode/non-ASCII clone URL | `{:error, {:unsafe_clone_url, repo_key, :non_ascii}}` | Replace with ASCII canonical host/path |
+| Per-repo hook contains checkout/submodule command | `{:error, {:unsafe_repo_hook, repo_key, reason}}` | Move checkout to `clone_url`; remove submodule use |
+| `allowed_profiles` contains unknown profile | `{:error, {:repo_allowed_profile_not_found, repo_key, profile}}` | Fix profile name or add profile |
+
+---
+
+##### `Monday.Adapter.fetch_repo_dropdown_labels(cfg)`
+
+> Fetches and parses `Symphony Repo` dropdown labels for drift validation. Mirrors `SymphonyStatusLabels` metadata-query structure but keeps deactivated labels visible.
+
+| Property | Value |
+|---|---|
+| **Idempotent** | Yes. Pure Monday read. |
+| **Failure behavior** | `{:error, :repo_column_not_found}` when `tracker.repo_column_id` is set but missing; `{:error, :invalid_settings_str}` for malformed dropdown settings; `{:error, {:unexpected_response, response}}` for schema drift. |
+| **Performance envelope** | One small GraphQL query at startup; same complexity class as status-label validation. |
+| **Side effects** | None on Monday. |
+| **Retry guidance** | Safe; startup refuses only when the configured column itself is missing or metadata is unreadable. |
+| **Data classification** | Internal labels; no PHI. |
+
+##### Warnings
+
+- Deactivated repo labels return in `deactivated_labels` rather than being dropped. AW-4 decides dispatch behavior.
+- If `tracker.repo_column_id` is nil, this function is not called.
+
+---
+
+##### `Workspace.create_for_issue(issue, worker_host)`
+
+> Creates/reuses the issue workspace, resolves the repo, safely clones known repos, and runs the selected setup hook.
+
+| Property | Value |
+|---|---|
+| **Idempotent** | Partially. Existing workspace reuse remains unchanged; safe clone + post-clone hook run only when the workspace is newly created. |
+| **Failure behavior** | `{:error, {:unknown_repo, repo_key}}`, `{:error, :no_default_repo}`, `{:error, {:workspace_clone_failed, repo_key, status, output}}`, `{:error, {:workspace_hook_failed, "after_create", status, output}}`, or existing workspace path errors. |
+| **Performance envelope** | Clone/network dependent; post-clone setup follows existing hook timeout. |
+| **Side effects** | Creates directories under `workspace.root`; invokes git; runs trusted post-clone hook. |
+| **Retry guidance** | Safe after cleanup. If retry resolves to a different repo, caller must remove the prior failed workspace first (AW-2). |
+| **Data classification** | Repo source code and dependency logs; apply existing log redaction policy. |
+
+##### Warnings
+
+- Known repo clone uses `clone_url` only; per-repo `after_create` never clones.
+- Global `hooks.after_create` is used only for `repo=<default>`.
+- The hook source is live Symphony config, not any WORKFLOW.md in the cloned repo.
+
+---
+
+##### `ProfileResolver.resolve(issue, profiles, default_profile, floor, resolved_repo)`
+
+> Extends Spec 2 profile resolution with repo-level allowlist enforcement.
+
+| Property | Value |
+|---|---|
+| **Idempotent** | Yes. Pure function over issue/profile/repo inputs. |
+| **Failure behavior** | Existing Spec 2 profile errors, plus `{:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}` when a known repo declares `allowed_profiles` and the resolved profile is absent. |
+| **Performance envelope** | O(1) profile lookup + O(allowed profile count). |
+| **Side effects** | None. |
+| **Retry guidance** | Safe. Call after repo re-resolution at every attempt boundary. |
+| **Data classification** | Internal config. |
+
+##### Warnings
+
+- The default repo has no repo-level allowlist in v1. Gate HIPAA-sensitive repos by requiring explicit `Symphony Repo` labels and repo entries.
+- Empty or missing `allowed_profiles` means all configured profiles are allowed.
 
 #### A.3 Decision Log
 
 ##### DL-001: Repo selection via Monday dropdown column (rejected: per-board, per-profile encoding, description-driven)
-**Context:** Operator needs to pick a repo per item. Four candidate mechanisms: (a) per-item Monday column; (b) one Symphony per repo (per-board); (c) encode repo into profile name (`claude_opus_blog`); (d) parse from item description.
-**Choice:** (a). Reasons: keeps the operator's mental model "pick a row in a dropdown"; reuses the column-driven pattern already established in Spec 2 (`Symphony Profile`); single Symphony instance preserves heartbeat sentinel uniqueness; doesn't couple AI selection to repo selection.
-**Reversal cost:** Low — switching to per-board (b) means stopping this Symphony and bringing up N more; per-profile (c) means renaming dropdown options; description-driven (d) means changing prompt template.
-**What breaks if reversed:** Operators lose the ability to change repo without changing AI; HIPAA gate (DL-003) becomes harder to enforce per-repo because there's no clean per-repo metadata layer.
+
+- **Date:** 2026-05-04
+- **Context:** Operator needs to pick a repo per item while keeping one Symphony instance on the Tech Board.
+- **Alternatives considered:**
+  - Per-item Monday dropdown: Selected.
+  - One Symphony per repo: Rejected for v1; heartbeat and startup reconciliation stay one-board focused.
+  - Encode repo into profile names: Rejected; couples AI choice to repo choice and weakens repo-level policy.
+  - Parse repo from item description: Rejected; too implicit for a privileged input.
+- **Consequences:**
+  - Enables: explicit operator routing with the same dropdown mental model as Spec 2 profiles.
+  - Constrains: repo names become a WORKFLOW.md/Monday label namespace that needs drift validation.
+- **Warning:** If reversed to description parsing, a text edit in an issue body becomes a clone-target control plane.
+
+---
 
 ##### DL-002: Default-repo fallback to global hooks.after_create when column empty
-**Context:** What does Symphony do when `Symphony Repo` column is empty?
-**Choice:** Fall back to the existing top-level `hooks.after_create` (legacy single-repo mode preserved). Skip + warn only when key is non-empty but unknown.
-**Reasons:** Backward compatibility — Spec 1 + Spec 2 shipped with single-repo behavior, and this spec must not break any in-flight items that don't yet have the column set; matches the existing "absent = use default" semantics for the profile column (Spec 2 DL-008's profile fallback to `agent.default_profile`).
-**Reversal cost:** Medium — would require migrating all existing items to set the column or providing a different default mechanism.
-**What breaks if reversed:** All existing items in `Symphony Ready` would fail dispatch on first boot post-rollout.
+
+- **Date:** 2026-05-04
+- **Context:** Existing Spec 1/2 items do not have a repo column set and rely on global `hooks.after_create`.
+- **Alternatives considered:**
+  - Empty repo column falls back to global hook: Selected.
+  - Empty repo column skips: Rejected; breaks rollout and in-flight items.
+  - Hardcode a repo key for empty values: Rejected; hidden default outside WORKFLOW.md.
+- **Consequences:**
+  - Enables: backward-compatible rollout with `tracker.repo_column_id` unset or partially populated.
+  - Constrains: operators must keep a valid global hook until all legacy/default dispatch is intentionally retired.
+- **Warning:** If the fallback is removed before migration, existing `Symphony Ready` rows fail on first post-rollout boot.
+
+---
 
 ##### DL-003: Per-repo allowed_profiles allowlist (HIPAA gate)
-**Context:** MyBCAT has PHI-touching repos (e.g., billing, appointment KPIs) where running an unsandboxed AI like `gemini_long_context` (which doesn't yet have a vetted PHI redaction posture) is unacceptable.
-**Choice:** Each `repos:` entry MAY declare `allowed_profiles: [...]`. ProfileResolver enforces the gate at dispatch time. No allowlist = all profiles allowed.
-**Reasons:** Lets operators tighten security per-repo without a global toggle; default is permissive (no allowlist = no gate) so existing repos work without change; aligns with Spec 2's privileged-input + safety-floor pattern (DL-006 there).
-**Reversal cost:** Low — drop the field, dispatch becomes unrestricted.
-**What breaks if reversed:** PHI-bearing repos would be exposed to any onboarded profile, including ones without sandbox vetting.
+
+- **Date:** 2026-05-04
+- **Context:** Some MyBCAT repos may touch PHI or sensitive operational data and should not run on every onboarded profile.
+- **Alternatives considered:**
+  - Per-repo `allowed_profiles`: Selected.
+  - Global profile denylist: Rejected; too coarse for mixed repo sensitivity.
+  - Monday permissions only: Rejected; Symphony needs defense-in-depth at dispatch.
+- **Consequences:**
+  - Enables: repo-specific safety gates without duplicating profiles.
+  - Constrains: profile renames must update any repo allowlists.
+- **Warning:** If reversed, a Monday dropdown edit can route a sensitive repo to an unvetted runtime profile.
+
+---
 
 ##### DL-004: Repo re-resolves at retry boundary (mirrors Spec 2 DL-008 profile re-resolve)
-**Context:** What happens if the operator flips the repo column while an item is mid-retry-backoff?
-**Choice:** Re-resolve the repo (and re-resolve the profile, per Spec 2 DL-008) at every retry boundary. Mid-session swap NOT supported.
-**Reasons:** Symmetry with Spec 2 — operator can correct a mid-flight mistake without manually cancelling and re-enrolling; a fresh workspace is created when the repo changes (no mixing of two repos' file trees).
-**Reversal cost:** Low — pin the repo at first dispatch.
-**What breaks if reversed:** Operator typo in repo column requires status flip to Cancelled + re-enroll, which adds friction.
+
+- **Date:** 2026-05-04
+- **Context:** Spec 2 DL-008 re-resolves profiles on retry; repo selection has the same operator-correction need.
+- **Alternatives considered:**
+  - Pin repo at first attempt: Rejected; typo correction requires cancel/re-enroll.
+  - Re-resolve at retry boundary: Selected.
+  - Re-resolve mid-session: Rejected; would mix two repos in one running workspace.
+- **Consequences:**
+  - Enables: operator correction during backoff.
+  - Constrains: retry with repo change must create a fresh workspace and cleanup prior failed workspace.
+- **Warning:** If reversed, a bad repo choice remains stuck until manual cancellation.
+
+---
 
 ##### DL-005: One Symphony per board; multi-board = Spec 4 territory
-**Context:** Could one Symphony instance watch multiple boards (different teams, different sentinel items)?
-**Choice:** No. Spec 3 keeps the one-board-per-Symphony invariant from Spec 1.
-**Reasons:** Heartbeat sentinel logic + restart cleanup assume a single board; multi-board would require N sentinel items + a coordination primitive between boards; not justified by current MyBCAT use case (one Tech Board).
-**Reversal cost:** High — heartbeat semantics, startup reconciliation, and orchestrator state would all need rethinking.
-**What breaks if reversed:** Multi-tenant deployments where each MyBCAT subsidiary has its own board.
+
+- **Date:** 2026-05-04
+- **Context:** Multi-repo dispatch might invite multi-board polling, but Spec 1 heartbeat and reconciliation are board-scoped.
+- **Alternatives considered:**
+  - Keep one board per Symphony: Selected.
+  - Watch multiple boards from one instance: Rejected for Spec 3; needs multiple sentinels and board-aware state.
+- **Consequences:**
+  - Enables: repo routing without destabilizing heartbeat semantics.
+  - Constrains: multi-board deployments need Spec 4.
+- **Warning:** If reversed casually, two boards can share one process without clear heartbeat ownership or failure isolation.
+
+---
 
 ##### DL-006: Operator edits `repos:` map by hand in WORKFLOW.md (no UI)
-**Context:** Should there be a Monday-driven or terminal-UI for managing the `repos:` map?
-**Choice:** No. Operator edits WORKFLOW.md directly. Drift is detected at startup (DL-007).
-**Reasons:** Matches existing Spec 2 model for `profiles:` (also hand-edited); WORKFLOW.md is git-versioned, which gives change history + PR review; UI is feature creep for a tool that's still in early production.
-**Reversal cost:** Low — UI can be added later without changing the data shape.
-**What breaks if reversed:** Operator needs to learn YAML, but `profiles:` already requires that.
+
+- **Date:** 2026-05-04
+- **Context:** Repo entries contain privileged clone targets and trusted setup hooks.
+- **Alternatives considered:**
+  - Hand-edit WORKFLOW.md through PR review: Selected.
+  - Manage repos from Monday labels alone: Rejected; Monday labels cannot safely hold clone URLs/hooks.
+  - Build a UI: Rejected for v1 scope.
+- **Consequences:**
+  - Enables: git history and PR review for privileged repo config.
+  - Constrains: operators must edit YAML, matching Spec 2 `profiles:` practice.
+- **Warning:** If reversed to Monday-only config, board editors can mutate clone targets outside git review.
+
+---
 
 ##### DL-007: Startup drift validation of repo-key ↔ Monday dropdown labels
-**Context:** What if the WORKFLOW.md `repos:` keys and the Monday dropdown labels diverge?
-**Choice:** Symphony queries the dropdown column at startup. Emits warnings for missing-from-Monday and orphan-on-Monday; refuses to boot only if the column itself doesn't exist (and `tracker.repo_column_id` is set).
-**Reasons:** Mirrors Spec 2 DL-010 profile drift validation. Warnings are recoverable — Ankit can run with drift while migrating; refusing boot on missing column protects against silent dispatch failures.
-**Reversal cost:** Low — drop the validation.
-**What breaks if reversed:** Operator misconfiguration silently produces `{:unknown_repo, ...}` errors at dispatch time, scattered across logs.
 
-##### DL-008: Repo selection is privileged input — clone URL must pass safety check at startup
-**Context:** A malicious or sloppy `clone_url` could exfiltrate credentials, escape the workspace, or run arbitrary shell.
-**Choice:** Validate URL format at boot. Reject embedded credentials, shell metacharacters, path traversal. Match the spirit of Spec 2 DL-006's sandbox safety floor.
-**Reasons:** WORKFLOW.md is committed to git and reviewed via PR — this is a defense-in-depth check, not the primary review gate, but it catches obvious mistakes before they hit production. Mirrors the operator-cannot-bypass posture of Spec 2.
-**Reversal cost:** Low — drop the check.
-**What breaks if reversed:** A typo in `clone_url` (e.g., `https://user:token@host/...` left in by mistake) would persist into runtime workspace shell commands.
+- **Date:** 2026-05-04
+- **Context:** WORKFLOW.md repo keys and Monday dropdown labels can drift during rollout or cleanup.
+- **Alternatives considered:**
+  - Warn on drift, refuse only missing configured column: Selected.
+  - Refuse on any drift: Rejected; migration needs tolerance.
+  - Defer all drift to dispatch-time errors: Rejected; too quiet and scattered.
+- **Consequences:**
+  - Enables: startup-visible operator feedback without blocking recoverable migrations.
+  - Constrains: startup needs one Monday metadata query when `repo_column_id` is set.
+- **Warning:** If reversed to no validation, a typo in Monday labels creates per-item skips that can go unnoticed for hours.
+
+---
+
+##### DL-008: Repo selection is privileged input — clone URL must pass host allowlist + safe-clone checks at startup
+
+- **Date:** 2026-05-04
+- **Context:** A malicious or sloppy `clone_url` can exfiltrate credentials, spoof `github.com` with Unicode lookalikes, invoke git protocol helpers, pull unreviewed submodules, or bypass validation if the shell hook owns the clone.
+- **Alternatives considered:**
+  - Format validation only: Rejected; does not stop Unicode host spoofing, allowed-host drift, submodules, git hooks, or hook-level clone bypass.
+  - Hardcoded `github.com` only: Rejected as too rigid for future staging/prod host divergence.
+  - WORKFLOW.md `repo_policy.allowed_clone_hosts` + exact ASCII host match + safe clone owned by Workspace: Selected.
+- **Consequences:**
+  - Enables: defense-in-depth on clone targets while preserving reviewed per-environment WORKFLOW.md config.
+  - Constrains: repos on new hosts require explicit PR-reviewed allowlist expansion; submodule repos are out of scope.
+- **Warning:** If reversed to hook-owned clone or URL format-only validation, a reviewed-looking `clone_url` can be irrelevant while `after_create` clones arbitrary code into an agent workspace.
 
 ---
 
@@ -253,11 +546,11 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 ### Sections to amend
 - §3.1 Main Components: `Workspace Manager` description gains "consults per-issue repo selection from Tracker"; `Issue Tracker Client` description gains "surfaces per-issue repo column value".
 - §3.2 Abstraction Levels: `Policy Layer` gains the `repos:` map alongside the `profiles:` map.
-- §6 Workflow Configuration: add `tracker.repo_column_id` and the `repos:` block.
-- §11 Workspace Lifecycle: add per-repo `after_create` resolution rule.
+- §6 Workflow Configuration: add `tracker.repo_column_id`, `repo_policy.allowed_clone_hosts`, and the `repos:` block.
+- §11 Workspace Lifecycle: add safe clone + per-repo post-clone `after_create` resolution rule.
 
 ### New sections
-- §6.X `repos:` map format (mirrors §6.X `profiles:` map from Spec 2).
+- §6.X `repo_policy` + `repos:` map format (mirrors §6.X `profiles:` map from Spec 2).
 - §11.X Per-issue repo dispatch rules.
 
 ### Removed sections / fields
@@ -270,63 +563,109 @@ The trust boundary expands: the Monday `Symphony Repo` column is a privileged in
 
 ## 8. Reference Implementation Deltas
 
+### `elixir/lib/symphony_elixir/config/schema.ex`
+- Lines 47-69 (`Tracker.embedded_schema`) and 74-99 (`Tracker.changeset/2` cast list): add optional `repo_column_id: :string`.
+- Insert after `Hooks` (lines 270-290) or before top-level `embedded_schema` (line 332): a repo-policy parser with `allowed_clone_hosts` defaulting to `["github.com"]`, plus repo-entry normalization for `%{clone_url, after_create, before_remove, allowed_profiles, default_branch}`.
+- Lines 332-343 (top-level `embedded_schema`): add `repo_policy` and `repos` fields/embeds. Keep `profiles` unchanged.
+- Lines 423-436 (`changeset/1`) and 438-471 (`parse_profiles/1` pattern): add `parse_repos/1` with the same normalize-then-struct pattern. Repo keys remain strings.
+- Lines 542-553 (`resolve_env_value/2`) are intentionally NOT reused for `clone_url`; env-var indirection is forbidden by AW-3.
+
 ### `elixir/lib/symphony_elixir/config.ex`
-- Extend the `tracker` Schema parser to accept optional `repo_column_id: String.t() | nil`.
-- Add new top-level Schema parser entry for `repos: %{String.t() => repo_entry}` where `repo_entry = %{clone_url: String.t(), after_create: String.t() | nil, allowed_profiles: [String.t()] | nil, default_branch: String.t() | nil}`.
-- Add `Config.repos/0`, `Config.repo!/1`, `Config.repo_or_default/1` getters.
-- Add `Config.validate_semantics` checks (mirrors Spec 2 §13): clone_url format, allowed_profiles entries reference real profile names, repos-vs-Monday-dropdown drift warning at boot.
+- Lines 29-49 (after `settings!/0`): add `repos/0`, `repo!/1`, `repo_or_default/1`, and `repo_policy/0` getters.
+- Lines 94-164 (`validate!/0` / `validate_semantics/1`): add repo semantic validation after profile validation and before returning `:ok`.
+- Lines 117-164 insertion anchor: validation must cover `clone_url` ASCII/NFC/form/host allowlist, forbidden credentials/metacharacters/path traversal, forbidden per-repo hook clone/submodule commands, `allowed_profiles` existence, and `repo_column_id` legacy-mode warnings from §2.1/§2.6.
+- Lines 166-220 helper area: add helper functions for `blank?`, host allowlist normalization, clone URL parsing, and repo hook validation. Do not parse clone URLs with shell-oriented string splitting; use `URI` for HTTPS and a narrow regex for SSH scp form.
 
 ### `elixir/lib/symphony_elixir/monday/adapter.ex`
-- Extend `collect_column_ids/1` to include `cfg[:repo_column_id]` when present.
-- Extend `Item.from_monday/2` (in `monday/item.ex`) to surface the repo column value into `%Tracker.Issue{repo: String.t() | nil}`.
-- Add new GraphQL query `SymphonyRepoLabels` for boot-time drift validation (mirrors `SymphonyStatusLabels` shape from PR #4 — same `settings_str` parser pattern).
+- Lines 56-65 (`@status_labels_query`): add sibling `@repo_labels_query` named `SymphonyRepoLabels` with the exact response shape in §4.
+- Lines 250-269 (`fetch_status_label_id_map/1` pattern): add `fetch_repo_dropdown_labels/1` for startup drift validation; return active and deactivated labels.
+- Lines 271-305 (`parse_status_labels/1`, `deactivated_status_label_ids/1`): reuse the `settings_str` parser pattern, but do NOT drop deactivated repo labels. Return them separately for AW-4.
+- Lines 307-317 (`collect_column_ids/1`): append `cfg[:repo_column_id]` when present.
+- Lines 319-340 (`normalize_items/3`): no new Monday writes; only pass the extended cfg into `Item.from_monday/2`.
 
-### `elixir/lib/symphony_elixir/tracker.ex`
-- Extend `%Tracker.Issue{}` struct with `repo: String.t() | nil` field.
+### `elixir/lib/symphony_elixir/monday/item.ex`
+- Lines 15-23 (`@type config`): add `repo_column_id: String.t() | nil`.
+- Lines 39-52 (`%Issue{}` construction): set `repo: repo_value(raw, config[:repo_column_id])`.
+- Lines 125-139 (`profile_value/2` helper): add equivalent `repo_value/2` helper that trims whitespace and returns nil for missing/blank values.
 
-### `elixir/lib/symphony_elixir/workspace.ex` (~line 210, `maybe_run_after_create_hook/4`)
-- Resolve hook command from `Config.repo_or_default(issue.repo)` instead of `Config.workflow().hooks.after_create`.
-- On `{:error, :unknown_repo}` or `{:error, :no_default}`, emit operator error and short-circuit dispatch (orchestrator path; existing error-handling pattern).
+### `elixir/lib/symphony_elixir/tracker/issue.ex`
+- Lines 9-25 (`defstruct`): add `:repo`.
+- Lines 27-42 (`@type t`): add `repo: String.t() | nil`.
+
+### `elixir/lib/symphony_elixir/agent_runner.ex`
+- Lines 88-114 (`run_on_worker_host/4`): resolve repo + profile allowlist before `Workspace.create_for_issue/2` so S5 creates no workspace. A valid implementation can call a new `ProfileResolver.resolve(..., resolved_repo)` before workspace creation or have a combined dispatch resolver return both profile and repo.
+- Lines 124-142 (`resolve_profile_for_issue/1` call path): extend profile resolution to accept the resolved repo entry and surface `{:profile_resolution_failed, {:profile_not_allowed_on_repo, profile, repo_key}}` without starting a runtime.
+- Lines 216-220 (`send_worker_runtime_info/4`): include resolved repo key in worker runtime info sent to the orchestrator/dashboard.
+
+### `elixir/lib/symphony_elixir/workspace.ex`
+- Lines 13-31 (`create_for_issue/2`): carry repo key through `issue_context`; log it in workspace errors.
+- Lines 210-226 (`maybe_run_after_create_hook/4`): replace direct global-hook lookup with repo resolution. For `{:repo, key, entry}`, run safe clone first, then entry `after_create` if non-blank. For `{:default, default_entry}`, preserve existing global hook behavior. For errors, return `{:error, {:unknown_repo, key}}` or `{:error, :no_default_repo}`.
+- Insert before line 210 or near hook helpers: `safe_clone_repo(workspace, repo_entry, worker_host)` that invokes git as argv for local workspaces and remote-safe equivalent for SSH workers, using §2.7 flags. Do not interpolate `clone_url` into a shell command.
+- Lines 228-289 (`maybe_run_before_remove_hook/2`): when a known repo entry defines `before_remove`, prefer it over global `hooks.before_remove`; otherwise preserve global behavior.
+- Lines 459-481 (`issue_context/1`, `issue_log_context/1`): include `repo` and `repo_default_branch` for hook rendering/logging.
 
 ### `elixir/lib/symphony_elixir/profile_resolver.ex`
-- After profile resolution succeeds, check `repo_or_default(issue.repo).allowed_profiles`; if set and profile name not in it, return `{:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}`.
+- Lines 27-43 (`resolve/4`): extend signature to `resolve(issue, profiles, default, floor, resolved_repo)` or add a wrapper with that shape.
+- Lines 56-73 (`check_safety_floor/2`): after safety-floor success, enforce `resolved_repo.allowed_profiles` when present. Return `{:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}`.
+- Lines 75-88 (`validate_drift/2` pattern): add `validate_repo_drift/2` if drift comparison is kept outside Config.
 
-### `elixir/lib/symphony_elixir/orchestrator.ex` (~line 346, `maybe_dispatch/1`)
-- Add new error pattern matches for `{:error, :unknown_repo}`, `{:error, :no_default}`, `{:error, {:profile_not_allowed_on_repo, _, _}}` — log + skip + leave item in `Symphony Ready`.
+### `elixir/lib/symphony_elixir/orchestrator.ex`
+- Lines 25-47 (`State`): add repo to running-entry metadata only if needed for dashboard snapshots.
+- Lines 67-117 (per-profile counter helpers) and 745-758 (`should_dispatch_issue?/4`): ensure multi-repo dispatch still respects Spec 2 §2.5 per-profile caps. Two repos sharing `claude_opus` must contend for the same `claude_opus.max_concurrent` cap.
+- Lines 346-403 (`maybe_dispatch/1`): add new error pattern matches for `{:unknown_repo, _}`, `:no_default_repo`, `{:profile_not_allowed_on_repo, _, _}`, and unsafe repo config errors. Log + skip + leave item in `Symphony Ready` unless startup validation mandates boot refusal.
+- Lines 859-900 (`dispatch_issue/4` through `do_dispatch_issue_after_phi/4`): keep PHI validation before clone; then perform repo/profile gating before `Task.Supervisor.start_child`.
+- Lines 904-943 (`spawn_issue_on_worker_host/5`): store `repo_key` in the running entry so snapshots can render it.
+- Lines 1600-1618 (`refresh_runtime_config/1`, `dispatch_slots_available?/2`): include repo/profile cap checks in retry dispatch, not just initial dispatch.
 
 ### `elixir/lib/symphony_elixir/status_dashboard.ex`
-- Add `repo=<key>` rendering to the per-running-issue row alongside the existing profile + PID columns.
+- Lines 18-24 (running column widths): add fixed width for `REPO` or fold repo into the existing `STAGE`/event area without expanding beyond terminal width.
+- Lines 591-631 (`format_running_summary/2`): render `repo=<key>` for known repos and `repo=<default>` for legacy fallback.
+- Lines 740-767 (`running_table_header_row/1`, separator): update headers/sizing.
+- `elixir/test/symphony_elixir/status_dashboard_snapshot_test.exs` lines 46-86 and 197-215: update snapshot fixtures to include repo metadata.
+
+### `elixir/lib/symphony_elixir/prompt_builder.ex`
+- Lines 19-22 (`Solid.render!` data map): ensure `issue.repo`, `issue.repo_key`, and `issue.repo_default_branch` are available to Liquid templates. `default_branch` remains metadata-only per AW-5.
 
 ### `elixir/WORKFLOW.md`
-- Add `tracker.repo_column_id: <new_column_id>`.
-- Add top-level `repos:` map with at least 2 example entries (e.g., `mybcat-blog`, `hubspot-daily`) and the existing `openai/symphony` repo as a third entry for backward compat.
+- Lines 2-30 (`tracker:`): add `repo_column_id: <new_column_id>` when the Monday column exists.
+- Insert between lines 35-43 (`hooks:` and `profiles:`): add `repo_policy.allowed_clone_hosts` and top-level `repos:` map with at least 2 example entries (e.g., `mybcat-blog`, `hubspot-daily`) and the existing `MyBcat/symphony` repo as a third entry for backward compat.
+- Per-repo `after_create` examples must be post-clone only (`npm ci`, `mix deps.get`, `pip install`), not `git clone`.
 - Keep `hooks.after_create` as the default fallback.
+- Lines 94-111 (prompt item context): add `Repo: {{ issue.repo }}` and `Default branch: {{ issue.repo_default_branch }}`.
 
 ### Tests
-- `test/symphony_elixir/monday/adapter_test.exs` — add cases:
+- `elixir/test/symphony_elixir/config_schema_test.exs` lines 46-93 and 95-207 — add cases:
+  - parses `tracker.repo_column_id`, `repo_policy`, and `repos`
+  - rejects env-var clone_url, Unicode/non-ASCII clone_url, host not allowlisted, embedded credentials, path traversal, shell metacharacters, `git clone` in per-repo hook, and `git submodule` in per-repo hook
+  - accepts SSH + HTTPS forms for allowlisted hosts
+  - warns when `tracker.repo_column_id` is unset but `repos:` is non-empty
+  - `allowed_profiles` entries must reference real profile names
+- `elixir/test/symphony_elixir/monday/adapter_test.exs` lines 21-37, 167-180, 276-364 — add cases:
   - `Item.from_monday/2` extracts repo column value
   - `collect_column_ids/1` includes repo_column_id when set
-  - `SymphonyRepoLabels` query mock + parse
-- `test/symphony_elixir/profile_resolver_test.exs` — add cases:
+  - `SymphonyRepoLabels` query mock + parse active and deactivated labels
+- `elixir/test/symphony_elixir/monday/item_test.exs` lines 19-27 and 78-131 — add repo extraction cases mirroring profile extraction.
+- `elixir/test/symphony_elixir/profile_resolver_test.exs` lines 24-82 — add cases:
   - `allowed_profiles` allowlist permits valid combo
   - `allowed_profiles` allowlist denies invalid combo
   - empty `allowed_profiles` field permits all profiles
-- `test/symphony_elixir/workspace_test.exs` — add cases:
-  - per-repo after_create hook runs
+- `elixir/test/symphony_elixir/workspace_and_config_test.exs` lines 7-40, 193-253 — add cases:
+  - safe clone uses `clone_url` before per-repo post-clone hook
+  - per-repo after_create hook runs after clone
+  - intentionally empty per-repo after_create is a no-op after clone
   - empty repo column falls back to global hook
   - unknown repo returns `:unknown_repo` error
-- `test/symphony_elixir/orchestrator_*test.exs` — add dispatch happy-path tests for:
+  - no-default repo returns `:no_default_repo`
+  - clone command does not recurse submodules and disables hooks
+- `elixir/test/symphony_elixir/orchestrator_test.exs` lines 224-276 and `elixir/test/symphony_elixir/orchestrator_status_test.exs` lines 24-102 — add dispatch tests for:
   - per-item repo dispatch (S1)
   - empty column fallback (S2)
   - retry with repo flip (S3)
   - unknown repo skip (S4)
   - profile-not-allowed skip (S5)
-  - multi-repo concurrent dispatch (two items, two repos, both running simultaneously up to per-profile cap)
-- `test/symphony_elixir/config_test.exs` — add cases:
-  - clone_url safety floor accepts SSH + HTTPS forms
-  - clone_url safety floor rejects embedded credentials
-  - clone_url safety floor rejects shell metacharacters
-  - allowed_profiles entries must reference real profile names
+  - multi-repo concurrent dispatch with two repos on different profiles up to global cap
+  - multi-repo concurrent dispatch with two repos on the same capped profile; the second item remains `Symphony Ready` when `profiles.<name>.max_concurrent` is reached (Spec 2 §2.5 interaction)
+- `elixir/test/symphony_elixir/status_dashboard_snapshot_test.exs` lines 46-86 and 197-215 — add `repo=<key>` snapshot coverage.
 
 ---
 
@@ -343,12 +682,14 @@ Operator runs the following one-time setup before Symphony with Spec 3 boots:
 
 2. Update `WORKFLOW.md`:
    - Set `tracker.repo_column_id` to the new column ID (operator looks up the ID via Monday's column metadata or `get_board_info`).
+   - Set `repo_policy.allowed_clone_hosts` (default `[github.com]` is correct for current MyBCAT GitHub repos).
    - Add `repos:` map with one entry per dropdown label.
+   - Keep per-repo `after_create` hooks post-clone only; the hook should install dependencies or run repo setup, not run `git clone` or `git submodule`.
    - Keep `hooks.after_create` for legacy fallback.
 
 3. Restart Symphony.
 
-4. Smoke test: create a new Tech Board item with `Symphony Repo: mybcat-blog`, `Symphony Profile: claude_opus`, `Symphony Status: Symphony Ready`. Verify dispatch logs show the correct repo's `after_create` hook running.
+4. Smoke test: create a new Tech Board item with `Symphony Repo: mybcat-blog`, `Symphony Profile: claude_opus`, `Symphony Status: Symphony Ready`. Verify dispatch logs show safe clone of `repos.mybcat-blog.clone_url`, then the correct repo's post-clone `after_create` hook running.
 
 ---
 
@@ -356,6 +697,7 @@ Operator runs the following one-time setup before Symphony with Spec 3 boots:
 
 - Multi-board support (one Symphony per N boards). Future Spec 4.
 - Per-repo secret injection (e.g., `HUBSPOT_TOKEN` per hubspot-daily). Future Spec 5.
+- Git submodule checkout. Future spec must add an explicit submodule host allowlist before enabling it.
 - A terminal UI or web UI for editing the `repos:` map. Operator edits WORKFLOW.md by hand.
 - Repo-aware token accounting / cost attribution. Per-runtime token accounting (Spec 2 §2.4) stays as is.
 - Per-repo concurrency caps. Existing per-profile + global caps (Spec 2 §2.5) suffice.
@@ -364,25 +706,42 @@ Operator runs the following one-time setup before Symphony with Spec 3 boots:
 
 ---
 
-## 11. Ambiguity Warnings (locked at recommended defaults — 2026-05-04)
+## 11. Ambiguity Warnings — All Locked
 
-These five edge-case decisions are locked at the recommended defaults below. Direct user instruction during spec authoring: lock them so an autonomous agent can implement Spec 3 without further input. Each can be revisited via a follow-up spec amendment if implementation surfaces a real conflict.
+Per Ankit's 2026-05-04 instruction, all five open ambiguities are locked. The implementing agent treats these as binding constraints.
 
-| ID | Decision | Rationale |
-|---|---|---|
-| AW-1 (locked) | When per-issue repo column is empty AND `hooks.after_create` is unset, **skip + warn at dispatch time**. No hardcoded fallback. | Mirrors Spec 2 DL-008 "skip + warn over silent fallback" posture. Loud failure beats silent misdispatch. |
-| AW-2 (locked) | When a retry resolves to a different repo than the prior attempt, **cleanup the prior workspace immediately** before creating the new one. | Prevents orphan workspaces from accumulating on disk across retry cycles. |
-| AW-3 (locked) | `clone_url` does **NOT** support env-var indirection in v1. URLs are literal. | Reduces surface area; the existing `$MONDAY_API_TOKEN` precedent is justified by secret-handling, not URL templating. Future spec can add this if staging/prod hosts diverge. |
-| AW-4 (locked) | A deactivated Monday dropdown label whose WORKFLOW.md `repos:` entry still exists is treated as **known-repo**; existing items dispatch normally. Boot-time drift warning surfaces the deactivation to the operator. | Don't strand work in flight when an operator deactivates a label without first cleaning up WORKFLOW.md. |
-| AW-5 (locked) | `default_branch` is **metadata-only**. Exposed to the agent via `{{ issue.repo_default_branch }}` Liquid variable in the prompt template. Symphony does NOT enforce the branch on the agent's PR. | Agent gets the hint; reviewer catches a wrong-base PR. Symphony staying out of branch enforcement keeps the existing prompt-driven model intact. |
+### AW-1 — Empty repo column and no global default — LOCKED: SKIP + WARN
+- **Decision:** When `tracker.repo_column_id` is set, the per-issue repo column is empty, and global `hooks.after_create` is unset/blank, skip dispatch and emit `{:no_default_repo, issue.identifier}`. No hardcoded fallback.
+- **Rationale:** Mirrors Spec 2's "skip + warn over silent fallback" posture. Loud failure beats silently creating an empty workspace and running an agent in the wrong repo context.
+- **Implementation:** `Config.repo_or_default(nil)` returns `{:error, :no_default_repo}`; Orchestrator leaves the item in `Symphony Ready` and logs operator-visible remediation.
+
+### AW-2 — Retry resolves to a different repo — LOCKED: CLEAN PRIOR FAILED WORKSPACE
+- **Decision:** When a retry boundary resolves to a different repo than the prior failed attempt, cleanup the prior attempt's workspace before creating the new repo workspace.
+- **Rationale:** Prevents mixed-repo file trees and unbounded workspace accumulation. The cleanup happens only after the prior attempt has ended; the system never deletes a workspace for a currently running session because a Monday column changed mid-session.
+- **Implementation:** Store prior attempt `repo_key` in retry metadata; if the next resolved repo differs, run the normal workspace cleanup path before safe-cloning the new repo.
+
+### AW-3 — `clone_url` env-var indirection — LOCKED: LITERAL URLS ONLY
+- **Decision:** `repos[*].clone_url` does NOT support `$ENV_VAR` or template indirection in v1. URLs are literal WORKFLOW.md values.
+- **Rationale:** Clone targets are privileged inputs and need git-reviewed, diff-visible values. Staging/prod git-host divergence is handled by per-environment WORKFLOW.md plus `repo_policy.allowed_clone_hosts`, not hidden environment expansion.
+- **Implementation:** Repo parser rejects clone URLs beginning with `$` or containing template syntax. The only env-var config precedent that remains valid is secret handling such as `$MONDAY_API_TOKEN`.
+
+### AW-4 — Deactivated Monday repo labels — LOCKED: KNOWN IF WORKFLOW ENTRY EXISTS
+- **Decision:** A deactivated Monday dropdown label whose WORKFLOW.md `repos:` entry still exists is treated as known-repo; existing items dispatch normally. Boot-time drift warning names the deactivated label.
+- **Rationale:** Deactivation prevents new selection in the Monday UI, but existing in-flight items can still carry that text value. Do not strand work solely because an operator deactivated the label before cleaning up WORKFLOW.md.
+- **Implementation:** `SymphonyRepoLabels` parsing returns deactivated labels separately. Drift validation warns `repo label "<name>" is deactivated on Monday but still present in repos:`. Dispatch succeeds if `repos[name]` exists; dispatch returns `{:unknown_repo, name}` if the WORKFLOW entry is removed.
+
+### AW-5 — `default_branch` semantics — LOCKED: METADATA ONLY
+- **Decision:** `default_branch` is metadata-only. It is exposed to the agent via `{{ issue.repo_default_branch }}` and Symphony does NOT enforce the branch on PR creation or merge.
+- **Rationale:** Branch correctness stays in the prompt/review model established by Spec 1 and Spec 2. Enforcing PR base inside Symphony would require GitHub-aware policy and merge validation that belongs in a future GitHub integration spec.
+- **Implementation:** `PromptBuilder` includes the value in Liquid context when present. No GitHub API call or `gh pr` interception is added.
 
 ---
 
 ## 12. Implementation Sequencing
 
-1. **Boot-time validation first.** Land Config.Schema parser changes + clone_url safety floor + drift detection before touching dispatch path. Failing here is loud and recoverable.
+1. **Boot-time validation first.** Land Config.Schema parser changes + clone_url host allowlist/safe-clone validation + drift detection before touching dispatch path. Failing here is loud and recoverable.
 2. **Tracker layer next.** Item.from_monday + Adapter.collect_column_ids + Tracker.Issue.repo. No behavior change to dispatch yet.
-3. **Workspace + ProfileResolver.** Wire repo into hook resolution + allowlist enforcement. This is where dispatch behavior actually changes.
+3. **ProfileResolver + Workspace.** Wire repo allowlist enforcement before clone, then safe clone + post-clone hook resolution. This is where dispatch behavior actually changes.
 4. **Orchestrator + StatusDashboard.** Surface the new error paths + dashboard rendering.
 5. **WORKFLOW.md update + Tech Board operator setup.** Last — only after the code is merged.
 6. **Smoke test with one repo (e.g., mybcat-blog) before adding more.**
@@ -395,13 +754,15 @@ Mirrors Spec 1 + Spec 2 sequencing: parser → tracker layer → dispatch layer 
 
 | Layer | Cases | File |
 |---|---|---|
-| Config parsing | repos: shape valid; clone_url format valid/invalid; allowed_profiles entries reference real profiles | `config_test.exs` |
-| Monday read path | Item.from_monday surfaces repo; collect_column_ids includes repo_column_id; SymphonyRepoLabels parses | `monday/adapter_test.exs`, `monday/item_test.exs` |
+| Config parsing | `repo_policy` + `repos:` shape valid; clone_url accepts SSH/HTTPS allowlisted hosts; rejects env-var indirection, Unicode/non-ASCII spoofing, embedded credentials, shell metacharacters, path traversal, host not allowlisted; per-repo hook rejects `git clone`/`git submodule`; allowed_profiles entries reference real profiles | `config_schema_test.exs` |
+| Startup validation | repo drift warnings; deactivated-label warning; missing configured repo column boot refusal; `tracker.repo_column_id` unset logs legacy-mode warning when `repos:` is non-empty | `config_schema_test.exs`, `monday/adapter_test.exs`, `application_test.exs` (or whichever covers boot) |
+| Monday read path | Item.from_monday surfaces repo; collect_column_ids includes repo_column_id; SymphonyRepoLabels parses active + deactivated labels | `monday/adapter_test.exs`, `monday/item_test.exs` |
 | ProfileResolver | allowlist permits, denies, defaults | `profile_resolver_test.exs` |
-| Workspace | per-repo hook runs; empty column falls back; unknown repo errors | `workspace_test.exs` |
-| Orchestrator dispatch | S1 happy path; S2 fallback; S3 retry-flip; S4 unknown_repo; S5 profile_not_allowed; multi-repo concurrent | `orchestrator_*test.exs` |
-| Boot-time validation | repo drift warnings; clone_url safety floor refusal | `config_test.exs`, `application_test.exs` (or whichever covers boot) |
+| Workspace | safe clone runs before post-clone hook; no-op/empty per-repo after_create; empty repo column falls back; unknown repo errors; no-default repo errors; submodules/hooks disabled in clone command | `workspace_and_config_test.exs` |
+| Orchestrator dispatch | S1 happy path; S2 fallback; S3 retry-flip with prior workspace cleanup; S4 unknown_repo; S5 profile_not_allowed creates no workspace; S8 Unicode host refusal; S9 empty hook; multi-repo concurrent on different profiles up to global cap | `orchestrator_test.exs`, `orchestrator_status_test.exs` |
+| Spec 2 cap interaction | Two repos on the same profile respect `profiles.<name>.max_concurrent`; second item remains `Symphony Ready` when the profile cap is reached even if global capacity remains | `orchestrator_test.exs` |
+| Dashboard | running rows render `repo=<key>` and `repo=<default>` without breaking narrow terminal layout | `status_dashboard_snapshot_test.exs` |
 
-Targeted run: `mix test test/symphony_elixir/{config,monday/adapter,monday/item,profile_resolver,workspace,orchestrator_status}_test.exs`. Full suite must remain at the prior baseline (post-Spec-2: 339 tests / 45 pre-existing failures / 2 skipped vs. main; new tests +N, no new failures).
+Targeted run: `mix test test/symphony_elixir/{config_schema,monday/adapter,monday/item,profile_resolver,workspace_and_config,orchestrator,orchestrator_status,status_dashboard_snapshot}_test.exs`. Full suite must remain at the prior baseline (post-Spec-2: 339 tests / 45 pre-existing failures / 2 skipped vs. main; new tests +N, no new failures).
 
 ---

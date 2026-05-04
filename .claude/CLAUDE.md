@@ -12,7 +12,9 @@ Before running `gh pr merge` (or any equivalent merge action) on this repo:
 
 This applies to **every** PR on Symphony, regardless of size. Symphony orchestrates real AI sessions writing real code into real repos — a bad merge here has cross-repo blast radius. The Spec 1, Spec 2, and dispatch-fix PRs all benefited from Codex review and surfaced real issues that were not caught by tests alone.
 
-**Exception path:** none for normal work. If the situation requires bypassing this gate (e.g., emergency revert, hotfix that has independent verification), it must be called out explicitly to the user before the merge runs.
+Equivalent merge actions include GitHub web UI merges, GitHub mobile merges, API merges, `gh pr merge`, repo-hosted merge scripts, direct pushes to `main`, and force-pushes that replace `main`. Do not use those paths to bypass `/codex:rescue`.
+
+**Exception path:** none for normal work. Emergency revert or hotfix bypass is allowed only when delaying for `/codex:rescue` is riskier than merging, the user is told explicitly before the merge, targeted verification has already passed, and `/codex:rescue` is run retroactively in the same incident thread. Force-push to `main` requires explicit user authorization naming the branch and reason.
 
 ## Convention reminders
 
