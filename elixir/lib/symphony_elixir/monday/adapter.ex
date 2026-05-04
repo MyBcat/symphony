@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
+  require Logger
+
   alias SymphonyElixir.Config
   alias SymphonyElixir.Monday.{Client, Item, PHIDetector}
 
@@ -46,6 +48,17 @@ defmodule SymphonyElixir.Monday.Adapter do
       column_values(ids: $columnIds) {
         id
         text
+      }
+    }
+  }
+  """
+
+  @status_labels_query """
+  query SymphonyStatusLabels($boardId: ID!, $columnIds: [String!]) {
+    boards(ids: [$boardId]) {
+      columns(ids: $columnIds) {
+        id
+        settings_str
       }
     }
   }
@@ -129,28 +142,141 @@ defmodule SymphonyElixir.Monday.Adapter do
   defp fetch_issues_filtered(cfg, allowed_states) do
     column_ids = collect_column_ids(cfg)
 
-    if allowed_states == [] do
-      {:ok, []}
-    else
-      variables = %{
-        "boardId" => cfg.board_id,
-        "columnIds" => column_ids,
-        "statusColumnId" => cfg.symphony_status_column_id,
-        "states" => allowed_states
-      }
+    cond do
+      allowed_states == [] ->
+        {:ok, []}
 
-      case client_module().graphql(@items_page_query, variables, []) do
-        {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
-          normalize_items(raw_items, cfg, allowed_states)
+      true ->
+        case translate_states_to_ids(cfg, allowed_states) do
+          {:ok, []} ->
+            {:ok, []}
 
-        {:error, _} = err ->
-          err
+          {:ok, state_ids} ->
+            variables = %{
+              "boardId" => cfg.board_id,
+              "columnIds" => column_ids,
+              "statusColumnId" => cfg.symphony_status_column_id,
+              "states" => state_ids
+            }
 
-        other ->
-          {:error, {:unexpected_response, other}}
-      end
+            case client_module().graphql(@items_page_query, variables, []) do
+              {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
+                normalize_items(raw_items, cfg, allowed_states)
+
+              {:error, _} = err ->
+                err
+
+              other ->
+                {:error, {:unexpected_response, other}}
+            end
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
+
+  @doc false
+  @spec translate_states_to_ids(map(), [String.t()]) ::
+          {:ok, [non_neg_integer()]} | {:error, term()}
+  def translate_states_to_ids(cfg, allowed_states) do
+    case status_label_id_map(cfg) do
+      {:ok, label_map} ->
+        {known, unknown} =
+          Enum.split_with(allowed_states, fn name -> Map.has_key?(label_map, name) end)
+
+        if unknown != [] do
+          Logger.warning(
+            "Monday status labels not found on column #{inspect(cfg.symphony_status_column_id)}: " <>
+              inspect(unknown) <> "; skipping in items_page filter"
+          )
+        end
+
+        ids = Enum.map(known, fn name -> Map.fetch!(label_map, name) end)
+        {:ok, ids}
+
+      {:error, reason} = err ->
+        Logger.error(
+          "Failed to fetch Monday status label IDs for column " <>
+            inspect(cfg.symphony_status_column_id) <> ": #{inspect(reason)}"
+        )
+
+        err
+    end
+  end
+
+  defp status_label_id_map(cfg) do
+    cache_key = {__MODULE__, :status_label_id_map, cfg.board_id, cfg.symphony_status_column_id}
+
+    case Process.get(cache_key) do
+      nil ->
+        case fetch_status_label_id_map(cfg) do
+          {:ok, map} when map_size(map) > 0 ->
+            Process.put(cache_key, map)
+            {:ok, map}
+
+          {:ok, _empty} = ok ->
+            ok
+
+          {:error, _} = err ->
+            err
+        end
+
+      map when is_map(map) ->
+        {:ok, map}
+    end
+  end
+
+  defp fetch_status_label_id_map(cfg) do
+    variables = %{
+      "boardId" => cfg.board_id,
+      "columnIds" => [cfg.symphony_status_column_id]
+    }
+
+    case client_module().graphql(@status_labels_query, variables, []) do
+      {:ok, %{"data" => %{"boards" => [%{"columns" => columns}]}}} ->
+        case Enum.find(columns, &(Map.get(&1, "id") == cfg.symphony_status_column_id)) do
+          %{"settings_str" => settings_str} -> parse_status_labels(settings_str)
+          _ -> {:error, :status_column_not_found}
+        end
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:unexpected_response, other}}
+    end
+  end
+
+  defp parse_status_labels(settings_str) when is_binary(settings_str) do
+    with {:ok, parsed} <- Jason.decode(settings_str),
+         %{"labels" => labels} when is_map(labels) <- parsed do
+      deactivated =
+        parsed
+        |> Map.get("deactivated_labels", [])
+        |> Enum.map(&to_string/1)
+        |> MapSet.new()
+
+      map =
+        labels
+        |> Enum.reduce(%{}, fn {id_str, name}, acc ->
+          if MapSet.member?(deactivated, id_str) or not is_binary(name) do
+            acc
+          else
+            case Integer.parse(id_str) do
+              {id, ""} -> Map.put(acc, name, id)
+              _ -> acc
+            end
+          end
+        end)
+
+      {:ok, map}
+    else
+      _ -> {:error, :invalid_settings_str}
+    end
+  end
+
+  defp parse_status_labels(_), do: {:error, :invalid_settings_str}
 
   defp collect_column_ids(cfg) do
     [
