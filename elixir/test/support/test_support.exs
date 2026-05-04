@@ -125,6 +125,9 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          agent_default_profile: nil,
+          agent_sandbox_safety_floor: nil,
+          profiles: nil,
           codex_command: "codex app-server",
           codex_approval_policy: %{
             reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
@@ -172,6 +175,9 @@ defmodule SymphonyElixir.TestSupport do
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    agent_default_profile = Keyword.get(config, :agent_default_profile)
+    agent_sandbox_safety_floor = Keyword.get(config, :agent_sandbox_safety_floor)
+    profiles = Keyword.get(config, :profiles)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -217,6 +223,9 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        agent_optional_field("default_profile", agent_default_profile),
+        agent_optional_field("sandbox_safety_floor", agent_sandbox_safety_floor),
+        profiles_yaml(profiles),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -336,5 +345,63 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  defp agent_optional_field(_name, nil), do: nil
+  defp agent_optional_field(name, value), do: "  #{name}: #{yaml_value(value)}"
+
+  defp profiles_yaml(nil), do: nil
+
+  defp profiles_yaml(profiles) when is_map(profiles) and map_size(profiles) == 0, do: nil
+
+  defp profiles_yaml(profiles) when is_map(profiles) do
+    body =
+      profiles
+      |> Enum.map_join("\n", fn {name, profile_map} ->
+        profile_yaml_entry(to_string(name), profile_map)
+      end)
+
+    "profiles:\n" <> body
+  end
+
+  defp profile_yaml_entry(name, profile_map) when is_map(profile_map) do
+    kind = Map.get(profile_map, :kind) || Map.get(profile_map, "kind")
+
+    max_concurrent =
+      Map.get(profile_map, :max_concurrent) || Map.get(profile_map, "max_concurrent")
+
+    nested_config = Map.get(profile_map, kind_atom(kind)) || Map.get(profile_map, to_string(kind))
+
+    base = [
+      "  #{yaml_value(name)}:",
+      "    kind: #{yaml_value(to_string(kind))}"
+    ]
+
+    base
+    |> append_max_concurrent(max_concurrent)
+    |> append_nested_config(kind, nested_config)
+    |> Enum.join("\n")
+  end
+
+  defp kind_atom(nil), do: nil
+  defp kind_atom(kind) when is_binary(kind), do: String.to_atom(kind)
+  defp kind_atom(kind) when is_atom(kind), do: kind
+
+  defp append_max_concurrent(lines, nil), do: lines
+
+  defp append_max_concurrent(lines, max_concurrent) do
+    lines ++ ["    max_concurrent: #{yaml_value(max_concurrent)}"]
+  end
+
+  defp append_nested_config(lines, _kind, nil), do: lines
+  defp append_nested_config(lines, _kind, config) when map_size(config) == 0, do: lines
+
+  defp append_nested_config(lines, kind, config) when is_map(config) do
+    nested_lines =
+      Enum.map(config, fn {key, value} ->
+        "      #{yaml_value(to_string(key))}: #{yaml_value(value)}"
+      end)
+
+    lines ++ ["    #{yaml_value(to_string(kind))}:" | nested_lines]
   end
 end

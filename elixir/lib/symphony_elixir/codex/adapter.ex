@@ -3,10 +3,13 @@ defmodule SymphonyElixir.Codex.Adapter do
   Codex runtime adapter. Implements `SymphonyElixir.AgentRuntime` on top of the
   long-running Codex app-server JSON-RPC 2.0 stream over stdio.
 
-  This module preserves the legacy `run/4`, `start_session/2`, `run_turn/4`, and
-  `stop_session/1` entry points used by `AgentRunner`, and additionally exposes
-  the six `AgentRuntime` callbacks. Task 9 will migrate `AgentRunner` over to
-  the behaviour callbacks; until then both surfaces remain operational.
+  This module preserves the legacy `run/4` and `run_turn/4` entry points used
+  by extension tests and Spec 1 callers, while exposing the six
+  `AgentRuntime` callbacks consumed by `AgentRunner`'s polymorphic dispatch
+  path.
+
+  Token accounting stays Codex-native (`%{input, output, total}`) per Spec 2
+  DL-007 — there is no cross-runtime normalization.
   """
 
   @behaviour SymphonyElixir.AgentRuntime
@@ -201,18 +204,22 @@ defmodule SymphonyElixir.Codex.Adapter do
   @doc """
   Submit a single prompt to a previously-started session.
 
-  `AgentRuntime` shape: events flow through `stream_events/1` rather than the
-  legacy `:on_message` callback. For Task 5 this delegates to `run_turn/4`
-  with a synthesized issue map and an event accumulator stashed in the
-  process dictionary keyed by the session's port. Task 9 will rewire this
-  through a dedicated event mailbox/GenServer that `stream_events/1` reads.
+  `AgentRuntime` shape: events are observed inline via the optional
+  `:on_message` callback AND mirrored into a per-session buffer that
+  `stream_events/1` drains. The Codex JSON-RPC App Server protocol is
+  synchronous in nature: a turn is driven to completion in one call, so
+  `send_turn/3` blocks until `turn/completed`, `turn/failed`, or
+  `turn/cancelled`. Real-time observation is preserved via the inline
+  callback so AgentRunner's workpad-write triggers fire as events arrive.
 
   Recognized opts:
     * `:issue` — issue map (with `:id`, `:identifier`, `:title`) used by
       `run_turn/4`. If absent, a placeholder is generated.
-    * `:on_message` — extra observer fn wired in addition to the internal
-      event collector. Useful for callers that still want push-style events
-      while we transition.
+    * `:on_message` — observer fn invoked inline for each event during the
+      turn. AgentRunner uses this to drive Tracker writes (status flips,
+      workpad upserts, PR detection). Events are also captured to a
+      per-session buffer so `stream_events/1` can still emit them; this
+      keeps the polymorphic adapter contract uniform across runtimes.
     * `:tool_executor` — passed through to `run_turn/4`.
   """
   @impl SymphonyElixir.AgentRuntime
@@ -221,10 +228,16 @@ defmodule SymphonyElixir.Codex.Adapter do
     issue = Keyword.get(opts, :issue, default_issue_for_send_turn())
     extra_on_message = Keyword.get(opts, :on_message)
 
+    reset_event_buffer(session)
+    reset_session_tokens(session)
+
     on_message =
       compose_on_message(
-        &capture_event_for_stream/1,
-        extra_on_message
+        fn message -> capture_event_for_stream(session, message) end,
+        compose_on_message(
+          fn message -> accumulate_tokens_from_message(session, message) end,
+          extra_on_message
+        )
       )
 
     run_turn_opts =
@@ -239,16 +252,20 @@ defmodule SymphonyElixir.Codex.Adapter do
   end
 
   @doc """
-  Return an `Enumerable` of events captured for `session` since the last
-  read. Task 5 returns events buffered in the process dictionary by
-  `send_turn/3`; this is intentionally minimal and will be replaced in
-  Task 9 with a real event mailbox owned per session.
+  Return an `Enumerable` of events captured for `session` during the most
+  recent `send_turn/3` call. The buffer is replenished per turn (cleared
+  at the start of each `send_turn/3`) so the same Stream API works for the
+  multi-turn loop in AgentRunner.
+
+  Codex events have already been observed inline via the `:on_message`
+  callback before `stream_events/1` is consumed; the Stream is provided so
+  the polymorphic AgentRunner contract stays uniform across adapters.
   """
   @impl SymphonyElixir.AgentRuntime
   @spec stream_events(session()) :: Enumerable.t()
-  def stream_events(_session) do
-    Stream.unfold(:ok, fn _state ->
-      case Process.delete(:symphony_codex_adapter_events) do
+  def stream_events(session) do
+    Stream.unfold(session, fn s ->
+      case drain_event_buffer(s) do
         nil -> nil
         [] -> nil
         events when is_list(events) -> {Enum.reverse(events), :done}
@@ -260,13 +277,18 @@ defmodule SymphonyElixir.Codex.Adapter do
   @doc """
   Return Codex's native token shape `%{input: int, output: int, total: int}`.
 
-  Task 5 returns zeros — the adapter does not yet aggregate `usage` blocks
-  from the JSON-RPC stream into the session struct. Task 9 will plumb usage
-  capture through and populate this map.
+  Tokens are accumulated by `send_turn/3` from `usage` blocks attached to
+  JSON-RPC events. The shape stays Codex-native (no cross-runtime
+  normalization) per Spec 2 DL-007.
   """
   @impl SymphonyElixir.AgentRuntime
   @spec runtime_native_tokens(session()) :: %{required(atom()) => non_neg_integer()}
-  def runtime_native_tokens(_session), do: %{input: 0, output: 0, total: 0}
+  def runtime_native_tokens(session) do
+    case Process.get({:symphony_codex_adapter_tokens, session_buffer_key(session)}) do
+      %{} = tokens -> tokens
+      _ -> %{input: 0, output: 0, total: 0}
+    end
+  end
 
   @doc """
   Check whether `config` satisfies the profile safety floor.
@@ -325,11 +347,67 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp capture_event_for_stream(message) do
-    existing = Process.get(:symphony_codex_adapter_events, [])
-    Process.put(:symphony_codex_adapter_events, [message | existing])
+  defp capture_event_for_stream(session, message) do
+    key = {:symphony_codex_adapter_events, session_buffer_key(session)}
+    existing = Process.get(key, [])
+    Process.put(key, [message | existing])
     :ok
   end
+
+  defp reset_event_buffer(session) do
+    Process.put({:symphony_codex_adapter_events, session_buffer_key(session)}, [])
+    :ok
+  end
+
+  defp drain_event_buffer(session) do
+    Process.delete({:symphony_codex_adapter_events, session_buffer_key(session)})
+  end
+
+  defp reset_session_tokens(session) do
+    Process.put(
+      {:symphony_codex_adapter_tokens, session_buffer_key(session)},
+      %{input: 0, output: 0, total: 0}
+    )
+
+    :ok
+  end
+
+  defp accumulate_tokens_from_message(session, %{usage: usage}) when is_map(usage) do
+    update_session_tokens(session, usage)
+  end
+
+  defp accumulate_tokens_from_message(_session, _message), do: :ok
+
+  defp update_session_tokens(session, usage) when is_map(usage) do
+    key = {:symphony_codex_adapter_tokens, session_buffer_key(session)}
+    current = Process.get(key, %{input: 0, output: 0, total: 0})
+
+    input = pick_token_count(usage, ["input_tokens", "prompt_tokens", :input])
+    output = pick_token_count(usage, ["output_tokens", "completion_tokens", :output])
+    total = pick_token_count(usage, ["total_tokens", :total])
+
+    Process.put(key, %{
+      input: max(current.input, input),
+      output: max(current.output, output),
+      total: max(current.total, total)
+    })
+
+    :ok
+  end
+
+  defp pick_token_count(usage, keys) when is_map(usage) and is_list(keys) do
+    Enum.reduce_while(keys, 0, fn key, acc ->
+      case Map.get(usage, key) do
+        value when is_integer(value) and value >= 0 -> {:halt, value}
+        _ -> {:cont, acc}
+      end
+    end)
+  end
+
+  # Use the session port (a process-local term) as the buffer key so that
+  # multiple concurrent sessions in the same process don't share state.
+  defp session_buffer_key(%{port: port}) when is_port(port), do: port
+  defp session_buffer_key(session), do: session
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
