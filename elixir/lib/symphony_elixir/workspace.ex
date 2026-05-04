@@ -208,20 +208,49 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-    hooks = Config.settings!().hooks
-
     case created? do
       true ->
-        case hooks.after_create do
-          nil ->
+        case resolve_after_create_command(issue_context) do
+          {:ok, nil} ->
             :ok
 
-          command ->
+          {:ok, command} ->
             run_hook(command, workspace, issue_context, "after_create", worker_host)
+
+          {:error, _reason} = err ->
+            err
         end
 
       false ->
         :ok
+    end
+  end
+
+  defp resolve_after_create_command(issue_context) do
+    repo_key = Map.get(issue_context, :issue_repo)
+
+    case Config.repo_or_default(repo_key) do
+      {:ok, {:repo, _key, repo_entry}} ->
+        {:ok, Map.get(repo_entry, :after_create) || Map.get(repo_entry, "after_create")}
+
+      {:ok, {:default, %{after_create: command}}} ->
+        {:ok, command}
+
+      {:error, :no_default_repo} ->
+        Logger.error(
+          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
+            "Symphony Repo column empty AND hooks.after_create unset"
+        )
+
+        {:error, {:no_default_repo, Map.get(issue_context, :issue_identifier)}}
+
+      {:error, {:unknown_repo, repo_key}} ->
+        Logger.error(
+          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
+            "Symphony Repo \"#{repo_key}\" has no entry in WORKFLOW.md repos: map"
+        )
+
+        {:error, {:unknown_repo, repo_key}}
     end
   end
 
@@ -456,24 +485,27 @@ defmodule SymphonyElixir.Workspace do
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      issue_repo: Map.get(issue, :repo)
     }
   end
 
   defp issue_context(identifier) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      issue_repo: nil
     }
   end
 
   defp issue_context(_identifier) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      issue_repo: nil
     }
   end
 

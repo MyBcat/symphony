@@ -86,4 +86,38 @@ defmodule SymphonyElixir.ProfileResolver do
        orphan_dropdown_labels: label_set |> MapSet.difference(profile_set) |> Enum.sort()
      }}
   end
+
+  @doc """
+  Enforces per-repo `allowed_profiles` allowlist (Spec 3 §2.3 / DL-003).
+
+  Returns `:ok` when:
+  - the repo entry has no `allowed_profiles` field (all profiles permitted), or
+  - the resolved profile's name appears in the allowlist, or
+  - `repo_key` is `nil` (default fallback dispatch — allowlist not applicable).
+
+  Returns `{:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}` otherwise.
+  """
+  @spec assert_allowed_on_repo(SymphonyElixir.Profile.t(), String.t() | nil, map()) ::
+          :ok | {:error, {:profile_not_allowed_on_repo, String.t(), String.t()}}
+  def assert_allowed_on_repo(_profile, nil, _repos), do: :ok
+
+  def assert_allowed_on_repo(%SymphonyElixir.Profile{name: profile_name}, repo_key, repos)
+      when is_binary(repo_key) and is_map(repos) do
+    case Map.get(repos, repo_key) do
+      nil ->
+        :ok
+
+      repo_entry ->
+        case Map.get(repo_entry, :allowed_profiles) || Map.get(repo_entry, "allowed_profiles") do
+          nil -> :ok
+          [] -> :ok
+          allowed when is_list(allowed) ->
+            if profile_name in allowed do
+              :ok
+            else
+              {:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}
+            end
+        end
+    end
+  end
 end
