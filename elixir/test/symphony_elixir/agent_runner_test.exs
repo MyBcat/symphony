@@ -308,4 +308,55 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert %DateTime{} = session.started_at
     end
   end
+
+  describe "profile-based dispatch" do
+    alias SymphonyElixir.{Profile, ProfileResolver, Tracker}
+
+    setup do
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+      end)
+
+      :ok
+    end
+
+    test "resolves profile and selects matching adapter module" do
+      issue = %Tracker.Issue{
+        id: "1",
+        identifier: "SYM-1",
+        title: "test",
+        state: "Symphony Ready",
+        profile: "claude_test"
+      }
+
+      profiles = %{
+        "claude_test" => %Profile{
+          name: "claude_test",
+          kind: :claude,
+          max_concurrent: nil,
+          config: %{"permission_mode" => "acceptEdits", "allowed_tools" => []}
+        }
+      }
+
+      floor = %{"claude" => %{"permission_mode" => "acceptEdits"}}
+
+      assert {:ok, profile} = ProfileResolver.resolve(issue, profiles, nil, floor)
+      assert profile.kind == :claude
+      assert SymphonyElixir.AgentRunner.adapter_for_kind(profile.kind) == SymphonyElixir.Claude.Adapter
+    end
+
+    test "adapter_for_kind returns the right module for each kind" do
+      assert SymphonyElixir.AgentRunner.adapter_for_kind(:codex) == SymphonyElixir.Codex.Adapter
+      assert SymphonyElixir.AgentRunner.adapter_for_kind(:claude) == SymphonyElixir.Claude.Adapter
+      assert SymphonyElixir.AgentRunner.adapter_for_kind(:gemini) == SymphonyElixir.Gemini.Adapter
+    end
+
+    test "adapter_for_kind raises on unknown kind" do
+      assert_raise ArgumentError, fn ->
+        SymphonyElixir.AgentRunner.adapter_for_kind(:unknown)
+      end
+    end
+  end
 end

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Codex.Adapter
   alias SymphonyElixir.{Config, Monday.PRDetector, Monday.Workpad, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
@@ -12,7 +12,37 @@ defmodule SymphonyElixir.AgentRunner do
   @summary_max_bytes 32_768
   @default_profile_name "codex_default"
 
+  @adapter_for_kind %{
+    codex: SymphonyElixir.Codex.Adapter,
+    claude: SymphonyElixir.Claude.Adapter,
+    gemini: SymphonyElixir.Gemini.Adapter
+  }
+
   @type worker_host :: String.t() | nil
+
+  @doc """
+  Map an `AgentRuntime` profile kind atom (`:codex | :claude | :gemini`) to the
+  concrete adapter module that implements `SymphonyElixir.AgentRuntime` for that
+  runtime.
+
+  Used by the orchestrator and AgentRunner to dispatch a resolved Profile to
+  the right adapter without hardcoding `Codex.Adapter` everywhere. Polymorphic
+  integration of `run/3` itself lands in a follow-up; for Spec 2 this exposes
+  the dispatch hook so ProfileResolver + adapter selection are wired.
+
+  Raises `ArgumentError` for unknown kinds — Profiles validated through
+  `SymphonyElixir.Config` are constrained to the supported set, so an unknown
+  kind here indicates a programming error, not config drift.
+  """
+  @spec adapter_for_kind(atom()) :: module()
+  def adapter_for_kind(kind) when is_map_key(@adapter_for_kind, kind) do
+    Map.fetch!(@adapter_for_kind, kind)
+  end
+
+  def adapter_for_kind(kind) do
+    raise ArgumentError,
+          "Unknown agent runtime kind: #{inspect(kind)}. Supported: :codex, :claude, :gemini"
+  end
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -114,7 +144,7 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- Adapter.start_session(workspace, worker_host: worker_host) do
       try do
         do_run_codex_turns(
           session,
@@ -128,7 +158,7 @@ defmodule SymphonyElixir.AgentRunner do
           writer_pid
         )
       after
-        AppServer.stop_session(session)
+        Adapter.stop_session(session)
       end
     end
   end
@@ -147,7 +177,7 @@ defmodule SymphonyElixir.AgentRunner do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           Adapter.run_turn(
              app_session,
              prompt,
              issue,

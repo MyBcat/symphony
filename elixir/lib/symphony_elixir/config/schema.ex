@@ -191,6 +191,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:default_profile, :string)
+      field(:sandbox_safety_floor, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -198,7 +200,14 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :default_profile,
+          :sandbox_safety_floor
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
@@ -330,6 +339,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    field(:profiles, :map, default: %{})
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -412,7 +422,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [])
+    |> cast(attrs, [:profiles])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -422,6 +432,42 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> parse_profiles()
+  end
+
+  defp parse_profiles(changeset) do
+    case get_change(changeset, :profiles) do
+      nil ->
+        changeset
+
+      raw_profiles when is_map(raw_profiles) and map_size(raw_profiles) == 0 ->
+        changeset
+
+      raw_profiles when is_map(raw_profiles) ->
+        parsed =
+          Map.new(raw_profiles, fn {name, raw_cfg} ->
+            {name, profile_struct(name, raw_cfg)}
+          end)
+
+        put_change(changeset, :profiles, parsed)
+    end
+  end
+
+  defp profile_struct(name, raw_cfg) do
+    raw_kind = Map.get(raw_cfg, "kind") || Map.get(raw_cfg, :kind) || ""
+    kind = String.to_atom(to_string(raw_kind))
+
+    config =
+      raw_cfg
+      |> Map.get(Atom.to_string(kind), %{})
+      |> normalize_keys()
+
+    %SymphonyElixir.Profile{
+      name: name,
+      kind: kind,
+      max_concurrent: Map.get(raw_cfg, "max_concurrent") || Map.get(raw_cfg, :max_concurrent),
+      config: config
+    }
   end
 
   defp finalize_settings(settings) do

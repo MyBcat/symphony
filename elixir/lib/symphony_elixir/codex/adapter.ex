@@ -1,7 +1,15 @@
-defmodule SymphonyElixir.Codex.AppServer do
+defmodule SymphonyElixir.Codex.Adapter do
   @moduledoc """
-  Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
+  Codex runtime adapter. Implements `SymphonyElixir.AgentRuntime` on top of the
+  long-running Codex app-server JSON-RPC 2.0 stream over stdio.
+
+  This module preserves the legacy `run/4`, `start_session/2`, `run_turn/4`, and
+  `stop_session/1` entry points used by `AgentRunner`, and additionally exposes
+  the six `AgentRuntime` callbacks. Task 9 will migrate `AgentRunner` over to
+  the behaviour callbacks; until then both surfaces remain operational.
   """
+
+  @behaviour SymphonyElixir.AgentRuntime
 
   require Logger
   alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
@@ -36,11 +44,24 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace, opts \\ []) do
-    worker_host = Keyword.get(opts, :worker_host)
+  @doc """
+  Start a Codex app-server session for `workspace`.
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+  This function serves both the legacy `AgentRunner` integration (which passes
+  a `Keyword.t()` of opts, currently only `:worker_host`) and the
+  `SymphonyElixir.AgentRuntime.start_session/2` behaviour callback (which
+  passes a `map()` config). Map keys may use either atoms or strings; only
+  `:worker_host` / `"worker_host"` is consumed today, and unknown keys are
+  ignored so additional profile fields can be threaded through later without
+  breaking this entry point.
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec start_session(Path.t(), keyword() | map()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts_or_config \\ []) do
+    worker_host = fetch_worker_host(opts_or_config)
+
+    with :ok <- validate_profile_config(opts_or_config),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host) do
       metadata = port_metadata(port, worker_host)
 
@@ -66,6 +87,26 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp fetch_worker_host(opts) when is_list(opts), do: Keyword.get(opts, :worker_host)
+
+  defp fetch_worker_host(config) when is_map(config) do
+    Map.get(config, :worker_host) || Map.get(config, "worker_host")
+  end
+
+  defp fetch_worker_host(_), do: nil
+
+  defp validate_profile_config(config) when is_map(config) do
+    floor = config[:_safety_floor] || config["_safety_floor"] || %{}
+
+    if passes_safety_floor?(config, floor) do
+      :ok
+    else
+      {:error, {:sandbox_floor_violation, :codex, :config}}
+    end
+  end
+
+  defp validate_profile_config(_opts), do: :ok
+
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
         %{
@@ -88,7 +129,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, [])
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -106,7 +155,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
           {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+            Logger.info(
+              "Codex session completed for #{issue_context(issue)} session_id=#{session_id}"
+            )
 
             {:ok,
              %{
@@ -117,7 +168,9 @@ defmodule SymphonyElixir.Codex.AppServer do
              }}
 
           {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            Logger.warning(
+              "Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}"
+            )
 
             emit_message(
               on_message,
@@ -139,9 +192,143 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @impl SymphonyElixir.AgentRuntime
   @spec stop_session(session()) :: :ok
   def stop_session(%{port: port}) when is_port(port) do
     stop_port(port)
+  end
+
+  @doc """
+  Submit a single prompt to a previously-started session.
+
+  `AgentRuntime` shape: events flow through `stream_events/1` rather than the
+  legacy `:on_message` callback. For Task 5 this delegates to `run_turn/4`
+  with a synthesized issue map and an event accumulator stashed in the
+  process dictionary keyed by the session's port. Task 9 will rewire this
+  through a dedicated event mailbox/GenServer that `stream_events/1` reads.
+
+  Recognized opts:
+    * `:issue` — issue map (with `:id`, `:identifier`, `:title`) used by
+      `run_turn/4`. If absent, a placeholder is generated.
+    * `:on_message` — extra observer fn wired in addition to the internal
+      event collector. Useful for callers that still want push-style events
+      while we transition.
+    * `:tool_executor` — passed through to `run_turn/4`.
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec send_turn(session(), String.t(), keyword()) :: :ok | {:error, term()}
+  def send_turn(session, prompt, opts \\ []) do
+    issue = Keyword.get(opts, :issue, default_issue_for_send_turn())
+    extra_on_message = Keyword.get(opts, :on_message)
+
+    on_message =
+      compose_on_message(
+        &capture_event_for_stream/1,
+        extra_on_message
+      )
+
+    run_turn_opts =
+      opts
+      |> Keyword.drop([:issue, :on_message])
+      |> Keyword.put(:on_message, on_message)
+
+    case run_turn(session, prompt, issue, run_turn_opts) do
+      {:ok, _result} -> :ok
+      {:error, _reason} = err -> err
+    end
+  end
+
+  @doc """
+  Return an `Enumerable` of events captured for `session` since the last
+  read. Task 5 returns events buffered in the process dictionary by
+  `send_turn/3`; this is intentionally minimal and will be replaced in
+  Task 9 with a real event mailbox owned per session.
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec stream_events(session()) :: Enumerable.t()
+  def stream_events(_session) do
+    Stream.unfold(:ok, fn _state ->
+      case Process.delete(:symphony_codex_adapter_events) do
+        nil -> nil
+        [] -> nil
+        events when is_list(events) -> {Enum.reverse(events), :done}
+      end
+    end)
+    |> Stream.flat_map(& &1)
+  end
+
+  @doc """
+  Return Codex's native token shape `%{input: int, output: int, total: int}`.
+
+  Task 5 returns zeros — the adapter does not yet aggregate `usage` blocks
+  from the JSON-RPC stream into the session struct. Task 9 will plumb usage
+  capture through and populate this map.
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec runtime_native_tokens(session()) :: %{required(atom()) => non_neg_integer()}
+  def runtime_native_tokens(_session), do: %{input: 0, output: 0, total: 0}
+
+  @doc """
+  Check whether `config` satisfies the profile safety floor.
+
+  Codex-native vocabulary:
+
+    * `thread_sandbox` ∈ `["read-only", "workspace-write", "danger-full-access"]`
+    * `approval_policy` ∈ `["never", ...]`
+
+  Floor passes when `thread_sandbox` is no more permissive than the floor's
+  `thread_sandbox` within the safe v1 set (`read-only` <= `workspace-write`),
+  AND `approval_policy` is exactly `never`. Both atom and string keys are
+  accepted on `config` so YAML-parsed and runtime-built configs share this
+  check.
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec passes_safety_floor?(map(), map()) :: boolean()
+  def passes_safety_floor?(config, floor) do
+    thread_sandbox = config[:thread_sandbox] || config["thread_sandbox"]
+    approval_policy = config[:approval_policy] || config["approval_policy"]
+
+    floor_thread_sandbox = Map.get(floor, "thread_sandbox", "workspace-write")
+
+    thread_sandbox_ok = sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox)
+    approval_policy_ok = approval_policy == "never"
+
+    thread_sandbox_ok and approval_policy_ok
+  end
+
+  defp sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox) do
+    sandbox_rank = %{"read-only" => 0, "workspace-write" => 1}
+
+    with sandbox when is_integer(sandbox) <- Map.get(sandbox_rank, thread_sandbox),
+         floor when is_integer(floor) <- Map.get(sandbox_rank, floor_thread_sandbox) do
+      sandbox <= floor
+    else
+      _ -> false
+    end
+  end
+
+  defp default_issue_for_send_turn do
+    %{
+      id: "send-turn-#{System.unique_integer([:positive])}",
+      identifier: "AGENT",
+      title: "send_turn"
+    }
+  end
+
+  defp compose_on_message(primary, nil), do: primary
+
+  defp compose_on_message(primary, secondary) when is_function(secondary, 1) do
+    fn message ->
+      _ = primary.(message)
+      _ = secondary.(message)
+      :ok
+    end
+  end
+
+  defp capture_event_for_stream(message) do
+    existing = Process.get(:symphony_codex_adapter_events, [])
+    Process.put(:symphony_codex_adapter_events, [message | existing])
+    :ok
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
@@ -164,7 +351,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
         true ->
-          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
+          {:error,
+           {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
       end
     else
       {:error, {:path_canonicalize_failed, path, reason}} ->
@@ -277,7 +465,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
+  defp start_thread(port, workspace, %{
+         approval_policy: approval_policy,
+         thread_sandbox: thread_sandbox
+       }) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
@@ -337,11 +528,26 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -707,7 +913,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     }
   end
 
-  defp dynamic_tool_output(%{"contentItems" => [%{"text" => text} | _]}) when is_binary(text), do: text
+  defp dynamic_tool_output(%{"contentItems" => [%{"text" => text} | _]}) when is_binary(text),
+    do: text
+
   defp dynamic_tool_output(result), do: Jason.encode!(result, pretty: true)
 
   defp dynamic_tool_content_items(output) when is_binary(output) do
@@ -811,7 +1019,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp tool_request_user_input_approval_answers(%{"questions" => questions}) when is_list(questions) do
+  defp tool_request_user_input_approval_answers(%{"questions" => questions})
+       when is_list(questions) do
     answers =
       Enum.reduce_while(questions, %{}, fn question, acc ->
         case tool_request_user_input_approval_answer(question) do
@@ -859,12 +1068,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp tool_request_user_input_unavailable_answers(%{"questions" => questions}) when is_list(questions) do
+  defp tool_request_user_input_unavailable_answers(%{"questions" => questions})
+       when is_list(questions) do
     answers =
       Enum.reduce_while(questions, %{}, fn question, acc ->
         case tool_request_user_input_question_id(question) do
           {:ok, question_id} ->
-            {:cont, Map.put(acc, question_id, %{"answers" => [@non_interactive_tool_input_answer]})}
+            {:cont,
+             Map.put(acc, question_id, %{"answers" => [@non_interactive_tool_input_answer]})}
 
           :error ->
             {:halt, :error}
@@ -916,7 +1127,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> String.trim()
       |> String.downcase()
 
-    String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
+    String.starts_with?(normalized_label, "approve") or
+      String.starts_with?(normalized_label, "allow")
   end
 
   defp await_response(port, request_id) do
@@ -1007,7 +1219,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
-    message = metadata |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
+    message =
+      metadata
+      |> Map.merge(details)
+      |> Map.put(:event, event)
+      |> Map.put(:timestamp, DateTime.utc_now())
+
     on_message.(message)
   end
 
@@ -1034,7 +1251,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp default_on_message(_message), do: :ok
 
   defp tool_call_name(params) when is_map(params) do
-    case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") || Map.get(params, :name) do
+    case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") ||
+           Map.get(params, :name) do
       name when is_binary(name) ->
         case String.trim(name) do
           "" -> nil
