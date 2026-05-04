@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.Monday.AdapterTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias SymphonyElixir.Monday.Adapter
 
   defmodule FakeMondayClient do
@@ -13,6 +15,23 @@ defmodule SymphonyElixir.Monday.AdapterTest do
            %{
              "data" => %{
                "items" => [raw_item()]
+             }
+           }}
+
+        query =~ "SymphonyStatusLabels" ->
+          {:ok,
+           %{
+             "data" => %{
+               "boards" => [
+                 %{
+                   "columns" => [
+                     %{
+                       "id" => "symphony_status_xyz",
+                       "settings_str" => status_settings_str()
+                     }
+                   ]
+                 }
+               ]
              }
            }}
 
@@ -46,36 +65,182 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       }
     end
 
+    defp status_settings_str do
+      Jason.encode!(%{
+        "labels" => %{
+          "0" => "Symphony Ready",
+          "1" => "Done",
+          "2" => "Rework",
+          "4" => "Human Review",
+          "7" => "In Progress",
+          "10" => "Cancelled",
+          "14" => "Merging"
+        },
+        "labels_colors" => %{
+          "0" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+          "1" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+          "2" => %{"color" => "#fdab3d", "border" => "#e99729", "var_name" => "orange"},
+          "4" => %{"color" => "#a25ddc", "border" => "#9238af", "var_name" => "purple"},
+          "7" => %{"color" => "#579bfc", "border" => "#4387e8", "var_name" => "bright-blue"},
+          "10" => %{"color" => "#c4c4c4", "border" => "#b0b0b0", "var_name" => "grey"},
+          "14" => %{"color" => "#333333", "border" => "#222222", "var_name" => "blackish"}
+        },
+        "done_colors" => [1, 10],
+        "deactivated_labels" => []
+      })
+    end
+
     defp self_pid, do: Process.get(:test_pid)
   end
 
   defmodule PHIClient do
-    def graphql(_query, _vars, _opts) do
-      {:ok,
-       %{
-         "data" => %{
-           "boards" => [
-             %{
-               "items_page" => %{
-                 "cursor" => nil,
-                 "items" => [
-                   %{
-                     "id" => "9482736152",
-                     "name" => "Patient John Smith needs follow-up",
-                     "url" => "https://example.com",
-                     "created_at" => "2026-05-01T00:00:00Z",
-                     "updated_at" => "2026-05-03T00:00:00Z",
-                     "column_values" => [
-                       %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+    def graphql(query, _vars, _opts) do
+      cond do
+        query =~ "SymphonyStatusLabels" ->
+          {:ok,
+           %{
+             "data" => %{
+               "boards" => [
+                 %{
+                   "columns" => [
+                     %{
+                       "id" => "symphony_status_xyz",
+                       "settings_str" =>
+                         Jason.encode!(%{
+                           "labels" => %{
+                             "0" => "Symphony Ready",
+                             "1" => "Done",
+                             "2" => "Rework",
+                             "4" => "Human Review",
+                             "7" => "In Progress",
+                             "10" => "Cancelled",
+                             "14" => "Merging"
+                           },
+                           "labels_colors" => %{
+                             "0" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+                             "1" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+                             "2" => %{"color" => "#fdab3d", "border" => "#e99729", "var_name" => "orange"},
+                             "4" => %{"color" => "#a25ddc", "border" => "#9238af", "var_name" => "purple"},
+                             "7" => %{"color" => "#579bfc", "border" => "#4387e8", "var_name" => "bright-blue"},
+                             "10" => %{"color" => "#c4c4c4", "border" => "#b0b0b0", "var_name" => "grey"},
+                             "14" => %{"color" => "#333333", "border" => "#222222", "var_name" => "blackish"}
+                           },
+                           "done_colors" => [1, 10],
+                           "deactivated_labels" => []
+                         })
+                     }
+                   ]
+                 }
+               ]
+             }
+           }}
+
+        true ->
+          {:ok,
+           %{
+             "data" => %{
+               "boards" => [
+                 %{
+                   "items_page" => %{
+                     "cursor" => nil,
+                     "items" => [
+                       %{
+                         "id" => "9482736152",
+                         "name" => "Patient John Smith needs follow-up",
+                         "url" => "https://example.com",
+                         "created_at" => "2026-05-01T00:00:00Z",
+                         "updated_at" => "2026-05-03T00:00:00Z",
+                         "column_values" => [
+                           %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+                         ]
+                       }
                      ]
                    }
-                 ]
-               }
+                 }
+               ]
              }
-           ]
-         }
-       }}
+           }}
+      end
     end
+  end
+
+  defmodule ConfigurableMondayClient do
+    def graphql(query, vars, _opts) do
+      send(self_pid(), {:graphql, query, vars})
+
+      cond do
+        query =~ "SymphonyStatusLabels" ->
+          Process.get(:status_labels_result)
+
+        true ->
+          Process.get(:items_page_result)
+      end
+    end
+
+    defp self_pid, do: Process.get(:test_pid)
+  end
+
+  defp clear_status_label_cache(%{tracker: cfg}) do
+    Process.delete({Adapter, :status_label_id_map, cfg.board_id, cfg.symphony_status_column_id})
+  end
+
+  defp status_labels_result(settings_str) do
+    {:ok,
+     %{
+       "data" => %{
+         "boards" => [
+           %{
+             "columns" => [
+               %{
+                 "id" => "symphony_status_xyz",
+                 "settings_str" => settings_str
+               }
+             ]
+           }
+         ]
+       }
+     }}
+  end
+
+  defp items_page_result(items) do
+    {:ok,
+     %{
+       "data" => %{
+         "boards" => [
+           %{
+             "items_page" => %{
+               "cursor" => nil,
+               "items" => items
+             }
+           }
+         ]
+       }
+     }}
+  end
+
+  defp status_settings_str do
+    Jason.encode!(%{
+      "labels" => %{
+        "0" => "Symphony Ready",
+        "1" => "Done",
+        "2" => "Rework",
+        "4" => "Human Review",
+        "7" => "In Progress",
+        "10" => "Cancelled",
+        "14" => "Merging"
+      },
+      "labels_colors" => %{
+        "0" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+        "1" => %{"color" => "#00c875", "border" => "#00b461", "var_name" => "green-shadow"},
+        "2" => %{"color" => "#fdab3d", "border" => "#e99729", "var_name" => "orange"},
+        "4" => %{"color" => "#a25ddc", "border" => "#9238af", "var_name" => "purple"},
+        "7" => %{"color" => "#579bfc", "border" => "#4387e8", "var_name" => "bright-blue"},
+        "10" => %{"color" => "#c4c4c4", "border" => "#b0b0b0", "var_name" => "grey"},
+        "14" => %{"color" => "#333333", "border" => "#222222", "var_name" => "blackish"}
+      },
+      "done_colors" => [1, 10],
+      "deactivated_labels" => []
+    })
   end
 
   setup do
@@ -114,13 +279,88 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     assert item.identifier == "SYM-9482736152"
     assert item.state == "Symphony Ready"
 
-    assert_received {:graphql, query,
+    assert_received {:graphql, labels_query, %{"columnIds" => ["symphony_status_xyz"]}}
+    assert labels_query =~ "SymphonyStatusLabels"
+
+    assert_received {:graphql, items_query,
                      %{
                        "statusColumnId" => "symphony_status_xyz",
-                       "states" => ["Symphony Ready", "In Progress", "Rework", "Human Review", "Merging"]
+                       "states" => states
                      }}
 
-    assert query =~ "query_params"
+    assert items_query =~ "query_params"
+    assert Enum.all?(states, &is_integer/1)
+    assert Enum.sort(states) == [0, 2, 4, 7, 14]
+  end
+
+  test "fetch_candidate_issues fails fast on bad status label translation paths" do
+    config = %{
+      tracker: %{
+        kind: "monday",
+        endpoint: "https://api.monday.com/v2",
+        api_token: "test-token",
+        board_id: 8_173_460_438,
+        identifier_prefix: "SYM",
+        symphony_status_column_id: "symphony_status_xyz",
+        priority_column_id: "priority_abc",
+        description_column_id: nil,
+        branch_column_id: nil,
+        labels_column_id: nil,
+        active_states: ["Symphony Ready", "Bogus State"],
+        handoff_states: [],
+        terminal_states: ["Done", "Cancelled"],
+        heartbeat_item_id: 999_000,
+        heartbeat_ttl_ms: 60_000
+      }
+    }
+
+    Application.put_env(:symphony_elixir, :test_config_override, config)
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:unknown_monday_status_labels, "symphony_status_xyz", ["Bogus State"]}} =
+                 Adapter.fetch_candidate_issues()
+      end)
+
+    assert log =~ "refusing to run partial items_page filter"
+
+    assert_received {:graphql, labels_query, _}
+    assert labels_query =~ "SymphonyStatusLabels"
+    refute_receive {:graphql, _items_query, _}, 10
+
+    clear_status_label_cache(config)
+    Application.put_env(:symphony_elixir, :monday_client_module, ConfigurableMondayClient)
+    Process.put(:status_labels_result, status_labels_result(status_settings_str()))
+    Process.put(:items_page_result, items_page_result([]))
+
+    config = put_in(config, [:tracker, :active_states], ["Symphony Ready"])
+    Application.put_env(:symphony_elixir, :test_config_override, config)
+
+    assert {:ok, []} = Adapter.fetch_candidate_issues()
+
+    assert_received {:graphql, labels_query, _}
+    assert labels_query =~ "SymphonyStatusLabels"
+    assert_received {:graphql, items_query, %{"states" => states}}
+    assert items_query =~ "SymphonyItemsPage"
+    assert states == [0]
+
+    clear_status_label_cache(config)
+    Process.put(:status_labels_result, {:error, :rate_limited})
+
+    assert {:error, :rate_limited} = Adapter.fetch_candidate_issues()
+    assert_received {:graphql, labels_query, _}
+    assert labels_query =~ "SymphonyStatusLabels"
+    refute_receive {:graphql, _items_query, _}, 10
+
+    Enum.each([nil, "", Jason.encode!(%{}), Jason.encode!(%{"labels" => []})], fn settings_str ->
+      clear_status_label_cache(config)
+      Process.put(:status_labels_result, status_labels_result(settings_str))
+
+      assert {:error, :invalid_settings_str} = Adapter.fetch_candidate_issues()
+      assert_received {:graphql, labels_query, _}
+      assert labels_query =~ "SymphonyStatusLabels"
+      refute_receive {:graphql, _items_query, _}, 10
+    end)
   end
 
   test "fetch_issue_states_by_ids returns normalized items for revalidation" do
