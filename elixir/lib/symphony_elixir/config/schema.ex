@@ -52,6 +52,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:identifier_prefix, :string, default: "SYM")
       field(:symphony_status_column_id, :string)
       field(:profile_column_id, :string)
+      field(:repo_column_id, :string)
       field(:priority_column_id, :string)
       field(:description_column_id, :string)
       field(:branch_column_id, :string)
@@ -81,6 +82,7 @@ defmodule SymphonyElixir.Config.Schema do
           :identifier_prefix,
           :symphony_status_column_id,
           :profile_column_id,
+          :repo_column_id,
           :priority_column_id,
           :description_column_id,
           :branch_column_id,
@@ -289,6 +291,45 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule RepoPolicy do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:allowed_clone_hosts, {:array, :string}, default: ["github.com"])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:allowed_clone_hosts], empty_values: [])
+    end
+  end
+
+  defmodule RepoEntry do
+    @moduledoc false
+
+    defstruct [
+      :key,
+      :clone_url,
+      :after_create,
+      :before_remove,
+      :allowed_profiles,
+      :default_branch
+    ]
+
+    @type t :: %__MODULE__{
+            key: String.t(),
+            clone_url: String.t() | nil,
+            after_create: String.t() | nil,
+            before_remove: String.t() | nil,
+            allowed_profiles: [String.t()] | nil,
+            default_branch: String.t() | nil
+          }
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -337,9 +378,11 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:repo_policy, RepoPolicy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
+    field(:repos, :map, default: %{})
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -422,7 +465,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:profiles])
+    |> cast(attrs, [:profiles, :repos])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -430,9 +473,11 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:repo_policy, with: &RepoPolicy.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> parse_profiles()
+    |> parse_repos()
   end
 
   defp parse_profiles(changeset) do
@@ -469,6 +514,50 @@ defmodule SymphonyElixir.Config.Schema do
       config: config
     }
   end
+
+  defp parse_repos(changeset) do
+    case get_change(changeset, :repos) do
+      nil ->
+        changeset
+
+      raw_repos when is_map(raw_repos) and map_size(raw_repos) == 0 ->
+        changeset
+
+      raw_repos when is_map(raw_repos) ->
+        parsed =
+          Map.new(raw_repos, fn {key, raw_cfg} ->
+            key = to_string(key)
+            {key, repo_entry_struct(key, raw_cfg)}
+          end)
+
+        put_change(changeset, :repos, parsed)
+    end
+  end
+
+  defp repo_entry_struct(key, raw_cfg) when is_map(raw_cfg) do
+    cfg = normalize_keys(raw_cfg)
+
+    %RepoEntry{
+      key: key,
+      clone_url: Map.get(cfg, "clone_url"),
+      after_create: Map.get(cfg, "after_create"),
+      before_remove: Map.get(cfg, "before_remove"),
+      allowed_profiles: normalize_string_list(Map.get(cfg, "allowed_profiles")),
+      default_branch: Map.get(cfg, "default_branch")
+    }
+  end
+
+  defp repo_entry_struct(key, _raw_cfg) do
+    %RepoEntry{key: key}
+  end
+
+  defp normalize_string_list(nil), do: nil
+
+  defp normalize_string_list(values) when is_list(values) do
+    Enum.map(values, &to_string/1)
+  end
+
+  defp normalize_string_list(value), do: value
 
   defp finalize_settings(settings) do
     tracker = %{

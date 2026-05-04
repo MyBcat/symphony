@@ -1,5 +1,16 @@
 defmodule SymphonyElixir.ConfigSchemaTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
+
+  defmodule CapturingLoggerHandler do
+    @moduledoc false
+
+    def log(event, %{pid: pid} = config) do
+      send(pid, {:logger_event, event})
+      config
+    end
+  end
 
   test "tracker schema accepts Monday config" do
     attrs = %{
@@ -205,4 +216,164 @@ defmodule SymphonyElixir.ConfigSchemaTest do
     assert {:error, {:invalid_profile_max_concurrent, "claude_opus"}} =
              SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
   end
+
+  describe "repos config" do
+    test "schema parses tracker repo_column_id, repo_policy, and repos map" do
+      attrs =
+        base_repo_attrs(%{
+          "tracker" => %{"repo_column_id" => "repo_dropdown_xyz"},
+          "repo_policy" => %{"allowed_clone_hosts" => ["github.com"]},
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "after_create" => "mix deps.get",
+              "before_remove" => "mix clean",
+              "allowed_profiles" => ["claude_opus"],
+              "default_branch" => "main"
+            }
+          }
+        })
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.tracker.repo_column_id == "repo_dropdown_xyz"
+      assert settings.repo_policy.allowed_clone_hosts == ["github.com"]
+      assert settings.repos["symphony"].clone_url == "git@github.com:openai/symphony.git"
+      assert settings.repos["symphony"].after_create == "mix deps.get"
+      assert settings.repos["symphony"].before_remove == "mix clean"
+      assert settings.repos["symphony"].allowed_profiles == ["claude_opus"]
+      assert settings.repos["symphony"].default_branch == "main"
+      assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+    end
+
+    test "validate_semantics rejects repo missing clone_url" do
+      assert_repo_validation_error(
+        %{"repos" => %{"symphony" => %{"after_create" => "mix deps.get"}}},
+        {:missing_repo_clone_url, "symphony"}
+      )
+    end
+
+    test "validate_semantics accepts SSH clone_url form" do
+      attrs =
+        base_repo_attrs(%{
+          "tracker" => %{"repo_column_id" => nil},
+          "repos" => %{"symphony" => %{"clone_url" => "git@github.com:openai/symphony.git"}}
+        })
+
+      {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+    end
+
+    test "validate_semantics accepts HTTPS clone_url form" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{"symphony" => %{"clone_url" => "https://github.com/openai/symphony.git"}}
+        })
+
+      {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+    end
+
+    test "validate_semantics rejects clone_url with embedded credentials" do
+      assert_repo_validation_error(
+        %{
+          "repos" => %{
+            "symphony" => %{"clone_url" => "https://user:token@github.com/openai/symphony.git"}
+          }
+        },
+        {:unsafe_clone_url, "symphony", :embedded_credentials}
+      )
+    end
+
+    test "validate_semantics rejects clone_url with shell metacharacters" do
+      assert_repo_validation_error(
+        %{
+          "repos" => %{
+            "symphony" => %{"clone_url" => "https://github.com/openai/symphony.git;rm -rf /"}
+          }
+        },
+        {:unsafe_clone_url, "symphony", :shell_metacharacters}
+      )
+    end
+
+    test "validate_semantics rejects IDN/punycode clone_url host spoofing" do
+      assert_repo_validation_error(
+        %{
+          "repos" => %{
+            "symphony" => %{"clone_url" => "https://xn--github-q4a.com/openai/symphony.git"}
+          }
+        },
+        {:unsafe_clone_url, "symphony", :punycode_host}
+      )
+    end
+
+    test "validate_semantics rejects allowed_profiles not present in profiles map" do
+      assert_repo_validation_error(
+        %{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "allowed_profiles" => ["missing_profile"]
+            }
+          }
+        },
+        {:repo_allowed_profile_not_found, "symphony", "missing_profile"}
+      )
+    end
+
+    test "validate_semantics warns when repo_column_id unset and repos are configured" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{"symphony" => %{"clone_url" => "git@github.com:openai/symphony.git"}}
+        })
+
+      attrs = pop_in(attrs, ["tracker", "repo_column_id"]) |> elem(1)
+
+      {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+      log =
+        capture_log(fn ->
+          assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+        end)
+
+      assert log =~ "repo_column_id unset; multi-repo dispatch disabled"
+      assert log =~ "repos map is ignored"
+    end
+  end
+
+  defp base_repo_attrs(overrides) do
+    deep_merge(
+      %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "status",
+          "profile_column_id" => "profile",
+          "repo_column_id" => "repo",
+          "heartbeat_item_id" => 999
+        },
+        "profiles" => %{
+          "claude_opus" => %{
+            "kind" => "claude",
+            "claude" => %{"command" => "claude --print", "permission_mode" => "acceptEdits"}
+          }
+        }
+      },
+      overrides
+    )
+  end
+
+  defp assert_repo_validation_error(overrides, expected_reason) do
+    attrs = base_repo_attrs(overrides)
+    {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+    assert {:error, ^expected_reason} = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+  end
+
+  defp deep_merge(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right, fn _key, left_value, right_value ->
+      deep_merge(left_value, right_value)
+    end)
+  end
+
+  defp deep_merge(_left, right), do: right
 end
