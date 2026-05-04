@@ -112,6 +112,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_identifier_prefix: "SYM",
           tracker_status_column_id: "symphony_status",
           tracker_profile_column_id: "symphony_profile",
+          tracker_repo_column_id: nil,
           tracker_pr_column_id: "pr_link",
           tracker_heartbeat_item_id: 987_654_321,
           tracker_active_states: ["Symphony Ready", "In Progress", "Rework"],
@@ -128,6 +129,8 @@ defmodule SymphonyElixir.TestSupport do
           agent_default_profile: nil,
           agent_sandbox_safety_floor: nil,
           profiles: nil,
+          repo_policy_allowed_clone_hosts: nil,
+          repos: nil,
           codex_command: "codex app-server",
           codex_approval_policy: %{
             reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
@@ -159,6 +162,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_identifier_prefix = Keyword.get(config, :tracker_identifier_prefix)
     tracker_status_column_id = Keyword.get(config, :tracker_status_column_id)
     tracker_profile_column_id = Keyword.get(config, :tracker_profile_column_id)
+    tracker_repo_column_id = Keyword.get(config, :tracker_repo_column_id)
     tracker_pr_column_id = Keyword.get(config, :tracker_pr_column_id)
     tracker_heartbeat_item_id = Keyword.get(config, :tracker_heartbeat_item_id)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
@@ -178,6 +182,8 @@ defmodule SymphonyElixir.TestSupport do
     agent_default_profile = Keyword.get(config, :agent_default_profile)
     agent_sandbox_safety_floor = Keyword.get(config, :agent_sandbox_safety_floor)
     profiles = Keyword.get(config, :profiles)
+    repo_policy_allowed_clone_hosts = Keyword.get(config, :repo_policy_allowed_clone_hosts)
+    repos = Keyword.get(config, :repos)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -208,6 +214,7 @@ defmodule SymphonyElixir.TestSupport do
         "  identifier_prefix: #{yaml_value(tracker_identifier_prefix)}",
         "  symphony_status_column_id: #{yaml_value(tracker_status_column_id)}",
         "  profile_column_id: #{yaml_value(tracker_profile_column_id)}",
+        tracker_optional_field("repo_column_id", tracker_repo_column_id),
         "  pr_column_id: #{yaml_value(tracker_pr_column_id)}",
         "  heartbeat_item_id: #{yaml_value(tracker_heartbeat_item_id)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
@@ -226,6 +233,8 @@ defmodule SymphonyElixir.TestSupport do
         agent_optional_field("default_profile", agent_default_profile),
         agent_optional_field("sandbox_safety_floor", agent_sandbox_safety_floor),
         profiles_yaml(profiles),
+        repo_policy_yaml(repo_policy_allowed_clone_hosts),
+        repos_yaml(repos),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -350,6 +359,9 @@ defmodule SymphonyElixir.TestSupport do
   defp agent_optional_field(_name, nil), do: nil
   defp agent_optional_field(name, value), do: "  #{name}: #{yaml_value(value)}"
 
+  defp tracker_optional_field(_name, nil), do: nil
+  defp tracker_optional_field(name, value), do: "  #{name}: #{yaml_value(value)}"
+
   defp profiles_yaml(nil), do: nil
 
   defp profiles_yaml(profiles) when is_map(profiles) and map_size(profiles) == 0, do: nil
@@ -404,4 +416,47 @@ defmodule SymphonyElixir.TestSupport do
 
     lines ++ ["    #{yaml_value(to_string(kind))}:" | nested_lines]
   end
+
+  defp repo_policy_yaml(nil), do: nil
+
+  defp repo_policy_yaml(allowed_clone_hosts) do
+    "repo_policy:\n  allowed_clone_hosts: #{yaml_value(allowed_clone_hosts)}"
+  end
+
+  defp repos_yaml(nil), do: nil
+  defp repos_yaml(repos) when is_map(repos) and map_size(repos) == 0, do: nil
+
+  defp repos_yaml(repos) when is_map(repos) do
+    body =
+      repos
+      |> Enum.map_join("\n", fn {key, repo_map} ->
+        repo_yaml_entry(to_string(key), repo_map)
+      end)
+
+    "repos:\n" <> body
+  end
+
+  defp repo_yaml_entry(name, repo_map) when is_map(repo_map) do
+    fields =
+      [
+        repo_yaml_field("clone_url", Map.get(repo_map, :clone_url) || Map.get(repo_map, "clone_url")),
+        repo_yaml_field("after_create", Map.get(repo_map, :after_create) || Map.get(repo_map, "after_create")),
+        repo_yaml_field("before_remove", Map.get(repo_map, :before_remove) || Map.get(repo_map, "before_remove")),
+        repo_yaml_field(
+          "allowed_profiles",
+          Map.get(repo_map, :allowed_profiles) || Map.get(repo_map, "allowed_profiles")
+        ),
+        repo_yaml_field(
+          "default_branch",
+          Map.get(repo_map, :default_branch) || Map.get(repo_map, "default_branch")
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    ["  #{yaml_value(name)}:" | fields]
+    |> Enum.join("\n")
+  end
+
+  defp repo_yaml_field(_name, nil), do: nil
+  defp repo_yaml_field(name, value), do: "    #{name}: #{yaml_value(value)}"
 end

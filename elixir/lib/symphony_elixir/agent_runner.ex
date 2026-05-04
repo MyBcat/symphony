@@ -170,18 +170,27 @@ defmodule SymphonyElixir.AgentRunner do
     floor = settings.agent.sandbox_safety_floor || %{}
 
     case ProfileResolver.resolve(issue, profiles, default_profile, floor) do
-      {:ok, _profile} = ok ->
-        ok
+      {:ok, %Profile{} = profile} ->
+        assert_profile_allowed_on_repo(profile, issue, settings)
 
       {:error, :no_default} ->
         # Spec 1 backward compatibility: when no profiles or default_profile
         # is configured, synthesize a Codex profile from `codex.*` settings
         # so existing single-runtime workflows continue to work without
         # requiring operators to migrate to the multi-profile config shape.
-        {:ok, synthesize_legacy_codex_profile(settings)}
+        settings
+        |> synthesize_legacy_codex_profile()
+        |> assert_profile_allowed_on_repo(issue, settings)
 
       {:error, _reason} = err ->
         err
+    end
+  end
+
+  defp assert_profile_allowed_on_repo(%Profile{} = profile, %Issue{} = issue, settings) do
+    case ProfileResolver.assert_allowed_on_repo(profile, issue.repo, settings.repos || %{}) do
+      :ok -> {:ok, profile}
+      {:error, _reason} = err -> err
     end
   end
 

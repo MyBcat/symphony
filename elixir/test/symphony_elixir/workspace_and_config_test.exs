@@ -252,6 +252,81 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace dispatch refuses unknown repo keys instead of falling back to legacy hook" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-workspace-unknown-repo-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        tracker_repo_column_id: "repo",
+        hook_after_create: "echo legacy > legacy.log",
+        repos: %{
+          "symphony" => %{clone_url: "git@github.com:openai/symphony.git"}
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-unknown-repo",
+        identifier: "MT-UNKNOWN-REPO",
+        title: "Repo typo",
+        state: "Symphony Ready",
+        repo: "typo-repo"
+      }
+
+      assert {:error, {:unknown_repo, "typo-repo"}} = Workspace.create_for_issue(issue)
+
+      refute File.exists?(Path.join([workspace_root, "MT-UNKNOWN-REPO", "legacy.log"]))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace treats nil and empty per-repo after_create as no-op" do
+    for {suffix, after_create} <- [{"nil", nil}, {"empty", ""}] do
+      workspace_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-workspace-repo-noop-#{suffix}-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          tracker_repo_column_id: "repo",
+          hook_after_create: "echo legacy > legacy.log",
+          repos: %{
+            "symphony" => %{
+              clone_url: "git@github.com:openai/symphony.git",
+              after_create: after_create
+            }
+          }
+        )
+
+        issue = %Issue{
+          id: "issue-repo-noop-#{suffix}",
+          identifier: "MT-REPO-NOOP-#{suffix}",
+          title: "Repo setup no-op",
+          state: "Symphony Ready",
+          repo: "symphony"
+        }
+
+        log =
+          capture_log([level: :info], fn ->
+            assert {:ok, workspace} = Workspace.create_for_issue(issue)
+            assert File.ls!(workspace) == []
+          end)
+
+        refute log =~ "Running workspace hook hook=after_create"
+      after
+        File.rm_rf(workspace_root)
+      end
+    end
+  end
+
   test "workspace removes all workspaces for a closed issue identifier" do
     workspace_root =
       Path.join(

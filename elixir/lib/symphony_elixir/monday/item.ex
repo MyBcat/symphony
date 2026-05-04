@@ -19,7 +19,8 @@ defmodule SymphonyElixir.Monday.Item do
           description_column_id: String.t() | nil,
           branch_column_id: String.t() | nil,
           labels_column_id: String.t() | nil,
-          profile_column_id: String.t() | nil
+          profile_column_id: String.t() | nil,
+          repo_column_id: String.t() | nil
         }
 
   @type t :: Issue.t()
@@ -47,6 +48,7 @@ defmodule SymphonyElixir.Monday.Item do
         url: Map.get(raw, "url"),
         labels: labels_value(raw, config[:labels_column_id]),
         profile: profile_value(raw, config[:profile_column_id]),
+        repo: repo_value(raw, config[:repo_column_id]),
         blocked_by: [],
         created_at: parse_datetime(Map.get(raw, "created_at")),
         updated_at: parse_datetime(Map.get(raw, "updated_at"))
@@ -125,6 +127,22 @@ defmodule SymphonyElixir.Monday.Item do
   defp profile_value(_raw, nil), do: nil
 
   defp profile_value(raw, column_id) when is_binary(column_id) do
+    case column_text(raw, column_id) do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      text ->
+        text = String.trim(text)
+        if text == "", do: nil, else: text
+    end
+  end
+
+  defp repo_value(_raw, nil), do: nil
+
+  defp repo_value(raw, column_id) when is_binary(column_id) do
     case column_text(raw, column_id) do
       nil ->
         nil

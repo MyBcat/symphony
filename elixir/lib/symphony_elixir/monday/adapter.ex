@@ -311,9 +311,44 @@ defmodule SymphonyElixir.Monday.Adapter do
       cfg.description_column_id,
       cfg.branch_column_id,
       cfg.labels_column_id,
-      cfg[:profile_column_id]
+      cfg[:profile_column_id],
+      cfg[:repo_column_id]
     ]
     |> Enum.reject(&is_nil/1)
+  end
+
+  @doc false
+  @spec fetch_repo_label_set() :: {:ok, MapSet.t(String.t())} | {:error, term()}
+  def fetch_repo_label_set do
+    cfg = tracker_config()
+
+    case cfg[:repo_column_id] do
+      nil ->
+        {:ok, MapSet.new()}
+
+      column_id ->
+        variables = %{"boardId" => cfg.board_id, "columnIds" => [column_id]}
+
+        case client_module().graphql(@status_labels_query, variables, []) do
+          {:ok, %{"data" => %{"boards" => [%{"columns" => columns}]}}} ->
+            case Enum.find(columns, &(Map.get(&1, "id") == column_id)) do
+              %{"settings_str" => settings_str} ->
+                case parse_status_labels(settings_str) do
+                  {:ok, label_map} -> {:ok, MapSet.new(Map.keys(label_map))}
+                  {:error, _} = err -> err
+                end
+
+              _ ->
+                {:error, :repo_column_not_found}
+            end
+
+          {:error, _} = err ->
+            err
+
+          other ->
+            {:error, {:unexpected_response, other}}
+        end
+    end
   end
 
   defp normalize_items(raw_items, cfg, allowed_states) do
