@@ -8,6 +8,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+
   alias SymphonyElixir.{
     Config,
     Monday.PRDetector,
@@ -67,9 +68,12 @@ defmodule SymphonyElixir.AgentRunner do
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    worker_host =
+      selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info(
+      "Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}"
+    )
 
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
@@ -82,7 +86,9 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-    Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info(
+      "Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}"
+    )
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
@@ -90,7 +96,13 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns_with_tracker(workspace, issue, codex_update_recipient, opts, worker_host)
+            run_codex_turns_with_tracker(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host
+            )
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -126,7 +138,6 @@ defmodule SymphonyElixir.AgentRunner do
             "Profile resolution failed for #{issue_context(issue)}: #{inspect(reason)}"
           )
 
-          finalize_crash(writer_pid, issue, {:profile_resolution_failed, reason})
           {:error, {:profile_resolution_failed, reason}}
       end
     rescue
@@ -138,6 +149,9 @@ defmodule SymphonyElixir.AgentRunner do
         finalize_crash(writer_pid, issue, {kind, reason})
         :erlang.raise(kind, reason, __STACKTRACE__)
     else
+      {:error, {:profile_resolution_failed, _reason}} = err ->
+        err
+
       {:error, reason} = err ->
         finalize_crash(writer_pid, issue, reason)
         err
@@ -225,6 +239,7 @@ defmodule SymphonyElixir.AgentRunner do
          writer_pid
        ) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+
     issue_state_fetcher =
       Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -371,7 +386,7 @@ defmodule SymphonyElixir.AgentRunner do
       :turn_completed -> :done
       :error -> {:error, {:turn_failed, Map.get(event, :payload)}}
       :exit -> {:error, {:port_exit, Map.get(event, :status)}}
-      :stalled -> {:error, :turn_timeout}
+      :stalled -> :continue
       _ -> :continue
     end
   end
@@ -479,7 +494,8 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if active_issue_state?(refreshed_issue.state) do
@@ -640,7 +656,8 @@ defmodule SymphonyElixir.AgentRunner do
 
     {already_emitted?, session} =
       Agent.get_and_update(writer_pid, fn state ->
-        {{state.session_started_emitted?, state.session}, %{state | session_started_emitted?: true}}
+        {{state.session_started_emitted?, state.session},
+         %{state | session_started_emitted?: true}}
       end)
 
     if !already_emitted? and is_binary(issue_id) do
@@ -792,7 +809,11 @@ defmodule SymphonyElixir.AgentRunner do
     case File.dir?(workspace) do
       true ->
         try do
-          {output, status} = System.cmd("git", ["rev-parse", "--short", "HEAD"], cd: workspace, stderr_to_stdout: true)
+          {output, status} =
+            System.cmd("git", ["rev-parse", "--short", "HEAD"],
+              cd: workspace,
+              stderr_to_stdout: true
+            )
 
           if status == 0 do
             output |> String.trim() |> trim_to_short_sha()

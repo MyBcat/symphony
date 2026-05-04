@@ -34,7 +34,9 @@ defmodule SymphonyElixir.AgentRunnerTest do
         assigned_to_worker: true
       }
 
-      workspace = Path.join(System.tmp_dir!(), "agent-runner-test-#{System.unique_integer([:positive])}")
+      workspace =
+        Path.join(System.tmp_dir!(), "agent-runner-test-#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(workspace)
 
       on_exit(fn -> File.rm_rf(workspace) end)
@@ -106,7 +108,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
       message = %{
         event: :notification,
         payload: %{"text" => "Created https://github.com/openai/symphony/pull/42 for review"},
-        raw: ~s({"method":"item/agent_message","params":{"text":"Opened PR https://github.com/openai/symphony/pull/42"}}),
+        raw:
+          ~s({"method":"item/agent_message","params":{"text":"Opened PR https://github.com/openai/symphony/pull/42"}}),
         timestamp: DateTime.utc_now()
       }
 
@@ -313,7 +316,11 @@ defmodule SymphonyElixir.AgentRunnerTest do
     alias SymphonyElixir.{Profile, ProfileResolver, Tracker}
 
     setup do
-      Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
+      Application.put_env(
+        :symphony_elixir,
+        :tracker_adapter_override,
+        SymphonyElixir.Tracker.MemoryMonday
+      )
 
       on_exit(fn ->
         Application.delete_env(:symphony_elixir, :tracker_adapter_override)
@@ -344,7 +351,9 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       assert {:ok, profile} = ProfileResolver.resolve(issue, profiles, nil, floor)
       assert profile.kind == :claude
-      assert SymphonyElixir.AgentRunner.adapter_for_kind(profile.kind) == SymphonyElixir.Claude.Adapter
+
+      assert SymphonyElixir.AgentRunner.adapter_for_kind(profile.kind) ==
+               SymphonyElixir.Claude.Adapter
     end
 
     test "adapter_for_kind returns the right module for each kind" do
@@ -399,7 +408,18 @@ defmodule SymphonyElixir.AgentRunnerTest do
         # `kind:` shape so the AgentRunner's translator path runs (matches
         # Claude/Gemini wire format).
         send(self(), {:recording_event, %{kind: :session_started, session_id: "stub-123"}})
-        send(self(), {:recording_event, %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}})
+
+        if Map.get(session.config, "_emit_stalled_first") ||
+             Map.get(session.config, :_emit_stalled_first) do
+          send(self(), {:recording_event, %{kind: :stalled}})
+        end
+
+        send(
+          self(),
+          {:recording_event,
+           %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}}
+        )
+
         :ok
       end
 
@@ -552,12 +572,185 @@ defmodule SymphonyElixir.AgentRunnerTest do
                        %{"claude" => %{input: 10, output: 5, total: 15}}}
     end
 
-    defp install_recording_adapter(kind) do
-      Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{kind => RecordingAdapter})
+    test "stalled stream heartbeat does not fail a long-silent turn" do
+      install_recording_adapter(:claude)
+      configure_profiles_workflow(:claude, "claude_test", %{_emit_stalled_first: true})
+
+      issue = %Issue{
+        id: "issue-stalled-1",
+        identifier: "SYM-STALLED",
+        title: "Long silent turn",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-STALLED",
+        profile: "claude_test",
+        assigned_to_worker: true
+      }
+
+      AgentRunner.run(issue, self(), max_turns: 1)
+
+      assert_received {:stop_session, _session}
     end
 
-    defp configure_profiles_workflow(kind, profile_name) do
-      workspace_root = Path.join(System.tmp_dir!(), "agent-dispatch-test-#{System.unique_integer([:positive])}")
+    test "profile resolution errors return before adapter dispatch without cancelling issue" do
+      install_recording_adapter(:claude)
+      configure_profiles_workflow(:claude, "claude_test")
+
+      issue = %Issue{
+        id: "issue-profile-error-1",
+        identifier: "SYM-PROFILE",
+        title: "Unknown profile",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-PROFILE",
+        profile: "missing_profile",
+        assigned_to_worker: true
+      }
+
+      assert_raise RuntimeError, ~r/profile_resolution_failed/, fn ->
+        AgentRunner.run(issue, self(), max_turns: 1)
+      end
+
+      refute_received {:start_session, _pid, _workspace, _config}
+
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:status_write, "issue-profile-error-1", "Cancelled"} -> true
+               _ -> false
+             end)
+    end
+
+    test "Codex AgentRuntime map config controls launched command and session policies" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "agent-runner-codex-profile-config-#{System.unique_integer([:positive])}"
+        )
+
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "SYM-CODEX")
+      global_binary = Path.join(test_root, "global-codex")
+      profile_binary = Path.join(test_root, "profile-codex")
+      trace_file = Path.join(test_root, "codex-profile.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_PROFILE_TRACE")
+
+      try do
+        File.mkdir_p!(workspace)
+        System.put_env("SYMP_TEST_CODEX_PROFILE_TRACE", trace_file)
+
+        File.write!(global_binary, """
+        #!/bin/sh
+        printf 'GLOBAL\\n' >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
+        exit 42
+        """)
+
+        File.write!(profile_binary, """
+        #!/bin/sh
+        printf 'PROFILE\\n' >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
+        count=0
+
+        while IFS= read -r line; do
+          count=$((count + 1))
+          printf 'JSON:%s\\n' "$line" >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-profile"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-profile"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"method":"turn/completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}'
+              exit 0
+              ;;
+            *)
+              exit 0
+              ;;
+          esac
+        done
+        """)
+
+        File.chmod!(global_binary, 0o755)
+        File.chmod!(profile_binary, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{global_binary} app-server"
+        )
+
+        config = %{
+          "command" => "#{profile_binary} app-server",
+          "approval_policy" => "never",
+          "thread_sandbox" => "read-only",
+          "_safety_floor" => %{"thread_sandbox" => "workspace-write"}
+        }
+
+        issue = %Issue{
+          id: "issue-codex-profile",
+          identifier: "SYM-CODEX",
+          title: "Codex profile config",
+          state: "Symphony Ready",
+          assigned_to_worker: true
+        }
+
+        assert {:ok, session} = SymphonyElixir.Codex.Adapter.start_session(workspace, config)
+
+        try do
+          assert :ok =
+                   SymphonyElixir.Codex.Adapter.send_turn(session, "Use profile config",
+                     issue: issue
+                   )
+
+          assert %{input: 7, output: 3, total: 10} =
+                   SymphonyElixir.Codex.Adapter.runtime_native_tokens(session)
+        after
+          SymphonyElixir.Codex.Adapter.stop_session(session)
+        end
+
+        trace = File.read!(trace_file)
+        refute trace =~ "GLOBAL"
+        assert trace =~ "PROFILE"
+
+        lines = String.split(trace, "\n", trim: true)
+
+        assert Enum.any?(lines, fn line ->
+                 if String.starts_with?(line, "JSON:") do
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+                   |> then(fn payload ->
+                     payload["method"] == "thread/start" &&
+                       get_in(payload, ["params", "approvalPolicy"]) == "never" &&
+                       get_in(payload, ["params", "sandbox"]) == "read-only"
+                   end)
+                 else
+                   false
+                 end
+               end)
+      after
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_PROFILE_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_PROFILE_TRACE")
+        end
+
+        File.rm_rf(test_root)
+      end
+    end
+
+    defp install_recording_adapter(kind) do
+      Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
+        kind => RecordingAdapter
+      })
+    end
+
+    defp configure_profiles_workflow(kind, profile_name, config_overrides \\ %{}) do
+      workspace_root =
+        Path.join(System.tmp_dir!(), "agent-dispatch-test-#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(workspace_root)
       on_exit(fn -> File.rm_rf(workspace_root) end)
 
@@ -568,7 +761,10 @@ defmodule SymphonyElixir.AgentRunnerTest do
       # Use string-keyed map so the YAML emitter doesn't trip on atom keys.
       # The profile_kind_str key holds the per-kind nested config; this is
       # where the adapter receives `_test_kind` for routing assertions.
-      nested_config = Map.put(profile_config, :_test_kind, profile_kind_str)
+      nested_config =
+        profile_config
+        |> Map.merge(config_overrides)
+        |> Map.put(:_test_kind, profile_kind_str)
 
       profile_entry = %{}
       profile_entry = Map.put(profile_entry, :kind, profile_kind_str)
@@ -588,12 +784,14 @@ defmodule SymphonyElixir.AgentRunnerTest do
       :ok
     end
 
-    defp profile_config_for(:claude), do: %{permission_mode: "acceptEdits", allowed_tools: ["Read"]}
+    defp profile_config_for(:claude),
+      do: %{permission_mode: "acceptEdits", allowed_tools: ["Read"]}
 
     defp profile_config_for(:gemini),
       do: %{command: "gemini --output-format stream-json --sandbox"}
 
-    defp profile_config_for(:codex), do: %{thread_sandbox: "workspace-write", approval_policy: "never"}
+    defp profile_config_for(:codex),
+      do: %{thread_sandbox: "workspace-write", approval_policy: "never"}
 
     defp sandbox_safety_floor_for(:claude),
       do: %{claude: %{permission_mode: "acceptEdits"}}

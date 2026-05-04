@@ -53,10 +53,10 @@ defmodule SymphonyElixir.Codex.Adapter do
   This function serves both the legacy `AgentRunner` integration (which passes
   a `Keyword.t()` of opts, currently only `:worker_host`) and the
   `SymphonyElixir.AgentRuntime.start_session/2` behaviour callback (which
-  passes a `map()` config). Map keys may use either atoms or strings; only
-  `:worker_host` / `"worker_host"` is consumed today, and unknown keys are
-  ignored so additional profile fields can be threaded through later without
-  breaking this entry point.
+  passes a `map()` config). Map keys may use either atoms or strings. Profile
+  map config controls the Codex command plus `approval_policy`,
+  `thread_sandbox`, and optional `turn_sandbox_policy`; legacy keyword opts keep
+  using the top-level `codex.*` settings.
   """
   @impl SymphonyElixir.AgentRuntime
   @spec start_session(Path.t(), keyword() | map()) :: {:ok, session()} | {:error, term()}
@@ -65,10 +65,12 @@ defmodule SymphonyElixir.Codex.Adapter do
 
     with :ok <- validate_profile_config(opts_or_config),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+         {:ok, command} <- command_for_session(opts_or_config),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, command) do
       metadata = port_metadata(port, worker_host)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
+      with {:ok, session_policies} <-
+             session_policies(expanded_workspace, worker_host, opts_or_config),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
         {:ok,
          %{
@@ -97,6 +99,24 @@ defmodule SymphonyElixir.Codex.Adapter do
   end
 
   defp fetch_worker_host(_), do: nil
+
+  defp command_for_session(config) when is_map(config) do
+    config
+    |> config_value(:command)
+    |> case do
+      command when is_binary(command) and command != "" -> {:ok, command}
+      _ -> legacy_codex_command()
+    end
+  end
+
+  defp command_for_session(_opts), do: legacy_codex_command()
+
+  defp legacy_codex_command do
+    case Config.settings!().codex.command do
+      command when is_binary(command) and command != "" -> {:ok, command}
+      _ -> {:error, :missing_command}
+    end
+  end
 
   defp validate_profile_config(config) when is_map(config) do
     floor = config[:_safety_floor] || config["_safety_floor"] || %{}
@@ -452,7 +472,7 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp start_port(workspace, nil) do
+  defp start_port(workspace, nil, command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -465,7 +485,7 @@ defmodule SymphonyElixir.Codex.Adapter do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -475,15 +495,15 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
+  defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, command)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  defp remote_launch_command(workspace, command) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      "exec #{command}"
     ]
     |> Enum.join(" && ")
   end
@@ -528,12 +548,33 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp session_policies(workspace, nil) do
+  defp session_policies(workspace, worker_host, config) when is_map(config) do
+    with {:ok, legacy_policies} <- legacy_session_policies(workspace, worker_host) do
+      {:ok,
+       %{
+         approval_policy:
+           config_value(config, :approval_policy) || legacy_policies.approval_policy,
+         thread_sandbox: config_value(config, :thread_sandbox) || legacy_policies.thread_sandbox,
+         turn_sandbox_policy:
+           config_value(config, :turn_sandbox_policy) || legacy_policies.turn_sandbox_policy
+       }}
+    end
+  end
+
+  defp session_policies(workspace, worker_host, _opts) do
+    legacy_session_policies(workspace, worker_host)
+  end
+
+  defp legacy_session_policies(workspace, nil) do
     Config.codex_runtime_settings(workspace)
   end
 
-  defp session_policies(workspace, worker_host) when is_binary(worker_host) do
+  defp legacy_session_policies(workspace, worker_host) when is_binary(worker_host) do
     Config.codex_runtime_settings(workspace, remote: true)
+  end
+
+  defp config_value(config, key) when is_map(config) and is_atom(key) do
+    Map.get(config, key) || Map.get(config, Atom.to_string(key))
   end
 
   defp do_start_session(port, workspace, session_policies) do
