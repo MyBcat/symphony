@@ -306,6 +306,22 @@ defmodule SymphonyElixir.ConfigSchemaTest do
       )
     end
 
+    test "validate_semantics rejects reviewed clone_url safety floor examples" do
+      cases = [
+        {"https://github.com\u202Egit/MyBcat/x.git", {:unsafe_clone_url, "symphony", :non_ascii}},
+        {"https://user:t@github.com/x.git", {:unsafe_clone_url, "symphony", :embedded_credentials}},
+        {"git@github.com:x.git;rm -rf /", {:unsafe_clone_url, "symphony", :shell_metacharacters}},
+        {"https://xn--github-q4a.com/x.git", {:unsafe_clone_url, "symphony", :punycode_host}}
+      ]
+
+      for {clone_url, expected_reason} <- cases do
+        assert_repo_validation_error(
+          %{"repos" => %{"symphony" => %{"clone_url" => clone_url}}},
+          expected_reason
+        )
+      end
+    end
+
     test "validate_semantics rejects allowed_profiles not present in profiles map" do
       assert_repo_validation_error(
         %{
@@ -317,6 +333,20 @@ defmodule SymphonyElixir.ConfigSchemaTest do
           }
         },
         {:repo_allowed_profile_not_found, "symphony", "missing_profile"}
+      )
+    end
+
+    test "validate_semantics rejects non-list allowed_profiles" do
+      assert_repo_validation_error(
+        %{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "allowed_profiles" => "claude_opus"
+            }
+          }
+        },
+        {:invalid_repo_allowed_profiles, "symphony"}
       )
     end
 
@@ -337,6 +367,25 @@ defmodule SymphonyElixir.ConfigSchemaTest do
 
       assert log =~ "repo_column_id unset; multi-repo dispatch disabled"
       assert log =~ "repos map is ignored"
+    end
+
+    test "validate_semantics warns only once per process when repo_column_id is unset" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{"symphony" => %{"clone_url" => "git@github.com:openai/symphony.git"}}
+        })
+
+      attrs = pop_in(attrs, ["tracker", "repo_column_id"]) |> elem(1)
+
+      {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+      log =
+        capture_log(fn ->
+          assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+          assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+        end)
+
+      assert (String.split(log, "repo_column_id unset; multi-repo dispatch disabled") |> length()) - 1 == 1
     end
   end
 

@@ -619,6 +619,55 @@ defmodule SymphonyElixir.AgentRunnerTest do
              end)
     end
 
+    test "repo allowed_profiles blocks disallowed profile before adapter dispatch" do
+      install_recording_adapter(:claude)
+
+      workspace_root =
+        Path.join(System.tmp_dir!(), "agent-dispatch-repo-allowlist-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(workspace_root)
+      on_exit(fn -> File.rm_rf(workspace_root) end)
+
+      profile_config = %{permission_mode: "acceptEdits", allowed_tools: ["Read"], _test_kind: "claude"}
+
+      profiles = %{
+        "claude_opus" => %{kind: "claude", claude: profile_config},
+        "claude_sonnet" => %{kind: "claude", claude: profile_config}
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        tracker_repo_column_id: "repo",
+        agent_default_profile: "claude_opus",
+        agent_sandbox_safety_floor: %{claude: %{permission_mode: "acceptEdits"}},
+        profiles: profiles,
+        repos: %{
+          "symphony" => %{
+            clone_url: "git@github.com:openai/symphony.git",
+            allowed_profiles: ["claude_sonnet"]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-repo-profile-denied",
+        identifier: "SYM-REPO-DENIED",
+        title: "Repo allowlist",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-REPO-DENIED",
+        profile: "claude_opus",
+        repo: "symphony",
+        assigned_to_worker: true
+      }
+
+      assert_raise RuntimeError, ~r/profile_not_allowed_on_repo/, fn ->
+        AgentRunner.run(issue, self(), max_turns: 1)
+      end
+
+      refute_received {:start_session, _pid, _workspace, _config}
+    end
+
     test "Codex AgentRuntime map config controls launched command and session policies" do
       test_root =
         Path.join(

@@ -98,7 +98,9 @@ defmodule SymphonyElixir.ProfileResolver do
   Returns `{:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}` otherwise.
   """
   @spec assert_allowed_on_repo(SymphonyElixir.Profile.t(), String.t() | nil, map()) ::
-          :ok | {:error, {:profile_not_allowed_on_repo, String.t(), String.t()}}
+          :ok
+          | {:error, {:profile_not_allowed_on_repo, String.t(), String.t()}}
+          | {:error, {:invalid_repo_allowed_profiles, String.t()}}
   def assert_allowed_on_repo(_profile, nil, _repos), do: :ok
 
   def assert_allowed_on_repo(%SymphonyElixir.Profile{name: profile_name}, repo_key, repos)
@@ -109,14 +111,21 @@ defmodule SymphonyElixir.ProfileResolver do
 
       repo_entry ->
         case Map.get(repo_entry, :allowed_profiles) || Map.get(repo_entry, "allowed_profiles") do
-          nil -> :ok
-          [] -> :ok
+          nil ->
+            :ok
+
+          [] ->
+            :ok
+
           allowed when is_list(allowed) ->
             if profile_name in allowed do
               :ok
             else
               {:error, {:profile_not_allowed_on_repo, profile_name, repo_key}}
             end
+
+          _invalid ->
+            {:error, {:invalid_repo_allowed_profiles, repo_key}}
         end
     end
   end

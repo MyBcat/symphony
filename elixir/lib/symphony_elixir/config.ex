@@ -216,6 +216,7 @@ defmodule SymphonyElixir.Config do
 
   @clone_shell_metacharacters ~r/[;&|`$<>\n\r\0]/
   @url_encoded_path_separators ~w(%2f %5c)
+  @repo_legacy_mode_warning_key {__MODULE__, :repo_legacy_mode_warning_emitted}
 
   defp default_repo(settings, require_hook?) do
     after_create = settings.hooks.after_create
@@ -453,7 +454,11 @@ defmodule SymphonyElixir.Config do
     repos = settings.repos || %{}
 
     if blank?(settings.tracker.repo_column_id) and map_size(repos) > 0 do
-      Logger.warning("repo_column_id unset; multi-repo dispatch disabled; repos map is ignored until tracker.repo_column_id is set")
+      unless Process.get(@repo_legacy_mode_warning_key) do
+        Process.put(@repo_legacy_mode_warning_key, true)
+
+        Logger.warning("repo_column_id unset; multi-repo dispatch disabled; repos map is ignored until tracker.repo_column_id is set")
+      end
     end
   end
 

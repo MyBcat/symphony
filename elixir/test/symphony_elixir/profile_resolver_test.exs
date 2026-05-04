@@ -80,4 +80,40 @@ defmodule SymphonyElixir.ProfileResolverTest do
     assert "codex" in missing
     assert "claude_sonnet" in orphans
   end
+
+  describe "assert_allowed_on_repo/3" do
+    test "permits default fallback dispatch without a repo key" do
+      repos = %{"symphony" => %{allowed_profiles: ["claude_sonnet"]}}
+
+      assert :ok = ProfileResolver.assert_allowed_on_repo(@claude_opus, nil, repos)
+    end
+
+    test "permits all profiles when allowed_profiles is absent" do
+      repos = %{"symphony" => %{}}
+
+      assert :ok = ProfileResolver.assert_allowed_on_repo(@claude_opus, "symphony", repos)
+    end
+
+    test "permits all profiles when allowed_profiles is empty" do
+      repos = %{"symphony" => %{allowed_profiles: []}}
+
+      assert :ok = ProfileResolver.assert_allowed_on_repo(@claude_opus, "symphony", repos)
+    end
+
+    test "rejects profiles outside a repo allowlist" do
+      repos = %{"symphony" => %{allowed_profiles: ["claude_sonnet"]}}
+
+      assert {:error, {:profile_not_allowed_on_repo, "claude_opus", "symphony"}} =
+               ProfileResolver.assert_allowed_on_repo(@claude_opus, "symphony", repos)
+    end
+
+    test "errors instead of silently permitting non-list allowed_profiles" do
+      for invalid_allowed_profiles <- ["claude_opus", :claude_opus] do
+        repos = %{"symphony" => %{allowed_profiles: invalid_allowed_profiles}}
+
+        assert {:error, {:invalid_repo_allowed_profiles, "symphony"}} =
+                 ProfileResolver.assert_allowed_on_repo(@claude_opus, "symphony", repos)
+      end
+    end
+  end
 end

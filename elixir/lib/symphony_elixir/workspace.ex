@@ -231,10 +231,11 @@ defmodule SymphonyElixir.Workspace do
 
     case Config.repo_or_default(repo_key) do
       {:ok, {:repo, _key, repo_entry}} ->
-        {:ok, Map.get(repo_entry, :after_create) || Map.get(repo_entry, "after_create")}
+        command = Map.get(repo_entry, :after_create) || Map.get(repo_entry, "after_create")
+        {:ok, normalize_after_create_command(command)}
 
       {:ok, {:default, %{after_create: command}}} ->
-        {:ok, command}
+        {:ok, normalize_after_create_command(command)}
 
       {:error, :no_default_repo} ->
         Logger.error(
@@ -253,6 +254,12 @@ defmodule SymphonyElixir.Workspace do
         {:error, {:unknown_repo, repo_key}}
     end
   end
+
+  defp normalize_after_create_command(command) when is_binary(command) do
+    if String.trim(command) == "", do: nil, else: command
+  end
+
+  defp normalize_after_create_command(_command), do: nil
 
   defp maybe_run_before_remove_hook(workspace, nil) do
     hooks = Config.settings!().hooks
