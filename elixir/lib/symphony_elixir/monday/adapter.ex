@@ -103,6 +103,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   @workpad_marker "## Symphony Workpad"
   @failure_marker "## Symphony Failures"
   @heartbeat_marker "## Symphony Heartbeat"
+  @status_label_cache_ttl_ms :timer.minutes(5)
 
   @impl true
   def fetch_candidate_issues do
@@ -185,15 +186,19 @@ defmodule SymphonyElixir.Monday.Adapter do
         {known, unknown} =
           Enum.split_with(allowed_states, fn name -> Map.has_key?(label_map, name) end)
 
-        if unknown != [] do
-          Logger.warning(
-            "Monday status labels not found on column #{inspect(cfg.symphony_status_column_id)}: " <>
-              inspect(unknown) <> "; skipping in items_page filter"
-          )
-        end
+        case unknown do
+          [] ->
+            ids = Enum.map(known, fn name -> Map.fetch!(label_map, name) end)
+            {:ok, ids}
 
-        ids = Enum.map(known, fn name -> Map.fetch!(label_map, name) end)
-        {:ok, ids}
+          missing ->
+            Logger.error(
+              "Monday status labels not found on column #{inspect(cfg.symphony_status_column_id)}: " <>
+                inspect(missing) <> "; refusing to run partial items_page filter"
+            )
+
+            {:error, {:unknown_monday_status_labels, cfg.symphony_status_column_id, missing}}
+        end
 
       {:error, reason} = err ->
         Logger.error(
@@ -209,23 +214,38 @@ defmodule SymphonyElixir.Monday.Adapter do
     cache_key = {__MODULE__, :status_label_id_map, cfg.board_id, cfg.symphony_status_column_id}
 
     case Process.get(cache_key) do
-      nil ->
-        case fetch_status_label_id_map(cfg) do
-          {:ok, map} when map_size(map) > 0 ->
-            Process.put(cache_key, map)
-            {:ok, map}
-
-          {:ok, _empty} = ok ->
-            ok
-
-          {:error, _} = err ->
-            err
+      %{fetched_at_ms: fetched_at_ms, labels: map}
+      when is_integer(fetched_at_ms) and is_map(map) ->
+        if status_label_cache_fresh?(fetched_at_ms) do
+          {:ok, map}
+        else
+          fetch_and_cache_status_label_id_map(cfg, cache_key)
         end
 
-      map when is_map(map) ->
-        {:ok, map}
+      _ ->
+        fetch_and_cache_status_label_id_map(cfg, cache_key)
     end
   end
+
+  defp fetch_and_cache_status_label_id_map(cfg, cache_key) do
+    case fetch_status_label_id_map(cfg) do
+      {:ok, map} when map_size(map) > 0 ->
+        Process.put(cache_key, %{fetched_at_ms: monotonic_ms(), labels: map})
+        {:ok, map}
+
+      {:ok, _empty} = ok ->
+        ok
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp status_label_cache_fresh?(fetched_at_ms) do
+    monotonic_ms() - fetched_at_ms < @status_label_cache_ttl_ms
+  end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp fetch_status_label_id_map(cfg) do
     variables = %{
@@ -249,17 +269,15 @@ defmodule SymphonyElixir.Monday.Adapter do
   end
 
   defp parse_status_labels(settings_str) when is_binary(settings_str) do
-    with {:ok, parsed} <- Jason.decode(settings_str),
+    with {:ok, parsed} when is_map(parsed) <- Jason.decode(settings_str),
          %{"labels" => labels} when is_map(labels) <- parsed do
-      deactivated =
-        parsed
-        |> Map.get("deactivated_labels", [])
-        |> Enum.map(&to_string/1)
-        |> MapSet.new()
+      deactivated = deactivated_status_label_ids(parsed)
 
       map =
         labels
         |> Enum.reduce(%{}, fn {id_str, name}, acc ->
+          id_str = to_string(id_str)
+
           if MapSet.member?(deactivated, id_str) or not is_binary(name) do
             acc
           else
@@ -277,6 +295,14 @@ defmodule SymphonyElixir.Monday.Adapter do
   end
 
   defp parse_status_labels(_), do: {:error, :invalid_settings_str}
+
+  defp deactivated_status_label_ids(%{"deactivated_labels" => deactivated}) when is_list(deactivated) do
+    deactivated
+    |> Enum.map(&to_string/1)
+    |> MapSet.new()
+  end
+
+  defp deactivated_status_label_ids(_parsed), do: MapSet.new()
 
   defp collect_column_ids(cfg) do
     [
