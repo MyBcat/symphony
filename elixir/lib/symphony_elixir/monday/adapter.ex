@@ -115,6 +115,12 @@ defmodule SymphonyElixir.Monday.Adapter do
   @heartbeat_marker "## Symphony Heartbeat"
   @status_label_cache_ttl_ms :timer.minutes(5)
 
+  # Cap a single failure update body to 8 KiB to stay well under Monday's
+  # update size ceiling and to keep the dashboard view readable. Anything
+  # larger gets a literal "[truncated]" suffix per the spec.
+  @failure_body_max_bytes 8 * 1024
+  @failure_truncation_suffix "[truncated]"
+
   @impl true
   def fetch_candidate_issues do
     cfg = tracker_config()
@@ -431,12 +437,51 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   @impl true
   def post_failure_update(item_id, body) do
-    full_body = "#{@failure_marker}\n\n#{body}"
+    safe_body = redact_phi(body || "")
+    full_body = "#{@failure_marker}\n#{safe_body}"
+    capped = cap_failure_body(full_body)
 
-    case client_module().graphql(@create_update, %{"itemId" => parse_item_id(item_id), "body" => full_body}, []) do
+    case client_module().graphql(@create_update, %{"itemId" => parse_item_id(item_id), "body" => capped}, []) do
       {:ok, %{"data" => %{"create_update" => %{"id" => _}}}} -> :ok
       {:error, _} = err -> err
       other -> {:error, {:unexpected_response, other}}
+    end
+  end
+
+  # Defense in depth: scrub PHI before posting any failure body, in case a
+  # call site forgets to scrub stderr or includes a copied-in error string.
+  # Per Spec 4 §2.5 / SYM-11923123790 AC5: NEVER post the raw body.
+  defp redact_phi(body) when is_binary(body) do
+    case PHIDetector.scan(body) do
+      :clean ->
+        body
+
+      {:phi, findings} ->
+        Enum.reduce(findings, body, fn {_kind, match}, acc ->
+          if is_binary(match) and match != "" do
+            String.replace(acc, match, "[REDACTED-PHI]")
+          else
+            acc
+          end
+        end)
+    end
+  end
+
+  defp redact_phi(_), do: ""
+
+  defp cap_failure_body(body) when is_binary(body) do
+    cond do
+      byte_size(body) <= @failure_body_max_bytes ->
+        body
+
+      byte_size(@failure_truncation_suffix) >= @failure_body_max_bytes ->
+        # Defensive: if anyone ever shrinks the cap below the suffix length,
+        # just emit the suffix rather than producing an invalid binary slice.
+        @failure_truncation_suffix
+
+      true ->
+        budget = @failure_body_max_bytes - byte_size(@failure_truncation_suffix)
+        binary_part(body, 0, budget) <> @failure_truncation_suffix
     end
   end
 

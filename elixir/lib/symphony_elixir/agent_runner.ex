@@ -109,6 +109,17 @@ defmodule SymphonyElixir.AgentRunner do
         end
 
       {:error, reason} ->
+        # Workspace.create_for_issue/2 failed before any session writer was
+        # started, so we don't have a workspace path or short SHA. Build a
+        # minimal session map directly off the issue so the failure header
+        # still carries profile + repo per Spec 4 §2.4 / SYM-11923123790 AC1.
+        emit_failure_update(
+          build_session(issue, nil, worker_host),
+          issue_id(issue) || "",
+          :workspace_create_failed,
+          message: "Workspace.create_for_issue failed: #{inspect(reason)}"
+        )
+
         {:error, reason}
     end
   end
@@ -138,14 +149,24 @@ defmodule SymphonyElixir.AgentRunner do
             "Profile resolution failed for #{issue_context(issue)}: #{inspect(reason)}"
           )
 
+          emit_profile_resolution_failure(writer_pid, issue, reason)
+
           {:error, {:profile_resolution_failed, reason}}
       end
     rescue
       error ->
+        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter,
+          message: format_exception_message(error)
+        )
+
         finalize_crash(writer_pid, issue, error)
         reraise error, __STACKTRACE__
     catch
       kind, reason ->
+        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter,
+          message: "uncaught #{kind}: #{inspect(reason)}"
+        )
+
         finalize_crash(writer_pid, issue, {kind, reason})
         :erlang.raise(kind, reason, __STACKTRACE__)
     else
@@ -153,6 +174,13 @@ defmodule SymphonyElixir.AgentRunner do
         err
 
       {:error, reason} = err ->
+        emit_failure_update_via_writer(
+          writer_pid,
+          issue,
+          reason_atom_for(reason),
+          message: "agent run failed: #{inspect(reason)}"
+        )
+
         finalize_crash(writer_pid, issue, reason)
         err
 
@@ -162,6 +190,42 @@ defmodule SymphonyElixir.AgentRunner do
       stop_session_writer(writer_pid)
     end
   end
+
+  # Profile resolution failure mode covers both the generic resolver error
+  # (`:no_default`, missing profile name) and the per-repo allowlist denial
+  # (`{:profile_not_allowed_on_repo, profile, repo}`). The latter is named
+  # explicitly in SYM-11923123790 AC1; the generic case is kept under
+  # `:profile_resolution_failed` so dashboard filters can still flag it.
+  defp emit_profile_resolution_failure(writer_pid, issue, {:profile_not_allowed_on_repo, profile_name, repo_key} = reason) do
+    emit_failure_update_via_writer(writer_pid, issue, :profile_not_allowed_on_repo,
+      message:
+        "profile=#{inspect(profile_name)} not in repos.#{inspect(repo_key)}.allowed_profiles; original=#{inspect(reason)}"
+    )
+  end
+
+  defp emit_profile_resolution_failure(writer_pid, issue, reason) do
+    emit_failure_update_via_writer(writer_pid, issue, :profile_resolution_failed,
+      message: "profile resolution failed: #{inspect(reason)}"
+    )
+  end
+
+  defp reason_atom_for({:port_exit, status}) when is_integer(status) and status != 0,
+    do: :port_exit_nonzero
+
+  defp reason_atom_for({:port_exit, _status}), do: :port_exit
+  defp reason_atom_for({:turn_failed, _details}), do: :turn_failed
+  defp reason_atom_for({:turn_cancelled, _details}), do: :turn_cancelled
+  defp reason_atom_for({:turn_input_required, _payload}), do: :turn_input_required
+  defp reason_atom_for({:startup_failed, _reason}), do: :startup_failed
+  defp reason_atom_for({:issue_state_refresh_failed, _reason}), do: :issue_state_refresh_failed
+  defp reason_atom_for(:turn_timeout), do: :turn_timeout
+  defp reason_atom_for(reason) when is_atom(reason), do: reason
+  defp reason_atom_for({reason_atom, _}) when is_atom(reason_atom), do: reason_atom
+  defp reason_atom_for(_), do: :agent_run_failed
+
+  defp format_exception_message(error) when is_exception(error), do: Exception.message(error)
+
+  defp format_exception_message(other), do: inspect(other)
 
   defp resolve_profile_for_issue(%Issue{} = issue) do
     settings = Config.settings!()
@@ -326,6 +390,11 @@ defmodule SymphonyElixir.AgentRunner do
           {:continue, refreshed_issue} ->
             Logger.info(
               "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator"
+            )
+
+            emit_failure_update_via_writer(writer_pid, refreshed_issue, :max_turns_exceeded,
+              message:
+                "agent reached agent.max_turns=#{max_turns} for #{issue_context(refreshed_issue)} with issue still in active state #{inspect(refreshed_issue.state)}; orchestrator will requeue"
             )
 
             :ok
@@ -567,6 +636,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   @doc """
   Build a session map suitable for `SymphonyElixir.Monday.Workpad` rendering.
+
+  Includes `:repo` (when the tracker issue carries a repo column) so failure
+  workpads can stamp `repo=<key>` per Spec 4 §2.4 / SYM-11923123790 AC2.
   """
   @spec build_session(map(), Path.t() | nil, worker_host()) :: map()
   def build_session(issue, workspace, worker_host) do
@@ -576,6 +648,7 @@ defmodule SymphonyElixir.AgentRunner do
       host: host_for_session(worker_host),
       workspace_path: workspace || "",
       short_sha: short_sha_for_workspace(workspace, worker_host),
+      repo: issue_repo(issue),
       started_at: DateTime.utc_now()
     }
   end
@@ -659,6 +732,95 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   def finalize_crash(_writer_pid, _issue, _reason), do: :ok
+
+  @doc """
+  Post a `## Symphony Failures` Monday Update for an error path.
+
+  Per SYM-11923123790 AC1, every AgentRunner error site must emit one of these
+  updates so failures land on the corresponding Monday item instead of only in
+  `/tmp/symphony.boot.log`. The marker prefix, PHI scrub, and 8 KiB truncation
+  are owned by `SymphonyElixir.Monday.Adapter.post_failure_update/2`; this
+  helper is just the formatting + dispatch glue.
+
+  `session` is a map matching the shape produced by `build_session/3`. For
+  pre-workspace failures (Workspace.create_for_issue errors) the caller can
+  build a minimal session map directly off the issue.
+
+  `reason_atom` is the structured reason (e.g. `:port_exit_nonzero`,
+  `:max_turns_exceeded`, `:profile_not_allowed_on_repo`) that gets stamped
+  into the failure header.
+
+  Optional opts:
+    * `:message` — human-readable error description (single line preferred).
+    * `:stderr_tail` — last lines of stderr/stdout, already trimmed by the caller.
+  """
+  @spec emit_failure_update(map(), String.t(), atom(), keyword()) :: :ok
+  def emit_failure_update(session, issue_id, reason_atom, opts \\ [])
+      when is_map(session) and is_atom(reason_atom) do
+    if is_binary(issue_id) and issue_id != "" do
+      message = Keyword.get(opts, :message, "")
+      stderr_tail = Keyword.get(opts, :stderr_tail, "")
+
+      body =
+        Workpad.render_failure(%{
+          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+          profile_name: Map.get(session, :profile_name),
+          repo: Map.get(session, :repo),
+          reason: reason_atom,
+          message: message,
+          stderr_tail: stderr_tail
+        })
+
+      case Tracker.post_failure_update(issue_id, body) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          # Logging the failure-of-the-failure-write is best-effort; the
+          # disk log already captured the underlying error and we don't
+          # want emit_failure_update/4 itself to crash the runner.
+          Logger.warning(
+            "Failed to post Monday failure update for issue_id=#{issue_id} reason=#{reason_atom}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Variant of `emit_failure_update/4` that pulls the session map off a session
+  writer Agent pid. Use this from rescue/catch/else branches inside
+  `run_codex_turns_with_tracker` where the writer is already running.
+
+  Defensive: if the writer pid is gone, dead, or times out we silently no-op
+  so a Monday write failure never escalates over the original error.
+  """
+  @spec emit_failure_update_via_writer(pid() | nil, map(), atom(), keyword()) :: :ok
+  def emit_failure_update_via_writer(writer_pid, issue, reason_atom, opts \\ []) do
+    issue_id = issue_id(issue)
+
+    cond do
+      not is_pid(writer_pid) ->
+        :ok
+
+      not Process.alive?(writer_pid) ->
+        :ok
+
+      not is_binary(issue_id) ->
+        :ok
+
+      true ->
+        try do
+          session = Agent.get(writer_pid, fn state -> state.session end)
+          emit_failure_update(session, issue_id, reason_atom, opts)
+        catch
+          :exit, _ -> :ok
+        end
+    end
+  end
 
   defp on_session_started(writer_pid, issue) do
     issue_id = issue_id(issue)
@@ -800,6 +962,10 @@ defmodule SymphonyElixir.AgentRunner do
   defp issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier), do: identifier
   defp issue_identifier(%{identifier: identifier}) when is_binary(identifier), do: identifier
   defp issue_identifier(_), do: "unknown"
+
+  defp issue_repo(%Issue{repo: repo}) when is_binary(repo) and repo != "", do: repo
+  defp issue_repo(%{repo: repo}) when is_binary(repo) and repo != "", do: repo
+  defp issue_repo(_), do: nil
 
   defp profile_name do
     Application.get_env(:symphony_elixir, :agent_profile_name, @default_profile_name)

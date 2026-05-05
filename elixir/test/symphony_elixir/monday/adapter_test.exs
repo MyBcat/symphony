@@ -432,6 +432,54 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert body =~ "## Symphony Failures"
       assert body =~ "Stranded after 5 attempts"
     end
+
+    test "post_failure_update redacts PHI before posting per SYM-11923123790 AC5" do
+      raw_body = """
+      2026-05-05T10:00:00Z | profile=claude_sonnet | repo=symphony | reason=port_exit_nonzero
+      agent crashed
+      --- last 20 lines stderr ---
+      patient John Doe failed lookup; DOB 12/01/1985 returned 500
+      SSN 123-45-6789 not found in dataset
+      """
+
+      assert :ok = Adapter.post_failure_update("9482736152", raw_body)
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+
+      refute body =~ "John Doe"
+      refute body =~ "12/01/1985"
+      refute body =~ "123-45-6789"
+
+      assert body =~ "[REDACTED-PHI]"
+      assert body =~ "## Symphony Failures"
+      assert body =~ "agent crashed"
+      assert body =~ "reason=port_exit_nonzero"
+    end
+
+    test "post_failure_update caps body at 8 KiB and appends [truncated]" do
+      huge = String.duplicate("a", 20_000)
+
+      assert :ok = Adapter.post_failure_update("9482736152", huge)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      assert byte_size(body) <= 8 * 1024
+      assert String.ends_with?(body, "[truncated]")
+      assert String.starts_with?(body, "## Symphony Failures")
+    end
+
+    test "post_failure_update leaves bodies under the cap untouched and uses single-newline marker" do
+      assert :ok = Adapter.post_failure_update("9482736152", "short body")
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      refute body =~ "[truncated]"
+      assert body == "## Symphony Failures\nshort body"
+    end
+
+    test "post_failure_update tolerates a nil body without crashing" do
+      assert :ok = Adapter.post_failure_update("9482736152", nil)
+      assert_received {:graphql, _query, %{"body" => body}}
+      assert body =~ "## Symphony Failures"
+    end
   end
 
   describe "heartbeat" do

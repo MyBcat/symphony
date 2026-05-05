@@ -49,4 +49,100 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
       assert body =~ "stdio_broken"
     end
   end
+
+  describe "render_failure/1" do
+    test "renders the SYM-11923123790 AC2 block format with header and message" do
+      body =
+        Workpad.render_failure(%{
+          timestamp: "2026-05-05T10:00:00Z",
+          profile_name: "claude_sonnet",
+          repo: "symphony",
+          reason: :port_exit_nonzero,
+          message: "agent process exited with status 137"
+        })
+
+      lines = String.split(body, "\n")
+
+      assert hd(lines) ==
+               "2026-05-05T10:00:00Z | profile=claude_sonnet | repo=symphony | reason=port_exit_nonzero"
+
+      assert Enum.at(lines, 1) == "agent process exited with status 137"
+    end
+
+    test "appends the stderr section only when stderr_tail is non-empty" do
+      with_stderr =
+        Workpad.render_failure(%{
+          timestamp: "2026-05-05T10:00:00Z",
+          profile_name: "codex_default",
+          repo: "symphony",
+          reason: :port_exit_nonzero,
+          message: "exit 137",
+          stderr_tail: "boom\nfatal: out of memory"
+        })
+
+      assert with_stderr =~ "--- last 20 lines stderr ---"
+      assert with_stderr =~ "boom"
+      assert with_stderr =~ "fatal: out of memory"
+
+      without_stderr =
+        Workpad.render_failure(%{
+          timestamp: "2026-05-05T10:00:00Z",
+          profile_name: "codex_default",
+          repo: "symphony",
+          reason: :max_turns_exceeded,
+          message: "no stderr available"
+        })
+
+      refute without_stderr =~ "--- last 20 lines stderr ---"
+
+      whitespace_only =
+        Workpad.render_failure(%{
+          timestamp: "2026-05-05T10:00:00Z",
+          profile_name: "codex_default",
+          repo: "symphony",
+          reason: :timeout,
+          message: "timed out",
+          stderr_tail: "   \n  \n"
+        })
+
+      refute whitespace_only =~ "--- last 20 lines stderr ---"
+    end
+
+    test "stamps unknown for missing profile/repo and accepts string reasons" do
+      body =
+        Workpad.render_failure(%{
+          timestamp: "2026-05-05T10:00:00Z",
+          reason: "custom_reason",
+          message: "thing happened"
+        })
+
+      assert body =~ "profile=unknown"
+      assert body =~ "repo=unknown"
+      assert body =~ "reason=custom_reason"
+    end
+
+    test "fills timestamp with current UTC when caller omits it" do
+      body =
+        Workpad.render_failure(%{
+          profile_name: "p",
+          repo: "r",
+          reason: :workspace_create_failed,
+          message: "m"
+        })
+
+      [first | _] = String.split(body, "\n")
+      [iso, _profile, _repo, _reason] = String.split(first, " | ")
+      assert {:ok, _, _} = DateTime.from_iso8601(iso)
+    end
+  end
+
+  describe "tail_lines/2" do
+    test "returns the last n lines, joined by newline" do
+      text = "a\nb\nc\nd\ne"
+      assert Workpad.tail_lines(text, 3) == "c\nd\ne"
+      assert Workpad.tail_lines(text, 10) == text
+      assert Workpad.tail_lines(nil, 3) == ""
+      assert Workpad.tail_lines("", 3) == ""
+    end
+  end
 end
