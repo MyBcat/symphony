@@ -673,12 +673,9 @@ defmodule SymphonyElixir.Config.Schema do
       allowed_profiles: normalize_string_list(Map.get(cfg, "allowed_profiles")),
       default_branch: Map.get(cfg, "default_branch"),
       secrets: normalize_string_list(Map.get(cfg, "secrets")),
-      auto_merge_on_codex_pass:
-        normalize_auto_merge_flag(Map.get(cfg, "auto_merge_on_codex_pass")),
-      auto_merge_max_lines:
-        normalize_auto_merge_max_lines(Map.get(cfg, "auto_merge_max_lines")),
-      auto_merge_pass_pattern:
-        normalize_auto_merge_pass_pattern(Map.get(cfg, "auto_merge_pass_pattern"))
+      auto_merge_on_codex_pass: normalize_auto_merge_flag(Map.get(cfg, "auto_merge_on_codex_pass")),
+      auto_merge_max_lines: normalize_auto_merge_max_lines(Map.get(cfg, "auto_merge_max_lines")),
+      auto_merge_pass_pattern: normalize_auto_merge_pass_pattern(Map.get(cfg, "auto_merge_pass_pattern"))
     }
   end
 

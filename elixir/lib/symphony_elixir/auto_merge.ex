@@ -108,9 +108,7 @@ defmodule SymphonyElixir.AutoMerge do
         {:error, {:invalid_pr_url, pr_url}}
 
       State.reviewed?(item_id, pr_url) ->
-        Logger.debug(
-          "AutoMerge: skipping idempotent re-review for item_id=#{item_id} url=#{pr_url}"
-        )
+        Logger.debug("AutoMerge: skipping idempotent re-review for item_id=#{item_id} url=#{pr_url}")
 
         {:ok, :idempotent}
 
@@ -177,16 +175,12 @@ defmodule SymphonyElixir.AutoMerge do
             do_merge(ctx)
 
           {:hold, gate} ->
-            Logger.info(
-              "AutoMerge: holding for human review item_id=#{ctx.item_id} url=#{ctx.pr_url} gate=#{gate}"
-            )
+            Logger.info("AutoMerge: holding for human review item_id=#{ctx.item_id} url=#{ctx.pr_url} gate=#{gate}")
 
             {:ok, {:held, gate}}
 
           {:error, reason} ->
-            Logger.warning(
-              "AutoMerge: gate evaluation failed item_id=#{ctx.item_id} url=#{ctx.pr_url} reason=#{inspect(reason)}"
-            )
+            Logger.warning("AutoMerge: gate evaluation failed item_id=#{ctx.item_id} url=#{ctx.pr_url} reason=#{inspect(reason)}")
 
             {:error, reason}
         end
@@ -433,26 +427,20 @@ defmodule SymphonyElixir.AutoMerge do
     # window MUST abort the merge.
     case gate_still_in_human_review(ctx) do
       :ok ->
-        Logger.info(
-          "AutoMerge: all gates passed; transitioning to Merging item_id=#{ctx.item_id} url=#{ctx.pr_url}"
-        )
+        Logger.info("AutoMerge: all gates passed; transitioning to Merging item_id=#{ctx.item_id} url=#{ctx.pr_url}")
 
         case Tracker.update_issue_state(ctx.item_id, "Merging") do
           :ok ->
             run_gh_merge(ctx)
 
           {:error, reason} ->
-            Logger.warning(
-              "AutoMerge: failed to transition to Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}"
-            )
+            Logger.warning("AutoMerge: failed to transition to Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}")
 
             {:error, {:transition_failed, reason}}
         end
 
       {:hold, gate} ->
-        Logger.info(
-          "AutoMerge: operator flipped item out of Human Review during review; aborting merge item_id=#{ctx.item_id} gate=#{gate}"
-        )
+        Logger.info("AutoMerge: operator flipped item out of Human Review during review; aborting merge item_id=#{ctx.item_id} gate=#{gate}")
 
         {:ok, {:held, gate}}
     end
@@ -461,26 +449,20 @@ defmodule SymphonyElixir.AutoMerge do
   defp run_gh_merge(ctx) do
     case GH.pr_merge(ctx.pr_url) do
       :ok ->
-        Logger.info(
-          "AutoMerge: gh pr merge succeeded; transitioning to Done item_id=#{ctx.item_id} url=#{ctx.pr_url}"
-        )
+        Logger.info("AutoMerge: gh pr merge succeeded; transitioning to Done item_id=#{ctx.item_id} url=#{ctx.pr_url}")
 
         case Tracker.update_issue_state(ctx.item_id, "Done") do
           :ok ->
             :ok
 
           {:error, reason} ->
-            Logger.warning(
-              "AutoMerge: post-merge transition to Done failed; item left in Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}"
-            )
+            Logger.warning("AutoMerge: post-merge transition to Done failed; item left in Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}")
         end
 
         {:ok, :merged}
 
       {:error, reason} ->
-        Logger.error(
-          "AutoMerge: gh pr merge failed item_id=#{ctx.item_id} url=#{ctx.pr_url} reason=#{inspect(reason)}"
-        )
+        Logger.error("AutoMerge: gh pr merge failed item_id=#{ctx.item_id} url=#{ctx.pr_url} reason=#{inspect(reason)}")
 
         body = Workpad.render_auto_merge_failure(ctx.session, format_gh_error(reason))
         _ = Tracker.post_auto_merge_failure(ctx.item_id, body)
@@ -524,9 +506,7 @@ defmodule SymphonyElixir.AutoMerge do
   defp log_state_write(:ok, _ctx), do: :ok
 
   defp log_state_write({:error, reason}, ctx) do
-    Logger.warning(
-      "AutoMerge: failed to persist auto_merge_state item_id=#{ctx.item_id} reason=#{inspect(reason)}"
-    )
+    Logger.warning("AutoMerge: failed to persist auto_merge_state item_id=#{ctx.item_id} reason=#{inspect(reason)}")
 
     :ok
   end

@@ -295,9 +295,7 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
   end
 
   defp report(result) do
-    Mix.shell().info(
-      "e2e: status=#{result.status} item_id=#{inspect(result.item_id)} reason=#{inspect(result.reason)}"
-    )
+    Mix.shell().info("e2e: status=#{result.status} item_id=#{inspect(result.item_id)} reason=#{inspect(result.reason)}")
 
     if Map.get(result, :pr_url),
       do: Mix.shell().info("e2e: pr_url=#{result.pr_url}")
@@ -331,9 +329,7 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
         end
       end,
       workspace_branch_exists?: fn workspace_path, branch ->
-        case System.cmd("git", ["-C", workspace_path, "branch", "--list", branch],
-               stderr_to_stdout: true
-             ) do
+        case System.cmd("git", ["-C", workspace_path, "branch", "--list", branch], stderr_to_stdout: true) do
           {output, 0} -> output |> String.trim() |> String.contains?(branch)
           _ -> false
         end
