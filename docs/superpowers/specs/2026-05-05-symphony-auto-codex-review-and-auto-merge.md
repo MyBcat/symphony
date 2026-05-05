@@ -65,7 +65,19 @@ If gate 1 fails (the most common case — opt-out by default), **the system** st
 
 ### 2.5 Idempotency
 - **When** the same `(item_id, pr_url)` pair has already been auto-merge-evaluated (recorded in `AutoMerge.State`), **the system** does NOT re-run Codex review for the same pair on subsequent triggers.
+- An item with multiple PR URLs across attempts (e.g., attempt-1 opened PR#100, attempt-2 opened PR#200) records BOTH URLs in `AutoMerge.State`'s reviewed list. Re-detection of either URL is idempotent independently. The legacy single-record on-disk shape (one URL per item) is read transparently for backward compatibility — older state files don't need migration.
 - If the operator flips the item back to `Human Review` after a previous Rework, but the PR URL unchanged, Symphony does NOT re-review (operator must close + reopen with a new PR or change the SHA via force-push, which the M-8 force-push detector would catch).
+
+### 2.6 Defense-in-depth invariants
+- **`symphony` repo is hardcoded opt-out.** `gate_repo_opt_in` pattern-matches on `repo_entry.key == "symphony"` and refuses regardless of the `auto_merge_on_codex_pass` config value. Spec 4 constraint #5: the symphony repo's blast radius is too high for unattended auto-merge.
+- **Block-signal short-circuit.** `gate_pass_pattern` checks for the literal `BLOCKING ISSUES FOUND` phrase BEFORE evaluating the configured pass pattern. If Codex output contains the block signal, the gate holds even if the pass pattern also matches somewhere in the output (e.g., a quoted spec snippet). Operators can override `auto_merge_pass_pattern` but cannot disable the block-signal check.
+- **TOCTOU defense on Merging.** Gate 5 (still in Human Review) is re-checked inside `do_merge/1` immediately before the `Tracker.update_issue_state(..., "Merging")` write. An operator flip in the window between gate evaluation and the merge write aborts the auto-merge.
+- **Workpad fence defang.** Codex output that contains a literal triple-backtick (very common when Codex quotes diffs) is rewritten so the inner sequence cannot close the outer Markdown fence early. Without this, any token-shaped or PHI-shaped string in the orphaned tail would render as raw Markdown.
+- **UTF-8 safe truncation.** `binary_part/3` may slice mid-codepoint when the output exceeds the byte cap. The truncate helper backtracks up to 3 bytes to land on a valid codepoint boundary so Monday + downstream `String.*` calls never see an invalid binary.
+- **Codex CLI environment is allowlisted.** `CodexReview.Default` does NOT inherit the orchestrator's full env into `codex exec`. Only `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `PWD`, `XDG_*`, plus `CODEX_*` and `OPENAI_BASE_URL` prefixes propagate. Per-repo resolved secrets (Spec 4 §2.4) and Symphony's `MONDAY_API_TOKEN` are deliberately withheld.
+- **Codex CLI cwd is workspace-rooted.** `cwd_for_exec/1` validates the supplied cwd canonicalizes to a descendant of `workspace.root`. If validation fails (e.g., cwd was deleted or workflow config is unloadable), falls back to `System.tmp_dir!()`.
+- **Codex + gh CLI invocations have hard timeouts.** Both wrap `System.cmd` in a `Task.async` + `Task.yield(timeout)` + `Task.shutdown(:brutal_kill)` pattern so a hung child process can't starve the AutoMerge Task indefinitely. Default timeouts: codex exec 5min, gh CLI 60s.
+- **Tracker-write guard before spawn.** `agent_runner.spawn_auto_merge` only fires when both `Tracker.set_pr_url/2` and `Tracker.update_issue_state(_, "Human Review")` succeed. If either fails (e.g., transient Monday outage), AutoMerge is not spawned — running Codex review for an item still showing as `In Progress` would post Workpad noise that operators can't reconcile.
 
 ---
 
