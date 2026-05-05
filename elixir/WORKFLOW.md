@@ -18,11 +18,9 @@ tracker:
   description_column_id: null
   branch_column_id: null
   labels_column_id: "dropdown_mkwbsh98"
-  # Symphony Repo column (Spec 3) — operator creates a Monday dropdown column
-  # whose labels match keys in the top-level `repos:` map below, then fills in
-  # the column ID here. Leave null to keep single-repo legacy mode (uses the
-  # global hooks.after_create below).
-  repo_column_id: null
+  # Symphony Repo column (Spec 3). Labels match keys in the top-level `repos:`
+  # map below. Empty column on an item = use legacy hooks.after_create default.
+  repo_column_id: "dropdown_mm322hqn"
   active_states:
     - "Symphony Ready"
     - "In Progress"
@@ -45,12 +43,37 @@ workspace:
 # an item, the legacy hooks.after_create below is used as the default.
 repos:
   symphony:
-    clone_url: https://github.com/openai/symphony.git
+    clone_url: https://github.com/MyBcat/symphony.git
     after_create: |
-      git clone --depth 1 https://github.com/openai/symphony .
+      git clone --depth 1 https://github.com/MyBcat/symphony .
       if command -v mise >/dev/null 2>&1; then
         cd elixir && mise trust && mise exec -- mix deps.get
       fi
+    allowed_profiles:
+      - claude_opus
+      - claude_sonnet
+    default_branch: main
+  client-portal:
+    clone_url: https://github.com/MyBcat/client-portal.git
+    after_create: |
+      git clone --depth 1 https://github.com/MyBcat/client-portal.git .
+      if [ -f package.json ]; then
+        npm ci
+      fi
+    allowed_profiles:
+      - claude_opus
+      - claude_sonnet
+    default_branch: main
+  hubspot-funnel-site:
+    clone_url: https://github.com/MyBcat/hubspot-funnel-site.git
+    after_create: |
+      git clone --depth 1 https://github.com/MyBcat/hubspot-funnel-site.git .
+      if [ -f package.json ]; then
+        npm ci
+      fi
+    allowed_profiles:
+      - claude_opus
+      - claude_sonnet
     default_branch: main
 hooks:
   after_create: |
