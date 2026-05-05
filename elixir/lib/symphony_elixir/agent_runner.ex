@@ -1086,14 +1086,22 @@ defmodule SymphonyElixir.AgentRunner do
     if claimed? do
       case PRSafety.evaluate_pr(url, issue_id) do
         {:ok, :transition} ->
-          _ = Tracker.set_pr_url(issue_id, url)
-          _ = Tracker.update_issue_state(issue_id, "Human Review")
-          # Spec 4 §2.8a: after the Human Review transition, kick off the
-          # auto-Codex-review pipeline. This may auto-merge the PR if the
-          # repo is opted in AND all five fail-closed gates pass.
-          # Detach so a hung Codex CLI cannot freeze the agent_runner stream
-          # writer; AutoMerge posts its own Workpad updates on completion.
-          spawn_auto_merge(writer_pid, issue_id, url)
+          # Spec 4 §2.8a: only spawn the auto-Codex-review pipeline AFTER
+          # the Monday writes succeed. If `set_pr_url/2` or
+          # `update_issue_state/2` fails, the item is still in its prior
+          # state — running Codex review would post Workpad noise for an
+          # item operators see as "still In Progress", and the gate-5
+          # check (still in Human Review) would then incorrectly hold.
+          with :ok <- Tracker.set_pr_url(issue_id, url),
+               :ok <- Tracker.update_issue_state(issue_id, "Human Review") do
+            spawn_auto_merge(writer_pid, issue_id, url)
+          else
+            {:error, reason} ->
+              Logger.warning(
+                "AutoMerge: skipping spawn because Tracker write failed; item still in prior state issue_id=#{issue_id} reason=#{inspect(reason)}"
+              )
+          end
+
           :ok
 
         {:ok, :idempotent_no_force_push} ->

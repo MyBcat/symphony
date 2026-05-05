@@ -173,6 +173,20 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
       assert body =~ "... (truncated)"
     end
 
+    test "truncates safely on a multi-byte UTF-8 boundary (CodeRabbit nitpick)" do
+      # Construct an input where the 6 KiB byte cap lands mid-codepoint.
+      # The cap is 6144 bytes; 4-byte emojis aligned at 6144 bytes would
+      # not exercise the backtrack path. Prepend an odd-byte ASCII run so
+      # the cap falls inside the second-to-last emoji's encoding.
+      long_output = "abc" <> String.duplicate("🙂", 2_000)
+
+      body =
+        Workpad.render_codex_review(%{profile_name: "x"}, long_output)
+
+      assert String.valid?(body), "rendered body must be valid UTF-8"
+      assert body =~ "... (truncated)"
+    end
+
     test "handles nil output gracefully" do
       body = Workpad.render_codex_review(%{identifier: "SYM-1", profile_name: "x"}, nil)
 

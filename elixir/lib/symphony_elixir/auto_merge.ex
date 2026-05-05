@@ -297,6 +297,23 @@ defmodule SymphonyElixir.AutoMerge do
 
   defp resolve_repo_entry(_ctx), do: nil
 
+  # Spec 4 §2.8a constraint #5: the `symphony` repo MUST stay opt-out at
+  # ALL times — its blast radius is too high (orchestrating real AI
+  # sessions writing real code into real repos). WORKFLOW.md sets
+  # `auto_merge_on_codex_pass: false` for symphony, but this hardcoded
+  # gate refuses regardless of the config value. Defense in depth — a
+  # future operator who accidentally flips the WORKFLOW.md value to true
+  # for symphony will still be held here.
+  @symphony_repo_key "symphony"
+
+  defp gate_repo_opt_in(%SymphonyElixir.Config.Schema.RepoEntry{key: @symphony_repo_key}) do
+    Logger.info(
+      "AutoMerge: gate_repo_opt_in held for hardcoded symphony repo (Spec 4 constraint #5); auto-merge is permanently disabled for this repo regardless of config"
+    )
+
+    {:hold, :repo_opt_in}
+  end
+
   defp gate_repo_opt_in(%SymphonyElixir.Config.Schema.RepoEntry{auto_merge_on_codex_pass: true}),
     do: :ok
 

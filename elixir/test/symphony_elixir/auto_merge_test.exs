@@ -387,6 +387,40 @@ defmodule SymphonyElixir.AutoMergeTest do
     end
   end
 
+  describe "evaluate_human_review/1 — symphony repo hardcoded opt-out (Spec 4 §2.8a constraint #5)" do
+    test "symphony repo with auto_merge_on_codex_pass: true (a misconfiguration) is still held",
+         %{ctx: ctx} do
+      # Even if a future operator flips WORKFLOW.md to enable auto-merge
+      # for the symphony repo, the gate MUST refuse: the symphony repo's
+      # blast radius (orchestrating other repos' merges) is too high.
+      misconfigured_repo_entry = %SymphonyElixir.Config.Schema.RepoEntry{
+        key: "symphony",
+        auto_merge_on_codex_pass: true,
+        auto_merge_max_lines: 500,
+        auto_merge_pass_pattern: "NO BLOCKING ISSUES"
+      }
+
+      ctx = Map.put(ctx, :repo_entry, misconfigured_repo_entry)
+
+      assert {:ok, {:held, :repo_opt_in}} = AutoMerge.evaluate_human_review(ctx)
+
+      refute StubGH.merge_called?(@pr_url)
+    end
+
+    test "non-symphony repos respect the auto_merge_on_codex_pass flag", %{ctx: ctx} do
+      other_repo_entry = %SymphonyElixir.Config.Schema.RepoEntry{
+        key: "client-portal",
+        auto_merge_on_codex_pass: true,
+        auto_merge_max_lines: 500,
+        auto_merge_pass_pattern: "NO BLOCKING ISSUES"
+      }
+
+      ctx = Map.put(ctx, :repo_entry, other_repo_entry)
+
+      assert {:ok, :merged} = AutoMerge.evaluate_human_review(ctx)
+    end
+  end
+
   describe "evaluate_human_review/1 — block signal short-circuit (Spec 4 §2.8a B-2)" do
     test "Codex output containing 'BLOCKING ISSUES FOUND' holds even when pass pattern also matches",
          %{ctx: ctx} do

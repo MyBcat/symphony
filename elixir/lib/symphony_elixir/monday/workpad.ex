@@ -231,9 +231,30 @@ defmodule SymphonyElixir.Monday.Workpad do
     if byte_size(text) <= @codex_review_max_output_bytes do
       String.trim_trailing(text)
     else
-      head = binary_part(text, 0, @codex_review_max_output_bytes)
+      head =
+        text
+        |> binary_part(0, @codex_review_max_output_bytes)
+        |> backtrack_to_valid_utf8()
+
       String.trim_trailing(head) <> "\n\n... (truncated)"
     end
+  end
+
+  # `binary_part/3` slices at the byte cap and may land mid-codepoint,
+  # producing an invalid UTF-8 binary that breaks Monday rendering and
+  # any downstream String.* operation. Walk back at most 3 bytes (the
+  # max length of a UTF-8 trailing-byte sequence) until we land on a
+  # valid prefix.
+  defp backtrack_to_valid_utf8(prefix) when is_binary(prefix) do
+    Enum.reduce_while(0..3, prefix, fn drop, acc ->
+      candidate =
+        case drop do
+          0 -> acc
+          n -> binary_part(acc, 0, byte_size(acc) - n)
+        end
+
+      if String.valid?(candidate), do: {:halt, candidate}, else: {:cont, acc}
+    end)
   end
 
   # Codex output is wrapped in a triple-backtick fenced block so Monday

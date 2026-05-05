@@ -31,6 +31,47 @@ defmodule SymphonyElixir.AgentRunnerTest do
       do: Process.put({__MODULE__, :head_contains, url, sha}, response)
   end
 
+  defmodule FailingPrUrlTracker do
+    @moduledoc """
+    Stub Tracker for the CodeRabbit-flagged guard test: returns
+    `{:error, :monday_outage}` on `set_pr_url/2` so we can verify that
+    AutoMerge is NOT spawned when the Monday write fails.
+    """
+    @behaviour SymphonyElixir.Tracker
+
+    @impl true
+    def fetch_candidate_issues, do: {:ok, []}
+    @impl true
+    def fetch_candidate_issues_with_phi_findings,
+      do: {:ok, %{items: [], phi_offenders: []}}
+    @impl true
+    def fetch_issues_by_states(_), do: {:ok, []}
+    @impl true
+    def fetch_issue_states_by_ids(_), do: {:ok, []}
+    @impl true
+    def update_issue_state(_, _), do: :ok
+    @impl true
+    def upsert_workpad(_, _), do: :ok
+    @impl true
+    def set_pr_url(_, _), do: {:error, :monday_outage}
+    @impl true
+    def post_failure_update(_, _), do: :ok
+    @impl true
+    def post_pr_refusal(_, _), do: :ok
+    @impl true
+    def post_phi_refusal(_, _), do: :ok
+    @impl true
+    def post_codex_review(_, _), do: :ok
+    @impl true
+    def post_auto_merge_failure(_, _), do: :ok
+    @impl true
+    def acquire_heartbeat, do: :ok
+    @impl true
+    def release_heartbeat, do: :ok
+    @impl true
+    def validate_no_phi(_), do: :ok
+  end
+
   describe "Tracker writes triggered by event stream" do
     setup do
       Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
@@ -231,6 +272,42 @@ defmodule SymphonyElixir.AgentRunnerTest do
       # Idempotency: second observation should not re-invoke AutoMerge.
       :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
       refute_receive {:auto_merge_invoked, _}, 100
+    end
+
+    test "AutoMerge does NOT spawn when Tracker.set_pr_url fails (CodeRabbit guard)",
+         %{issue: issue, writer_pid: writer_pid} do
+      # Override the Tracker adapter to return :error on set_pr_url. The
+      # spawn_auto_merge call would otherwise fire-and-forget — but
+      # auto-merging an item Monday hasn't recorded as Human Review is
+      # exactly the noise the guard prevents.
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, FailingPrUrlTracker)
+
+      try do
+        url = "https://github.com/openai/symphony/pull/999"
+
+        PRSafetyStubGH.stub_basic(url,
+          {:ok,
+           %{
+             base_branch: "main",
+             head_branch: "symphony/SYM-11923258050/attempt-1",
+             url: url,
+             head_sha: "abc1234"
+           }}
+        )
+
+        message = %{
+          event: :notification,
+          raw: "Opened #{url}",
+          timestamp: DateTime.utc_now()
+        }
+
+        :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+        # Tracker write returned an error → AutoMerge MUST NOT have been spawned.
+        refute_receive {:auto_merge_invoked, _}, 100
+      after
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      end
     end
 
     test "PR refusal path does NOT invoke AutoMerge.evaluate_human_review (Spec 4 §2.8a)",

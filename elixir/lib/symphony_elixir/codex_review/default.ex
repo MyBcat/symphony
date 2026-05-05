@@ -64,14 +64,47 @@ defmodule SymphonyElixir.CodexReview.Default do
     end
   end
 
+  # Spec 4 §2.8a defense in depth: only run `codex exec` from a directory
+  # that's (a) an existing directory AND (b) a descendant of Symphony's
+  # configured `workspace.root`. Codex CLI inherits its cwd into any
+  # tools it spawns; running from an arbitrary path could give an
+  # accidental Codex tool call read-access to operator home / the
+  # symphony repo itself / other repos. If the supplied cwd doesn't
+  # canonicalize cleanly under workspace.root, fall back to the system
+  # tmp dir (which is always safe).
   defp cwd_for_exec(cwd) when is_binary(cwd) and cwd != "" do
-    case File.dir?(cwd) do
-      true -> cwd
-      false -> System.tmp_dir!()
+    if File.dir?(cwd) and cwd_under_workspace_root?(cwd) do
+      cwd
+    else
+      System.tmp_dir!()
     end
   end
 
   defp cwd_for_exec(_), do: System.tmp_dir!()
+
+  defp cwd_under_workspace_root?(cwd) do
+    case workspace_root() do
+      nil ->
+        # No configured workspace root → default to safe fallback.
+        false
+
+      root ->
+        canonical_cwd = Path.expand(cwd)
+        canonical_root = Path.expand(root)
+
+        # Allow exact match OR descendant; reject siblings or unrelated.
+        canonical_cwd == canonical_root or
+          String.starts_with?(canonical_cwd <> "/", canonical_root <> "/")
+    end
+  rescue
+    _ -> false
+  end
+
+  defp workspace_root do
+    SymphonyElixir.Config.settings!().workspace.root
+  rescue
+    _ -> nil
+  end
 
   defp review_timeout_ms(profile_config) do
     case Map.get(profile_config, "review_timeout_ms") ||

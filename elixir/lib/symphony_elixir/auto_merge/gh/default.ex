@@ -8,6 +8,10 @@ defmodule SymphonyElixir.AutoMerge.GH.Default do
   @behaviour SymphonyElixir.AutoMerge.GH
 
   @gh_command "gh"
+  # Hard cap so a hung gh process (e.g. waiting on an OAuth dance, a
+  # dead network) cannot starve the AutoMerge Task forever. The detached
+  # Task supervisor would otherwise leak across PRs.
+  @gh_timeout_ms 60_000
 
   @impl true
   def pr_diff_line_count(url) when is_binary(url) and url != "" do
@@ -64,33 +68,40 @@ defmodule SymphonyElixir.AutoMerge.GH.Default do
 
   def pr_merge(_), do: {:error, :invalid_pr_url}
 
-  defp run_gh(args) do
-    case System.cmd(@gh_command, args, stderr_to_stdout: true) do
-      {output, 0} ->
-        {:ok, output}
-
-      {output, status} ->
-        {:error, {:gh_failed, status, String.trim(output)}}
-    end
-  rescue
-    e in ErlangError ->
-      {:error, {:gh_unavailable, Exception.message(e)}}
-  end
+  defp run_gh(args), do: run_gh_with_timeout(args, stderr_to_stdout: true)
 
   # Variant for commands where we need stdout in isolation (e.g. `gh pr
   # diff`, where stderr noise would corrupt the line count downstream).
   # Errors still surface a trimmed stderr via the err path so operators
   # can debug.
-  defp run_gh_stdout_only(args) do
-    case System.cmd(@gh_command, args, stderr_to_stdout: false) do
-      {output, 0} ->
+  defp run_gh_stdout_only(args), do: run_gh_with_timeout(args, stderr_to_stdout: false)
+
+  defp run_gh_with_timeout(args, opts) do
+    task = Task.async(fn -> safe_system_cmd(@gh_command, args, opts) end)
+
+    case Task.yield(task, @gh_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:cmd_ok, output, 0}} ->
         {:ok, output}
 
-      {output, status} ->
+      {:ok, {:cmd_ok, output, status}} when is_integer(status) ->
         {:error, {:gh_failed, status, String.trim(output)}}
+
+      {:ok, {:cmd_rescue, message}} ->
+        {:error, {:gh_unavailable, message}}
+
+      {:exit, reason} ->
+        {:error, {:gh_unavailable, inspect(reason)}}
+
+      nil ->
+        {:error, {:gh_timeout, @gh_timeout_ms}}
     end
+  end
+
+  defp safe_system_cmd(cmd, args, opts) do
+    {output, status} = System.cmd(cmd, args, opts)
+    {:cmd_ok, output, status}
   rescue
     e in ErlangError ->
-      {:error, {:gh_unavailable, Exception.message(e)}}
+      {:cmd_rescue, Exception.message(e)}
   end
 end
