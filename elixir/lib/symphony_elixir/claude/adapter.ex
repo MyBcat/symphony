@@ -69,7 +69,13 @@ defmodule SymphonyElixir.Claude.Adapter do
         |> append_verbose_if_missing(base_cmd)
         |> Enum.join(" ")
 
-      "env -u ANTHROPIC_API_KEY " <> flagged
+      # Also unset CLAUDECODE / CLAUDE_CODE_* env vars. When Symphony is
+      # restarted from inside a parent Claude Code session, the BEAM inherits
+      # those vars; the child `claude --print` then thinks it's running INSIDE
+      # a parent CC session and emits SessionStart hook JSON on every turn
+      # instead of making model calls — manifests as turn-cycle loops with
+      # input/output tokens stuck at 0.
+      "env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS -u CLAUDE_CODE_DISABLE_1M_CONTEXT -u CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING -u CLAUDE_CODE_EFFORT_LEVEL -u CLAUDE_PLUGIN_DATA -u AI_AGENT " <> flagged
     else
       base_cmd
     end
