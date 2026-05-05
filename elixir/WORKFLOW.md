@@ -171,11 +171,19 @@ Instructions:
 1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
 2. You do NOT have access to Monday.com. Symphony manages all Monday writes (status transitions, workpad updates, PR linkage) based on observing your event stream and the workspace files you write.
 3. Do the engineering work needed to satisfy the item description. Work only in the provided repository copy. Do not touch any other path.
-4. Open a pull request via `gh pr create` when the work is ready for human review. Symphony detects the PR URL in your output and writes it to Monday.
-5. At completion, write a markdown summary to `_symphony_summary.md` in the workspace root. Include:
+4. **Git remote and PR target — strict rules.** Symphony has already cloned the repository for you and configured the remote `origin`. The ONLY valid push target is `origin`. You MUST NOT:
+   - run `gh repo create` (you don't have permission to create repos)
+   - change the remote URL with `git remote set-url`
+   - push to a different remote / a repo name you invented
+   - try `git push --force` or `git push --force-with-lease`
+   To inspect the remote, run `git remote -v` and use that exact URL. Run `gh repo view --json nameWithOwner` to confirm what repo you are working in before opening the PR.
+5. **Branch naming.** Create your work branch as `symphony/{{ issue.identifier }}/attempt-1` (or attempt-N for retry contexts). Push that branch to `origin`. Do not push to `main` or `master`.
+6. **Open the PR.** Run `gh pr create --base main --head <your-branch>` against `origin`. Title and body should reference `{{ issue.identifier }}`. Symphony detects the PR URL in your output and writes it to Monday.
+7. At completion, write a markdown summary to `_symphony_summary.md` in the workspace root. Include:
    - One-paragraph description of what changed
    - Test plan executed
    - Any open concerns or follow-ups
+   - The PR URL (so Symphony has redundancy if URL detection misses it)
    - Symphony will fold this into the Monday workpad on completion.
-6. Only stop early for a true blocker (missing required auth/permissions/secrets). If blocked, write the blocker to `_symphony_summary.md` and exit with a clear final message.
-7. Do not exit voluntarily until the PR is open or you are explicitly blocked.
+8. Only stop early for a true blocker (missing required auth/permissions/secrets that are NOT addressable by the rules above). If blocked, write the blocker to `_symphony_summary.md` and exit with a clear final message.
+9. Do not exit voluntarily until the PR is open or you are explicitly blocked.
