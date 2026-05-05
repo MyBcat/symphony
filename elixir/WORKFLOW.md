@@ -45,16 +45,32 @@ repos:
   symphony:
     clone_url: https://github.com/MyBcat/symphony.git
     # Symphony performs the clone itself per Spec 3 §2.2. after_create is
-    # post-clone setup only and MUST NOT contain `git clone`. Tolerant
-    # of missing gcc / kerl dependencies in container/VPS contexts —
-    # mix deps.get is best-effort and never blocks dispatch.
+    # post-clone setup only and MUST NOT contain `git clone`. Tolerant of
+    # missing gcc / kerl dependencies in container/VPS contexts, while still
+    # surfacing unrelated mix deps.get failures.
     after_create: |
-      if command -v mise >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
-        (cd elixir && mise trust && mise exec -- mix deps.get) || true
+      if ! command -v mise >/dev/null 2>&1; then
+        echo "after_create(symphony): mise absent; skipping mix deps.get"
+      elif ! command -v gcc >/dev/null 2>&1; then
+        echo "after_create(symphony): gcc absent; skipping mix deps.get"
       else
-        echo "after_create(symphony): mise or gcc absent; skipping mix deps.get"
+        deps_log="${TMPDIR:-/tmp}/symphony-deps.$$"
+        if (cd elixir && mise trust && mise exec -- mix deps.get) >"$deps_log" 2>&1; then
+          cat "$deps_log"
+          rm -f "$deps_log"
+        else
+          deps_status=$?
+          cat "$deps_log"
+          if grep -Eiq "(gcc|kerl|C compiler|compiler.*not found|build-essential|make: .*not found|cc: .*not found)" "$deps_log"; then
+            echo "after_create(symphony): tolerated gcc/compiler setup failure from mix deps.get"
+            rm -f "$deps_log"
+            true
+          else
+            rm -f "$deps_log"
+            exit "$deps_status"
+          fi
+        fi
       fi
-      true
     allowed_profiles:
       - codex_gpt55_xhigh
       - claude_opus
