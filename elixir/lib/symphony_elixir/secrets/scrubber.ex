@@ -25,7 +25,11 @@ defmodule SymphonyElixir.Secrets.Scrubber do
   # exceeds typical identifiers.
   @patterns [
     # AWS access key ID
-    ~r/\bAKIA[0-9A-Z]{16}\b/,
+    ~r/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
+    # Authorization headers
+    ~r/\bAuthorization\s*:\s*(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}\b/i,
+    # Common token/API-key assignments and headers, including AWS env names.
+    ~r/\b(?:x-api-key|api[_-]?key|auth[_-]?token|access[_-]?token|token|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*[:=]\s*['"]?[A-Za-z0-9._~+\/=:-]{8,}['"]?/i,
     # AWS secret access key (40 char base64-ish; require leading separator)
     ~r/(?<=[\s:='\"])[A-Za-z0-9\/+=]{40}(?=[\s'\"]|$)/,
     # GitHub fine-grained token

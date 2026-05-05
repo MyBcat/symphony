@@ -1148,6 +1148,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       workspace = Path.join(workspace_root, "MT-92")
       codex_binary = Path.join(test_root, "fake-codex")
       File.mkdir_p!(workspace)
+      bearer_token = String.duplicate("Z", 24)
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -1167,6 +1168,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
             ;;
           4)
             printf '%s\\n' 'warning: this is stderr noise' >&2
+            printf '%s\\n' 'Authorization: Bearer #{bearer_token}' >&2
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -1206,6 +1208,8 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       assert_received {:app_server_message, %{event: :turn_completed}}
       refute_received {:app_server_message, %{event: :malformed}}
       assert log =~ "Codex turn stream output: warning: this is stderr noise"
+      assert log =~ "Codex turn stream output: [REDACTED]"
+      refute log =~ bearer_token
     after
       File.rm_rf(test_root)
     end

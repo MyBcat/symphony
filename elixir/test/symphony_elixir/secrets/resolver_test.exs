@@ -72,7 +72,20 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
       assert wrapped =~ "set -a"
       assert wrapped =~ ". ./.env.symphony"
       assert wrapped =~ "set +a"
-      assert String.ends_with?(wrapped, "\necho hi")
+      assert wrapped =~ "set +x"
+      assert String.ends_with?(wrapped, "echo hi\n")
+    end
+
+    test "sources .env.symphony without xtrace leaking assignment values" do
+      workspace = make_workspace!()
+      File.write!(Path.join(workspace, ".env.symphony"), "SECRET_TOKEN='xtrace-secret-value'\n")
+      File.chmod!(Path.join(workspace, ".env.symphony"), 0o600)
+
+      wrapped = "set -x\n" <> Resolver.wrap_command("printf '%s\\n' ok")
+      {output, 0} = System.cmd("sh", ["-lc", wrapped], cd: workspace, stderr_to_stdout: true)
+
+      assert output =~ "ok"
+      refute output =~ "xtrace-secret-value"
     end
   end
 
@@ -131,6 +144,26 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
       contents = File.read!(env_file)
       assert contents =~ "HUBSPOT_TOKEN='fake-hubspot-token-12345-AKIA'"
       assert contents =~ "STRIPE_KEY='fake-stripe-secret-67890'"
+    end
+
+    test "atomically replaces an existing env file while preserving 0600 mode" do
+      workspace = make_workspace!()
+      env_file = Path.join(workspace, ".env.symphony")
+      File.write!(env_file, "OLD='stale'\n")
+      File.chmod!(env_file, 0o644)
+
+      :ok =
+        Resolver.write_env_file(
+          ["mybcat/integrations/hubspot:HUBSPOT_TOKEN"],
+          workspace,
+          secret_exec_path: @fake_secret_exec,
+          repo_key: "hubspot-funnel-site"
+        )
+
+      {:ok, %File.Stat{mode: mode}} = File.stat(env_file)
+      assert Bitwise.band(mode, 0o077) == 0
+      assert File.read!(env_file) =~ "HUBSPOT_TOKEN='fake-hubspot-token-12345-AKIA'"
+      refute File.read!(env_file) =~ "OLD='stale'"
     end
 
     test "no-ops on empty list and never touches the workspace" do

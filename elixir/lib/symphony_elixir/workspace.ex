@@ -498,7 +498,7 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
 
-    {:error, {:workspace_hook_failed, hook_name, status, output}}
+    {:error, {:workspace_hook_failed, hook_name, status, sanitized_output}}
   end
 
   defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do

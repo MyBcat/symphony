@@ -15,6 +15,12 @@ defmodule SymphonyElixir.Secrets.ScrubberTest do
       assert Scrubber.scrub(line) == "Using [REDACTED] for upload"
     end
 
+    test "redacts AWS temporary access key id" do
+      key = "ASIA" <> String.duplicate("Z", 16)
+      line = "Using #{key} for upload"
+      assert Scrubber.scrub(line) == "Using [REDACTED] for upload"
+    end
+
     test "redacts GitHub fine-grained token" do
       key = "ghp_" <> String.duplicate("Z", 36)
       line = ~s(GIT_TOKEN="#{key}")
@@ -31,7 +37,41 @@ defmodule SymphonyElixir.Secrets.ScrubberTest do
       token = String.duplicate("Z", 24)
       line = "Authorization: Bearer #{token}"
       scrubbed = Scrubber.scrub(line)
-      assert scrubbed == "Authorization: [REDACTED]"
+      assert scrubbed == "[REDACTED]"
+    end
+
+    test "redacts Basic authorization header" do
+      token = String.duplicate("Z", 24)
+      line = "Authorization: Basic #{token}"
+      assert Scrubber.scrub(line) == "[REDACTED]"
+    end
+
+    test "redacts generic api_key and token assignments" do
+      api_key = String.duplicate("A", 20)
+      token = String.duplicate("B", 20)
+      line = "api_key=#{api_key} token: #{token}"
+      scrubbed = Scrubber.scrub(line)
+
+      refute scrubbed =~ api_key
+      refute scrubbed =~ token
+      assert scrubbed =~ "[REDACTED]"
+    end
+
+    test "redacts AWS env assignment forms" do
+      access_key = "AKIA" <> String.duplicate("A", 16)
+      secret_key = String.duplicate("B", 40)
+      session_token = String.duplicate("C", 24)
+
+      line =
+        "AWS_ACCESS_KEY_ID=#{access_key} aws_secret_access_key=#{secret_key} " <>
+          "AWS_SESSION_TOKEN=#{session_token}"
+
+      scrubbed = Scrubber.scrub(line)
+
+      refute scrubbed =~ access_key
+      refute scrubbed =~ secret_key
+      refute scrubbed =~ session_token
+      assert scrubbed =~ "[REDACTED]"
     end
 
     test "redacts Anthropic key" do

@@ -232,8 +232,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       log =
         capture_log([level: :warning], fn ->
-          assert {:error, {:workspace_hook_failed, "after_create", 19, _output}} =
+          assert {:error, {:workspace_hook_failed, "after_create", 19, output}} =
                    Workspace.create_for_issue("MT-SCRUB")
+
+          assert output =~ "[REDACTED]"
+          refute output =~ fake_aws_key
         end)
 
       assert log =~ "Workspace hook failed"

@@ -232,7 +232,20 @@ defmodule SymphonyElixir.Secrets.Resolver do
   """
   @spec wrap_command(String.t()) :: String.t()
   def wrap_command(command) when is_binary(command) do
-    "if [ -f ./#{@env_filename} ]; then set -a; . ./#{@env_filename}; set +a; fi\n" <> command
+    """
+    if [ -f ./#{@env_filename} ]; then
+      __symphony_xtrace=0
+      case "$-" in
+        *x*) __symphony_xtrace=1; set +x ;;
+      esac
+      set -a
+      . ./#{@env_filename}
+      set +a
+      if [ "$__symphony_xtrace" = "1" ]; then set -x; fi
+      unset __symphony_xtrace
+    fi
+    #{command}
+    """
   end
 
   @doc """
@@ -362,8 +375,10 @@ defmodule SymphonyElixir.Secrets.Resolver do
     case cmd_fn.(python, args, env_safe_opts()) do
       {output, 0} ->
         if output != "" do
+          safe_output = redact_output(output, env_names_for_redaction(specs))
+
           Logger.debug(
-            "secret_exec.py wrapper output (already redacted): #{String.slice(output, 0, 1024)}"
+            "secret_exec.py wrapper output (redacted): #{safe_output}"
           )
         end
 
@@ -383,26 +398,39 @@ defmodule SymphonyElixir.Secrets.Resolver do
 
   # The Python writer runs INSIDE secret_exec.py's child process, so it sees
   # resolved secret values via os.environ. It writes a single-quoted .env file
-  # to disk at argv[1], one KEY='value' line per env name in argv[2:]. Single
-  # quoting keeps the file parseable by `set -a; . ./.env.symphony; set +a` and
-  # makes special characters safe.
+  # to disk at argv[1], one KEY='value' line per env name in argv[2:]. It writes
+  # to a temp file opened at 0600 and atomically replaces the target, so there
+  # is no default-umask window where secret values sit in a world-readable file.
+  # Single quoting keeps the file parseable by `set -a; . ./.env.symphony; set
+  # +a` and makes special characters safe.
   defp writer_script do
     """
     import os, sys
     env_path = sys.argv[1]
     keys = sys.argv[2:]
+    tmp_path = env_path + ".tmp." + str(os.getpid())
 
 
     def squote(value):
         return "'" + value.replace("'", "'\\\\''") + "'"
 
 
-    with open(env_path, "w", encoding="utf-8") as fh:
-        for key in keys:
-            value = os.environ.get(key, "")
-            fh.write(key + "=" + squote(value) + "\\n")
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for key in keys:
+                value = os.environ.get(key, "")
+                fh.write(key + "=" + squote(value) + "\\n")
 
-    os.chmod(env_path, 0o600)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, env_path)
+        os.chmod(env_path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
     """
   end
 

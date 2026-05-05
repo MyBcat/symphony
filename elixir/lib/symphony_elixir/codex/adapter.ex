@@ -1328,6 +1328,7 @@ defmodule SymphonyElixir.Codex.Adapter do
       |> to_string()
       |> String.trim()
       |> String.slice(0, @max_stream_log_bytes)
+      |> SymphonyElixir.Secrets.Scrubber.scrub()
 
     if text != "" do
       cond do
