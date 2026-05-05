@@ -18,9 +18,8 @@ defmodule SymphonyElixir.Monday.PHIGate do
 
   alias SymphonyElixir.{Config, Tracker}
   alias SymphonyElixir.Monday.Workpad
-  alias SymphonyElixir.Tracker, as: TrackerBehaviour
 
-  @type offender :: TrackerBehaviour.phi_offender()
+  @type offender :: Tracker.phi_offender()
 
   @doc """
   Read the current `phi_gate.mode` setting. Defaults to `:strict` when the
