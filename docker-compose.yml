@@ -1,0 +1,99 @@
+# docker-compose.yml — Symphony container orchestration.
+#
+# Run from the repo root after building:
+#   docker compose build
+#   docker compose up
+#
+# The Claude / Codex / Gemini CLIs are NOT included in the image. They must be
+# installed on the host and mounted into the container with their auth state.
+# See BOOTSTRAP.md for end-to-end setup, including the AWS Secrets Manager
+# pattern via secret_exec.py for HIPAA-aware secrets injection.
+
+services:
+  symphony:
+    image: symphony:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Override these to track elixir/mise.toml if it changes. The defaults
+        # match the pinned versions at the time this image was authored.
+        ELIXIR_VERSION: 1.19.5
+        OTP_VERSION: 28.1.4
+        DEBIAN_VERSION: bookworm-20251104
+
+    # Host networking so OAuth redirect URIs handed out by Claude / Codex /
+    # Gemini login flows (which target localhost:<port> on the host) can
+    # complete inside the container without docker port translation.
+    network_mode: host
+
+    # Picks up MONDAY_API_TOKEN and any other tracker / model credentials.
+    # bin/setup.sh creates an empty .env from .env.example if one is not
+    # already present, so this reference is always resolvable. Generate real
+    # values from AWS Secrets Manager via:
+    #   /mnt/d_drive/repos/finances/scripts/secret_exec.py \
+    #       --emit-env-file .env mybcat/symphony
+    # Never commit .env. See .gitignore.
+    env_file:
+      - .env
+
+    # Allow runtime overrides without forcing an env_file edit.
+    environment:
+      MONDAY_API_TOKEN: ${MONDAY_API_TOKEN-}
+      LINEAR_API_KEY: ${LINEAR_API_KEY-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY-}
+      SYMPHONY_WORKSPACE_ROOT: /workspace/issues
+      # Override the codex/claude/gemini binary paths if your host installs
+      # them somewhere other than the mounted bin directory. WORKFLOW.md can
+      # interpolate $CODEX_BIN / $CLAUDE_BIN / $GEMINI_BIN.
+      CODEX_BIN: ${CODEX_BIN-codex}
+      CLAUDE_BIN: ${CLAUDE_BIN-claude}
+      GEMINI_BIN: ${GEMINI_BIN-gemini}
+
+    volumes:
+      # Single source of truth for tracker config + Codex prompt template.
+      # Read-only so a misbehaving session cannot rewrite it.
+      - type: bind
+        source: ./elixir/WORKFLOW.md
+        target: /workspace/WORKFLOW.md
+        read_only: true
+
+      # Per-issue workspaces live here. Override SYMPHONY_WORKSPACE_HOST_DIR in
+      # your shell or .env to point at a host directory you actually want
+      # Symphony to populate. Defaults to a sibling of the repo so Symphony's
+      # cloned worktrees don't sit inside the Symphony repo itself.
+      - type: bind
+        source: ${SYMPHONY_WORKSPACE_HOST_DIR:-./_symphony_workspaces}
+        target: /workspace/issues
+
+      # CLI auth + tool binaries from the host. These paths assume the
+      # recommended installs documented in BOOTSTRAP.md. Adjust as needed for
+      # your environment.
+      - type: bind
+        source: ${HOME}/.codex
+        target: /home/symphony/.codex
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME}/.claude
+        target: /home/symphony/.claude
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME}/.config/gemini
+        target: /home/symphony/.config/gemini
+        bind:
+          create_host_path: true
+
+      # Optional: mount a host bin directory containing claude/codex/gemini
+      # so they appear on PATH inside the container. The image already puts
+      # /opt/symphony/cli at the front of PATH (see Dockerfile), so symlinks
+      # or thin wrappers placed under SYMPHONY_HOST_CLI_DIR will be found
+      # before any baseline binaries. Comment this block out if you provide
+      # CLIs another way.
+      - type: bind
+        source: ${SYMPHONY_HOST_CLI_DIR:-./bin}
+        target: /opt/symphony/cli
+        read_only: true
