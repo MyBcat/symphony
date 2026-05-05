@@ -11,10 +11,10 @@ defmodule SymphonyElixir.Monday.Adapter do
   alias SymphonyElixir.Monday.{Client, Item, PHIDetector}
 
   @items_page_query """
-  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!], $statusColumnId: ID!, $states: CompareValue!) {
+  query SymphonyItemsPage($boardId: ID!, $columnIds: [String!], $statusColumnId: ID!, $states: CompareValue!, $limit: Int!) {
     boards(ids: [$boardId]) {
       items_page(
-        limit: 100,
+        limit: $limit,
         query_params: {
           rules: [{column_id: $statusColumnId, compare_value: $states, operator: any_of}],
           operator: and
@@ -114,6 +114,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   @failure_marker "## Symphony Failures"
   @heartbeat_marker "## Symphony Heartbeat"
   @pr_refusal_marker "## Symphony PR Refusal"
+  @phi_refusal_marker "## Symphony PHI Refusal"
   @status_label_cache_ttl_ms :timer.minutes(5)
 
   # Cap a single failure update body to 8 KiB to stay well under Monday's
@@ -124,9 +125,35 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   @impl true
   def fetch_candidate_issues do
+    case fetch_candidate_issues_with_phi_findings() do
+      {:ok, %{items: items, phi_offenders: []}} ->
+        {:ok, items}
+
+      {:ok, %{phi_offenders: [first | _]}} ->
+        # Spec 1 backward-compat: callers using the legacy contract see the
+        # same `:phi_detected` error tuple they always have. Spec M-6 callers
+        # use `fetch_candidate_issues_with_phi_findings/0` to learn about
+        # *every* offender on the page so each one can be cancelled + refused
+        # independently.
+        {:error, {:phi_detected, first.id}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
+  def fetch_candidate_issues_with_phi_findings, do: fetch_candidate_issues_with_phi_findings([])
+
+  def fetch_candidate_issues_with_phi_findings(opts) do
     cfg = tracker_config()
     eligible_states = cfg.active_states ++ cfg.handoff_states
-    fetch_issues_filtered(cfg, eligible_states)
+    fetch_issues_filtered_with_phi(
+      cfg,
+      eligible_states,
+      phi_gate_mode(),
+      Keyword.get(opts, :limit, 100)
+    )
   end
 
   @impl true
@@ -144,7 +171,22 @@ defmodule SymphonyElixir.Monday.Adapter do
 
       case client_module().graphql(@items_by_ids_query, %{"itemIds" => item_ids, "columnIds" => column_ids}, []) do
         {:ok, %{"data" => %{"items" => raw_items}}} ->
-          normalize_items(raw_items, cfg, :all)
+          mode = phi_gate_mode()
+
+          case normalize_items_with_phi(raw_items, cfg, :all, mode) do
+            {:ok, %{items: items, phi_offenders: []}} ->
+              {:ok, items}
+
+            {:ok, %{items: items, phi_offenders: offenders}} when mode == :warn ->
+              Enum.each(offenders, &log_warn_refresh_offender/1)
+              {:ok, items}
+
+            {:ok, %{phi_offenders: [first | _]}} ->
+              {:error, {:phi_detected, first}}
+
+            {:error, _} = err ->
+              err
+          end
 
         {:error, _} = err ->
           err
@@ -158,28 +200,41 @@ defmodule SymphonyElixir.Monday.Adapter do
   def fetch_issue_states_by_ids(_ids), do: {:ok, []}
 
   defp fetch_issues_filtered(cfg, allowed_states) do
+    do_fetch_issues_page(cfg, allowed_states, 100, fn raw_items ->
+      normalize_items(raw_items, cfg, allowed_states)
+    end)
+  end
+
+  defp fetch_issues_filtered_with_phi(cfg, allowed_states, mode, limit) do
+    do_fetch_issues_page(cfg, allowed_states, limit, fn raw_items ->
+      normalize_items_with_phi(raw_items, cfg, allowed_states, mode)
+    end)
+  end
+
+  defp do_fetch_issues_page(cfg, allowed_states, limit, normalize_fn) do
     column_ids = collect_column_ids(cfg)
 
     cond do
       allowed_states == [] ->
-        {:ok, []}
+        normalize_fn.([])
 
       true ->
         case translate_states_to_ids(cfg, allowed_states) do
           {:ok, []} ->
-            {:ok, []}
+            normalize_fn.([])
 
           {:ok, state_ids} ->
             variables = %{
               "boardId" => cfg.board_id,
               "columnIds" => column_ids,
               "statusColumnId" => cfg.symphony_status_column_id,
-              "states" => state_ids
+              "states" => state_ids,
+              "limit" => limit
             }
 
             case client_module().graphql(@items_page_query, variables, []) do
               {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
-                normalize_items(raw_items, cfg, allowed_states)
+                normalize_fn.(raw_items)
 
               {:error, _} = err ->
                 err
@@ -379,8 +434,11 @@ defmodule SymphonyElixir.Monday.Adapter do
             {:cont, acc}
           end
 
-        {:error, {:phi_detected, _findings}} ->
-          {:halt, {:error, {:phi_detected, Map.get(raw_item, "id")}}}
+        {:error, {:phi_detected, findings}} ->
+          {:halt, {:error, {:phi_detected, build_phi_offender(raw_item, cfg, findings)}}}
+
+        {:error, {:phi_detector_failed, field}} ->
+          {:halt, {:error, {:phi_detector_failed, build_phi_detector_failure(raw_item, cfg, field)}}}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
@@ -389,6 +447,121 @@ defmodule SymphonyElixir.Monday.Adapter do
     |> case do
       {:error, _reason} = err -> err
       items -> {:ok, Enum.reverse(items)}
+    end
+  end
+
+  # PHI-aware normalize. Spec M-6 §AC1: a PHI finding must NOT halt the page;
+  # the orchestrator is responsible for cancelling each offender and posting
+  # a `## Symphony PHI Refusal` workpad. Other (non-PHI) errors still halt
+  # because they indicate a genuine page-level fetch problem (missing column,
+  # bad shape) that the orchestrator can't sanely partition.
+  defp normalize_items_with_phi(raw_items, cfg, allowed_states, mode) do
+    raw_items
+    |> Enum.reduce_while({[], []}, fn raw_item, {items_acc, offenders_acc} ->
+      case Item.from_monday(raw_item, cfg) do
+        {:ok, item} ->
+          if item_allowed?(item, allowed_states) do
+            {:cont, {[item | items_acc], offenders_acc}}
+          else
+            {:cont, {items_acc, offenders_acc}}
+          end
+
+        {:error, {:phi_detected, findings}} ->
+          offender = build_phi_offender(raw_item, cfg, findings)
+
+          {:cont,
+           maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [
+             offender | offenders_acc
+           ])}
+
+        {:error, {:phi_detector_failed, field}} ->
+          offender = build_phi_detector_failure(raw_item, cfg, field)
+
+          {:cont,
+           maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [
+             offender | offenders_acc
+           ])}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:error, _reason} = err ->
+        err
+
+      {items, offenders} ->
+        {:ok,
+         %{
+           items: Enum.reverse(items),
+           phi_offenders: Enum.reverse(offenders)
+         }}
+    end
+  end
+
+  # Build a PHI offender record carrying ONLY finding kinds — never matched
+  # text. Spec M-6 §Constraints: ZERO PHI may appear in logs, stdout, or
+  # Workpad bodies.
+  defp build_phi_offender(raw_item, cfg, findings) do
+    raw_id = Map.get(raw_item, "id")
+    item_id = if is_binary(raw_id), do: raw_id, else: to_string(raw_id || "")
+    identifier = "#{cfg.identifier_prefix}-#{item_id}"
+
+    kinds =
+      findings
+      |> List.wrap()
+      |> Enum.map(fn
+        {kind, _matched_text} when is_atom(kind) -> kind
+        kind when is_atom(kind) -> kind
+        _ -> :unknown
+      end)
+      |> Enum.uniq()
+
+    %{id: item_id, identifier: identifier, kinds: kinds}
+  end
+
+  defp build_phi_detector_failure(raw_item, cfg, field) do
+    build_phi_offender(raw_item, cfg, [detector_failure_kind(field)])
+  end
+
+  defp detector_failure_kind(:title), do: :detector_failed_title
+  defp detector_failure_kind(:description), do: :detector_failed_description
+  defp detector_failure_kind(_), do: :detector_failed
+
+  defp maybe_include_phi_item(raw_item, cfg, allowed_states, :warn, items_acc, offenders_acc) do
+    case Item.from_monday(raw_item, cfg, scan_phi?: false) do
+      {:ok, item} ->
+        if item_allowed?(item, allowed_states) do
+          {[item | items_acc], offenders_acc}
+        else
+          {items_acc, offenders_acc}
+        end
+
+      {:error, _reason} ->
+        {items_acc, offenders_acc}
+    end
+  end
+
+  defp maybe_include_phi_item(_raw_item, _cfg, _allowed_states, _mode, items_acc, offenders_acc) do
+    {items_acc, offenders_acc}
+  end
+
+  defp log_warn_refresh_offender(offender) do
+    Logger.warning(
+      "Symphony PHI gate (warn mode) detected PHI during item refresh identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing"
+    )
+  end
+
+  defp phi_gate_mode do
+    case Application.get_env(:symphony_elixir, :test_config_override) do
+      %{phi_gate: %{mode: "warn"}} ->
+        :warn
+
+      _ ->
+        case Config.settings() do
+          {:ok, %SymphonyElixir.Config.Schema{phi_gate: %{mode: "warn"}}} -> :warn
+          _ -> :strict
+        end
     end
   end
 
@@ -462,6 +635,23 @@ defmodule SymphonyElixir.Monday.Adapter do
     end
   end
 
+  @impl true
+  def post_phi_refusal(item_id, body) do
+    # `sanitize_failure_body/1` re-runs the PHI redactor. It is defensive only —
+    # `Workpad.render_phi_refusal/2` already renders kinds-only and never sees
+    # the raw matched text — but per Spec M-6 §Constraints "ZERO PHI may appear
+    # ... EVER. Redaction is non-negotiable" we belt-and-suspender it.
+    safe_body = sanitize_failure_body(body || "")
+    full_body = ensure_marker(safe_body, @phi_refusal_marker)
+    capped = cap_failure_body(full_body)
+
+    case client_module().graphql(@create_update, %{"itemId" => parse_item_id(item_id), "body" => capped}, []) do
+      {:ok, %{"data" => %{"create_update" => %{"id" => _}}}} -> :ok
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected_response, other}}
+    end
+  end
+
   # Defense in depth: scrub PHI before posting any failure body, in case a
   # call site forgets to scrub stderr or includes a copied-in error string.
   # Per Spec 4 §2.5 / SYM-11923123790 AC5: NEVER post the raw body.
@@ -475,7 +665,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   defp sanitize_failure_body(_), do: ""
 
   defp redact_phi(body) when is_binary(body) do
-    case PHIDetector.scan(body) do
+    case safe_phi_scan(body) do
       :clean ->
         body
 
@@ -487,6 +677,9 @@ defmodule SymphonyElixir.Monday.Adapter do
             acc
           end
         end)
+
+      {:error, :phi_detector_failed} ->
+        "[REDACTED-PHI-SCAN-FAILED]"
     end
   end
 
@@ -621,16 +814,34 @@ defmodule SymphonyElixir.Monday.Adapter do
     title = Map.get(item, :title) || Map.get(item, "name")
     description = Map.get(item, :description)
 
-    case PHIDetector.scan(title) do
+    case safe_phi_scan(title) do
       :clean ->
-        case PHIDetector.scan(description) do
+        case safe_phi_scan(description) do
           :clean -> :ok
           {:phi, _findings} -> {:error, :phi_in_description}
+          {:error, :phi_detector_failed} -> {:error, :phi_detector_failed_description}
         end
 
       {:phi, _findings} ->
         {:error, :phi_in_title}
+
+      {:error, :phi_detector_failed} ->
+        {:error, :phi_detector_failed_title}
     end
+  end
+
+  defp safe_phi_scan(text) do
+    try do
+      phi_detector().scan(text)
+    catch
+      _kind, _reason -> {:error, :phi_detector_failed}
+    rescue
+      _error -> {:error, :phi_detector_failed}
+    end
+  end
+
+  defp phi_detector do
+    Application.get_env(:symphony_elixir, :phi_detector_module, PHIDetector)
   end
 
   defp upsert_marked_update(item_id, marker, body) do

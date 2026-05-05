@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Monday.Workpad do
 
   @marker "## Symphony Workpad"
   @pr_refusal_marker "## Symphony PR Refusal"
+  @phi_refusal_marker "## Symphony PHI Refusal"
 
   @type session :: %{
           required(:identifier) => String.t(),
@@ -82,6 +83,41 @@ defmodule SymphonyElixir.Monday.Workpad do
 
     Profile: `#{Map.get(session, :profile_name, "unknown")}`
     Reason: `#{reason_label}`
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony PHI Refusal` Monday Update for a tracker
+  item that the PHI gate refused to dispatch.
+
+  `finding_kinds` is the list of detected finding *types* (e.g. `[:patient_name,
+  :ssn]`). The matched text is intentionally NEVER passed in — Spec 4 §2.5
+  forbids any raw PHI in logs, stdout, or Workpad bodies. Callers MUST extract
+  only the kinds from `PHIDetector.scan/1` findings before invoking this
+  helper. Anything that is not a known kind atom is rendered as the literal
+  `[REDACTED]` placeholder so a stray binary in the list cannot leak text.
+  """
+  @spec render_phi_refusal(session(), [atom()]) :: String.t()
+  def render_phi_refusal(session, finding_kinds) when is_list(finding_kinds) do
+    stamp = stamp_line(session)
+    kinds_line = render_finding_kinds(finding_kinds)
+
+    """
+    #{@phi_refusal_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Refusal
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+    Finding types: #{kinds_line}
+
+    Symphony refused dispatch because the item title or non-Symphony update
+    body matched a PHI pattern. The matched text is intentionally not shown
+    here. Edit the item to remove the PHI, then re-enroll by setting the
+    Symphony Status back to an active state.
     """
   end
 
@@ -167,6 +203,22 @@ defmodule SymphonyElixir.Monday.Workpad do
     |> Enum.take(-n)
     |> Enum.join("\n")
   end
+
+  # Render the finding-types line as a comma-separated list of backtick-quoted
+  # kinds. Anything that isn't a plain atom collapses to `[REDACTED]` so a
+  # caller that accidentally passes a raw PHI string cannot leak it into the
+  # rendered body.
+  defp render_finding_kinds([]), do: "`[REDACTED]`"
+
+  defp render_finding_kinds(kinds) when is_list(kinds) do
+    kinds
+    |> Enum.map(&format_finding_kind/1)
+    |> Enum.uniq()
+    |> Enum.join(", ")
+  end
+
+  defp format_finding_kind(kind) when is_atom(kind), do: "`" <> Atom.to_string(kind) <> "`"
+  defp format_finding_kind(_other), do: "`[REDACTED]`"
 
   defp stamp_line(session) do
     host = Map.get(session, :host, "unknown")

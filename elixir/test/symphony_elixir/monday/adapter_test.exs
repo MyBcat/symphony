@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.Monday.AdapterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
@@ -178,6 +178,10 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     end
 
     defp self_pid, do: Process.get(:test_pid)
+  end
+
+  defmodule RaisingPHIDetector do
+    def scan(_text), do: raise("detector unavailable")
   end
 
   defp clear_status_label_cache(%{tracker: cfg}) do
@@ -377,6 +381,177 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     assert {:error, {:phi_detected, "9482736152"}} = Adapter.fetch_candidate_issues()
   end
 
+  describe "fetch_candidate_issues_with_phi_findings (M-6)" do
+    defmodule MixedClient do
+      @moduledoc """
+      Returns one clean item and one PHI-tainted item on the same page so we
+      can assert the new split contract: clean items dispatch normally;
+      PHI offenders surface as a separate list with finding *kinds* only.
+      """
+      def graphql(query, _vars, _opts) do
+        cond do
+          query =~ "SymphonyStatusLabels" ->
+            {:ok,
+             %{
+               "data" => %{
+                 "boards" => [
+                   %{
+                     "columns" => [
+                       %{
+                         "id" => "symphony_status_xyz",
+                         "settings_str" =>
+                           Jason.encode!(%{
+                             "labels" => %{
+                               "0" => "Symphony Ready",
+                               "1" => "Done",
+                               "2" => "Rework",
+                               "4" => "Human Review",
+                               "7" => "In Progress",
+                               "10" => "Cancelled",
+                               "14" => "Merging"
+                             },
+                             "labels_colors" => %{},
+                             "done_colors" => [1, 10],
+                             "deactivated_labels" => []
+                           })
+                       }
+                     ]
+                   }
+                 ]
+               }
+             }}
+
+          true ->
+            {:ok,
+             %{
+               "data" => %{
+                 "boards" => [
+                   %{
+                     "items_page" => %{
+                       "cursor" => nil,
+                       "items" => [
+                         %{
+                           "id" => "1111111111",
+                           "name" => "Engineering task",
+                           "url" => "https://example.com/1",
+                           "created_at" => "2026-05-01T00:00:00Z",
+                           "updated_at" => "2026-05-03T00:00:00Z",
+                           "column_values" => [
+                             %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+                           ]
+                         },
+                         %{
+                           "id" => "2222222222",
+                           "name" => "Patient Jane Doe needs follow-up",
+                           "url" => "https://example.com/2",
+                           "created_at" => "2026-05-01T00:00:00Z",
+                           "updated_at" => "2026-05-03T00:00:00Z",
+                           "column_values" => [
+                             %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+                           ]
+                         }
+                       ]
+                     }
+                   }
+                 ]
+               }
+             }}
+        end
+      end
+    end
+
+    test "splits a mixed page into clean items and PHI offenders, never including matched text" do
+      Application.put_env(:symphony_elixir, :monday_client_module, MixedClient)
+
+      assert {:ok, %{items: items, phi_offenders: offenders}} =
+               Adapter.fetch_candidate_issues_with_phi_findings()
+
+      # Clean item flows through; PHI item is split out.
+      assert [%SymphonyElixir.Tracker.Issue{id: "1111111111"}] = items
+
+      assert [%{id: "2222222222", identifier: "SYM-2222222222", kinds: kinds}] = offenders
+      assert :patient_name in kinds
+
+      # Sanity: no offender map should ever carry matched text.
+      Enum.each(offenders, fn offender ->
+        refute Map.has_key?(offender, :matched_text)
+        refute Map.has_key?(offender, :findings)
+
+        Enum.each(offender.kinds, fn kind ->
+          assert is_atom(kind), "kinds must be atoms; got #{inspect(kind)}"
+        end)
+      end)
+    end
+
+    test "warn mode returns PHI-tainted items alongside redacted offenders so dispatch can proceed" do
+      Application.put_env(:symphony_elixir, :monday_client_module, MixedClient)
+
+      config = Application.get_env(:symphony_elixir, :test_config_override)
+      Application.put_env(:symphony_elixir, :test_config_override, Map.put(config, :phi_gate, %{mode: "warn"}))
+
+      assert {:ok, %{items: items, phi_offenders: offenders}} =
+               Adapter.fetch_candidate_issues_with_phi_findings()
+
+      assert Enum.map(items, & &1.id) == ["1111111111", "2222222222"]
+      assert [%{id: "2222222222", kinds: kinds}] = offenders
+      assert :patient_name in kinds
+
+      refute inspect(offenders) =~ "Jane Doe"
+    end
+
+    test "strict mode fail-closes when the PHI detector itself fails" do
+      Application.put_env(:symphony_elixir, :monday_client_module, FakeMondayClient)
+      Application.put_env(:symphony_elixir, :phi_detector_module, RaisingPHIDetector)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :phi_detector_module) end)
+
+      assert {:ok, %{items: [], phi_offenders: [offender]}} =
+               Adapter.fetch_candidate_issues_with_phi_findings()
+
+      assert offender.id == "9482736152"
+      assert offender.identifier == "SYM-9482736152"
+      assert offender.kinds == [:detector_failed_title]
+    end
+
+    test "warn mode fail-opens when the PHI detector itself fails" do
+      Application.put_env(:symphony_elixir, :monday_client_module, FakeMondayClient)
+      Application.put_env(:symphony_elixir, :phi_detector_module, RaisingPHIDetector)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :phi_detector_module) end)
+
+      config = Application.get_env(:symphony_elixir, :test_config_override)
+      Application.put_env(:symphony_elixir, :test_config_override, Map.put(config, :phi_gate, %{mode: "warn"}))
+
+      assert {:ok, %{items: [item], phi_offenders: [offender]}} =
+               Adapter.fetch_candidate_issues_with_phi_findings()
+
+      assert item.id == "9482736152"
+      assert offender.kinds == [:detector_failed_title]
+    end
+
+    test "returns empty offenders list on a clean page" do
+      Application.put_env(:symphony_elixir, :monday_client_module, FakeMondayClient)
+
+      assert {:ok, %{items: [%SymphonyElixir.Tracker.Issue{}], phi_offenders: []}} =
+               Adapter.fetch_candidate_issues_with_phi_findings()
+    end
+
+    test "accepts a page limit override for the boot-time PHI scan" do
+      Application.put_env(:symphony_elixir, :monday_client_module, FakeMondayClient)
+
+      assert {:ok, %{items: [%SymphonyElixir.Tracker.Issue{}], phi_offenders: []}} =
+               Adapter.fetch_candidate_issues_with_phi_findings(limit: 50)
+
+      assert_received {:graphql, _labels_query, _}
+      assert_received {:graphql, items_query, %{"limit" => 50}}
+      assert items_query =~ "limit: $limit"
+    end
+
+    test "fetch_candidate_issues continues to surface a {:phi_detected, id} error for legacy callers" do
+      Application.put_env(:symphony_elixir, :monday_client_module, MixedClient)
+
+      assert {:error, {:phi_detected, "2222222222"}} = Adapter.fetch_candidate_issues()
+    end
+  end
+
   describe "write paths" do
     defmodule WriteCapturingClient do
       def graphql(query, vars, _opts) do
@@ -562,6 +737,45 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert body =~ "[REDACTED-SECRET]"
       assert body =~ "[REDACTED-HOME-PATH]"
       assert String.starts_with?(body, "## Symphony PR Refusal")
+    end
+
+    test "post_phi_refusal posts an update under the Symphony PHI Refusal marker (M-6)" do
+      assert :ok =
+               Adapter.post_phi_refusal(
+                 "9482736152",
+                 "## Symphony PHI Refusal\n\nFinding types: `patient_name`\n"
+               )
+
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+      assert String.starts_with?(body, "## Symphony PHI Refusal")
+      assert body =~ "patient_name"
+    end
+
+    test "post_phi_refusal prepends the marker when the body lacks it" do
+      assert :ok = Adapter.post_phi_refusal("9482736152", "Finding types: `ssn`")
+      assert_received {:graphql, _query, %{"body" => body}}
+      assert String.starts_with?(body, "## Symphony PHI Refusal")
+      assert body =~ "ssn"
+    end
+
+    test "post_phi_refusal scrubs any stray PHI in the body before posting" do
+      # Defense in depth: even though Workpad.render_phi_refusal/2 never sees
+      # raw matched text, the adapter MUST run sanitize_failure_body on the
+      # incoming body. Spec M-6 §Constraints: ZERO PHI may appear, EVER.
+      raw_body = """
+      ## Symphony PHI Refusal
+
+      Finding types: `patient_name`
+      bug: caller accidentally included Patient John Smith in the body
+      """
+
+      assert :ok = Adapter.post_phi_refusal("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      refute body =~ "John Smith"
+      assert body =~ "[REDACTED-PHI]"
+      assert String.starts_with?(body, "## Symphony PHI Refusal")
     end
   end
 

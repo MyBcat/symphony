@@ -416,6 +416,28 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule PHIGate do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Refuse-default. `strict` flips PHI-tainted items to Cancelled and posts
+      # a `## Symphony PHI Refusal` workpad block. `warn` logs and continues
+      # dispatch. Operators MUST flip explicitly to `warn` to soften — there
+      # is no implicit override.
+      field(:mode, :string, default: "strict")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:mode], empty_values: [])
+      |> validate_inclusion(:mode, ["strict", "warn"])
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -428,6 +450,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:cost_cap, CostCap, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:phi_gate, PHIGate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:secrets, Secrets, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
     field(:repos, :map, default: %{})
@@ -525,6 +548,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:cost_cap, with: &CostCap.changeset/2)
+    |> cast_embed(:phi_gate, with: &PHIGate.changeset/2)
     |> cast_embed(:secrets, with: &Secrets.changeset/2)
     |> parse_profiles()
     |> parse_repos()

@@ -148,6 +148,47 @@ defmodule SymphonyElixir.Monday.ItemTest do
       refute item.description =~ "branch_convention_violation"
     end
 
+    test "filters Symphony PHI Refusal updates out of the synthesized description (M-6 AC5)" do
+      raw = %{
+        "id" => "11923088103",
+        "name" => "PHI gate task",
+        "url" => "https://example.org",
+        "created_at" => "2026-05-01T10:00:00Z",
+        "updated_at" => "2026-05-01T10:00:00Z",
+        "column_values" => [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+        ],
+        "updates" => [
+          %{
+            "id" => "u1",
+            "body" => "Operator note: please re-enroll after redacting",
+            "created_at" => "2026-05-01T10:00:00Z"
+          },
+          %{
+            "id" => "u2",
+            "body" =>
+              "## Symphony PHI Refusal\n\nFinding types: `patient_name`\n",
+            "created_at" => "2026-05-01T11:00:00Z"
+          }
+        ]
+      }
+
+      config = %{
+        identifier_prefix: "SYM",
+        symphony_status_column_id: "symphony_status_xyz",
+        priority_column_id: nil,
+        description_column_id: nil,
+        branch_column_id: nil,
+        labels_column_id: nil,
+        profile_column_id: nil
+      }
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.description == "Operator note: please re-enroll after redacting"
+      refute item.description =~ "Symphony PHI Refusal"
+      refute item.description =~ "patient_name"
+    end
+
     test "filters Symphony Cost Cap updates out of the synthesized description" do
       raw = %{
         "id" => "11923119477",
