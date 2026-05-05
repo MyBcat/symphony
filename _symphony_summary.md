@@ -4,7 +4,9 @@
 
 **Branch:** `symphony/SYM-11923088195/attempt-1`
 
-**Status:** Complete — PR opened
+**Status:** Complete — PR open (#26), awaiting /codex:rescue before merge
+
+**PR:** https://github.com/MyBcat/symphony/pull/26
 
 ---
 
@@ -45,7 +47,7 @@ Navigation bar (Overview / Agents / Failures / Repos) shared across all pages vi
 
 ## HIPAA constraint
 
-Localhost binding is non-negotiable: `ip = {127, 0, 0, 1}` is hardcoded in `HttpServer.start_link/1`. Passing `host: "0.0.0.0"` (or IPv6 equivalents) via opts raises `RuntimeError` at startup.
+Localhost binding is non-negotiable: `ip = {127, 0, 0, 1}` is hardcoded in `HttpServer.start_link/1`. The guard checks both `opts[:host]` and `Config.settings!().server.host`; either being `"0.0.0.0"`, `"[::]"`, or `"::"` raises `RuntimeError` at startup. Dead `parse_host/1` and `normalize_host/1` helpers were removed in a follow-up commit.
 
 ---
 
