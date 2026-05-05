@@ -129,6 +129,13 @@ defmodule SymphonyElixir.Heartbeat do
     initial_success_at =
       Keyword.get(opts, :initial_success_at_ms, System.monotonic_time(:millisecond))
 
+    # Spec M-7: trap exits so a `:normal` exit from our linked owner (the
+    # orchestrator's `GenServer.stop/2` cleanup path) actually tears us
+    # down. Without trapping, link-propagation drops `:normal` signals
+    # silently and the Heartbeat would keep running as a zombie that may
+    # later re-acquire the lock the orchestrator just released.
+    Process.flag(:trap_exit, true)
+
     state = %State{
       ttl_ms: ttl_ms,
       tracker_module: tracker_module,
@@ -166,7 +173,20 @@ defmodule SymphonyElixir.Heartbeat do
     {:noreply, schedule_refresh(state)}
   end
 
+  # Trapping exits means link-propagated EXIT signals (including the orchestrator's
+  # `:normal` shutdown) arrive as messages instead of killing us silently. Treat
+  # any such EXIT as "the owner is gone, stop cleanly" so we never outlive the
+  # orchestrator and re-acquire a lock it just released.
+  def handle_info({:EXIT, _pid, reason}, %State{} = state) do
+    {:stop, exit_reason(reason), state}
+  end
+
   def handle_info(_msg, %State{} = state), do: {:noreply, state}
+
+  defp exit_reason(:normal), do: :normal
+  defp exit_reason(:shutdown), do: :shutdown
+  defp exit_reason({:shutdown, _} = reason), do: reason
+  defp exit_reason(reason), do: {:linked_exit, reason}
 
   @impl true
   def terminate(_reason, %State{timer_ref: timer_ref}) when is_reference(timer_ref) do

@@ -196,6 +196,48 @@ defmodule SymphonyElixir.HeartbeatTest do
     end
   end
 
+  describe "owner-link teardown (Spec M-7)" do
+    test "exits cleanly when its linked owner dies normally" do
+      # Spawn an owner process that starts the Heartbeat (linked) and then
+      # exits :normal. Without trapping exits, link-propagation drops the
+      # :normal signal and the Heartbeat would zombify. This test pins the
+      # invariant that Heartbeat traps exits and stops with the owner.
+      test_pid = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, hb_pid} =
+            Heartbeat.start_link(
+              ttl_ms: 1_000,
+              tracker_module: StubTracker,
+              name: nil
+            )
+
+          send(test_pid, {:hb_pid, hb_pid})
+
+          receive do
+            :die_normal -> :ok
+          end
+        end)
+
+      hb_pid =
+        receive do
+          {:hb_pid, pid} -> pid
+        after
+          1_000 -> flunk("owner never sent us its Heartbeat pid")
+        end
+
+      assert Process.alive?(hb_pid)
+      hb_ref = Process.monitor(hb_pid)
+
+      # Owner exits :normal; Heartbeat must stop because we trap exits.
+      send(owner, :die_normal)
+      assert_receive {:DOWN, ^hb_ref, :process, ^hb_pid, _reason}, 1_000
+
+      refute Process.alive?(hb_pid)
+    end
+  end
+
   describe "public accessors" do
     test "degraded?/1 returns false when the named process is missing" do
       refute Heartbeat.degraded?(:not_a_real_heartbeat_name)
