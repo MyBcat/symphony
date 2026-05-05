@@ -12,6 +12,17 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
   def fetch_candidate_issues, do: {:ok, get_state(:items_active, [])}
 
   @impl true
+  def fetch_candidate_issues_with_phi_findings do
+    case get_state(:phi_findings_result, nil) do
+      nil ->
+        {:ok, %{items: get_state(:items_active, []), phi_offenders: []}}
+
+      result ->
+        result
+    end
+  end
+
+  @impl true
   def fetch_issues_by_states(states), do: {:ok, get_state({:items_in_states, states}, [])}
 
   @impl true
@@ -44,6 +55,12 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
   @impl true
   def post_pr_refusal(item_id, body) do
     push_event({:pr_refusal_write, item_id, body})
+    :ok
+  end
+
+  @impl true
+  def post_phi_refusal(item_id, body) do
+    push_event({:phi_refusal_write, item_id, body})
     :ok
   end
 

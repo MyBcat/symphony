@@ -182,6 +182,7 @@ defmodule SymphonyElixir.Monday.Item do
     "## Symphony Heartbeat",
     "## Symphony Completion",
     "## Symphony PR Refusal",
+    "## Symphony PHI Refusal",
     "## Symphony Cost Cap"
   ]
 

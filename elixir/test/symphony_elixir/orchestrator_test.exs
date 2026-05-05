@@ -348,10 +348,243 @@ defmodule SymphonyElixir.OrchestratorTest do
     end
   end
 
-  defp write_workflow!(path) do
+  describe "PHI gate at dispatch (M-6 / SYM-11923088103)" do
+    test "strict mode (default): poll cycle posts ## Symphony PHI Refusal + flips to Cancelled" do
+      offender = %{
+        id: "issue-phi-1",
+        identifier: "SYM-PHI-1",
+        kinds: [:patient_name]
+      }
+
+      # Boot with no offenders so the init boot-scan succeeds; only seed
+      # offenders afterwards so the poll-time refusal flow is what we test.
+      orchestrator_name = Module.concat(__MODULE__, :PHIStrictDispatchOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      MemoryMonday.set(
+        :phi_findings_result,
+        {:ok, %{items: [], phi_offenders: [offender]}}
+      )
+
+      # Drop any boot-tick events so we only assert on poll-time refusals.
+      _ = :sys.get_state(pid)
+      MemoryMonday.set(:events, [])
+
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+        Process.sleep(150)
+      end)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:phi_refusal_write, "issue-phi-1", body} ->
+                 String.starts_with?(body, "## Symphony PHI Refusal") and
+                   body =~ "patient_name"
+
+               _ ->
+                 false
+             end),
+             "expected PHI refusal write; events=#{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:status_write, "issue-phi-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected status flip to Cancelled; events=#{inspect(events)}"
+
+      Enum.each(events, fn
+        {:phi_refusal_write, _id, body} ->
+          refute body =~ "matched_text"
+          # Spec M-6 §Constraints: ZERO PHI in any posted text. Defensive
+          # smoke check: the test offender carries kinds only, so the body
+          # can never legally contain a patient-name string anyway, but we
+          # also want to confirm we didn't somehow surface "Patient X" prose.
+          refute body =~ ~r/Patient\s+[A-Z]/
+
+        _ ->
+          :ok
+      end)
+    end
+
+    test "strict mode does not crash the orchestrator when PHI offenders coexist with handoff-state items" do
+      # Handoff-state items are claimed but not dispatched to new agents, so
+      # this test asserts the PHI refusal flow does not poison the same poll
+      # cycle's claim bookkeeping. We use a handoff item to keep the test
+      # independent of `SymphonyElixir.TaskSupervisor` (only started when the
+      # full app boots).
+      offender = %{
+        id: "issue-phi-2",
+        identifier: "SYM-PHI-2",
+        kinds: [:dob]
+      }
+
+      handoff_issue = %Issue{
+        id: "issue-handoff-2",
+        identifier: "SYM-HANDOFF-2",
+        title: "Awaiting human review",
+        description: "no PHI",
+        state: "Human Review",
+        url: "https://example.org/issues/SYM-HANDOFF-2",
+        assigned_to_worker: true
+      }
+
+      orchestrator_name = Module.concat(__MODULE__, :PHIMixedDispatchOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      MemoryMonday.set(
+        :phi_findings_result,
+        {:ok, %{items: [handoff_issue], phi_offenders: [offender]}}
+      )
+
+      _ = :sys.get_state(pid)
+      MemoryMonday.set(:events, [])
+
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+        Process.sleep(200)
+      end)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:phi_refusal_write, "issue-phi-2", _body} -> true
+               _ -> false
+             end),
+             "expected PHI refusal for offender; events=#{inspect(events)}"
+
+      assert Process.alive?(pid),
+             "orchestrator should remain alive after a same-tick PHI refusal"
+
+      state = :sys.get_state(pid)
+
+      assert MapSet.member?(state.claimed, handoff_issue.id),
+             "expected handoff issue to still be claimed alongside PHI refusal; claimed=#{inspect(MapSet.to_list(state.claimed))}"
+    end
+  end
+
+  describe "PHI gate boot scan (M-6 AC3)" do
+    test "strict mode refuses to boot when active/handoff items have PHI findings" do
+      offender_a = %{
+        id: "boot-phi-1",
+        identifier: "SYM-BOOT-PHI-1",
+        kinds: [:patient_name]
+      }
+
+      offender_b = %{
+        id: "boot-phi-2",
+        identifier: "SYM-BOOT-PHI-2",
+        kinds: [:ssn]
+      }
+
+      MemoryMonday.set(
+        :phi_findings_result,
+        {:ok, %{items: [], phi_offenders: [offender_a, offender_b]}}
+      )
+
+      orchestrator_name = Module.concat(__MODULE__, :BootRefusalStrictOrchestrator)
+
+      {result, log} =
+        with_log(fn ->
+          Process.flag(:trap_exit, true)
+          Orchestrator.start_link(name: orchestrator_name)
+        end)
+
+      case result do
+        {:error, {:phi_detected_in_active_items, count}} ->
+          assert count == 2
+
+        other ->
+          flunk("expected boot to refuse with phi_detected_in_active_items; got #{inspect(other)}")
+      end
+
+      assert log =~ "Symphony refusing to boot in strict mode"
+      assert log =~ "SYM-BOOT-PHI-1"
+      assert log =~ "SYM-BOOT-PHI-2"
+      # Identifier-only refusal: no PHI types or matched text in the log.
+      refute log =~ "matched_text"
+
+      # Heartbeat should be released so a subsequent boot (after the operator
+      # clears the PHI) is not blocked by a stale lock.
+      assert Process.whereis(orchestrator_name) == nil
+    end
+
+    test "warn mode boots normally even when PHI offenders are present" do
+      offender = %{
+        id: "boot-phi-warn-1",
+        identifier: "SYM-BOOT-PHI-WARN-1",
+        kinds: [:dob]
+      }
+
+      MemoryMonday.set(
+        :phi_findings_result,
+        {:ok, %{items: [], phi_offenders: [offender]}}
+      )
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-orchestrator-warn-test-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+      write_workflow!(workflow_file, phi_gate_mode: "warn")
+      Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn -> File.rm_rf(workflow_root) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :BootRefusalWarnOrchestrator)
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+          on_exit(fn ->
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+          end)
+
+          assert Process.alive?(pid)
+        end)
+
+      assert log =~ "warn mode"
+      assert log =~ "SYM-BOOT-PHI-WARN-1"
+      refute log =~ "refusing to boot"
+    end
+  end
+
+  defp write_workflow!(path, opts \\ []) do
+    phi_block =
+      case Keyword.get(opts, :phi_gate_mode) do
+        nil -> ""
+        mode -> "phi_gate:\n  mode: \"#{mode}\"\n"
+      end
+
     yaml = """
     ---
-    tracker:
+    #{phi_block}tracker:
       kind: \"memory\"
       endpoint: \"https://example.org\"
       api_key: null

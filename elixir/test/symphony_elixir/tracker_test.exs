@@ -7,6 +7,7 @@ defmodule SymphonyElixir.TrackerTest do
     @behaviour SymphonyElixir.Tracker
 
     def fetch_candidate_issues, do: {:ok, []}
+    def fetch_candidate_issues_with_phi_findings, do: {:ok, %{items: [], phi_offenders: []}}
     def fetch_issues_by_states(_), do: {:ok, []}
     def fetch_issue_states_by_ids(_), do: {:ok, []}
     def update_issue_state(_, _), do: :ok
@@ -14,6 +15,7 @@ defmodule SymphonyElixir.TrackerTest do
     def set_pr_url(_, _), do: :ok
     def post_failure_update(_, _), do: :ok
     def post_pr_refusal(_, _), do: :ok
+    def post_phi_refusal(_, _), do: :ok
     def acquire_heartbeat, do: :ok
     def release_heartbeat, do: :ok
     def validate_no_phi(_), do: :ok

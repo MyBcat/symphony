@@ -170,6 +170,65 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
     end
   end
 
+  describe "render_phi_refusal/2 (M-6)" do
+    test "renders the Symphony PHI Refusal marker as the body header" do
+      session = %{
+        identifier: "SYM-11923088103",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_default"
+      }
+
+      body = Workpad.render_phi_refusal(session, [:patient_name])
+
+      assert String.starts_with?(body, "## Symphony PHI Refusal")
+      assert body =~ "Refusal"
+      assert body =~ "codex_default"
+      assert body =~ "`patient_name`"
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "lists multiple finding kinds, deduped" do
+      body =
+        Workpad.render_phi_refusal(%{profile_name: "claude_opus"}, [
+          :ssn,
+          :patient_name,
+          :ssn
+        ])
+
+      assert body =~ "`ssn`"
+      assert body =~ "`patient_name`"
+      assert Regex.scan(~r/`ssn`/, body) |> length() == 1
+    end
+
+    test "redacts non-atom kinds (defense in depth — caller must never pass raw matched text)" do
+      body =
+        Workpad.render_phi_refusal(%{profile_name: "x"}, [
+          "Jane Doe",
+          {:patient_name, "John Doe"}
+        ])
+
+      refute body =~ "Jane Doe"
+      refute body =~ "John Doe"
+      assert body =~ "[REDACTED]"
+    end
+
+    test "empty kinds list still produces a refusal body without leaking text" do
+      body = Workpad.render_phi_refusal(%{profile_name: "x"}, [])
+
+      assert body =~ "## Symphony PHI Refusal"
+      assert body =~ "[REDACTED]"
+    end
+
+    test "explanatory copy never references raw matched text or operator content" do
+      body = Workpad.render_phi_refusal(%{profile_name: "p"}, [:dob])
+
+      assert body =~ "matched text is intentionally not shown"
+      refute body =~ "matched_text"
+    end
+  end
+
   describe "tail_lines/2" do
     test "returns the last n lines, joined by newline" do
       text = "a\nb\nc\nd\ne"

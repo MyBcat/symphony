@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Monday.PHIGate
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -137,16 +138,90 @@ defmodule SymphonyElixir.Orchestrator do
 
     case Tracker.acquire_heartbeat() do
       :ok ->
-        Process.flag(:trap_exit, true)
-        state = schedule_heartbeat_refresh(state)
-        run_terminal_workspace_cleanup()
-        state = schedule_tick(state, 0)
-        {:ok, state}
+        case run_boot_phi_scan() do
+          :ok ->
+            Process.flag(:trap_exit, true)
+            state = schedule_heartbeat_refresh(state)
+            run_terminal_workspace_cleanup()
+            state = schedule_tick(state, 0)
+            {:ok, state}
+
+          {:stop, reason} ->
+            # Spec M-6 §AC3: in strict mode, refuse to boot if any active or
+            # handoff-state item has PHI findings. Release the heartbeat we
+            # just acquired so a subsequent boot (after the operator clears
+            # the PHI) is not blocked by a stale lock.
+            _ = release_heartbeat_safely()
+            {:stop, reason}
+        end
 
       {:error, reason} ->
         Logger.error("Orchestrator unable to acquire tracker heartbeat lock: #{inspect(reason)}; refusing to start")
 
         {:stop, :heartbeat_unavailable}
+    end
+  end
+
+  # Spec M-6 §AC3: on Symphony start, fetch items in active_states +
+  # handoff_states. In strict mode, if any item has PHI findings (in title or
+  # any non-Symphony update body), refuse to boot. Print refusal listing item
+  # *identifiers only* — never the matched PHI text. In warn mode, log and
+  # continue.
+  #
+  # Failures of the boot fetch itself (network error, missing column) are
+  # logged but treated as `:ok` so a transient Monday outage cannot brick the
+  # orchestrator. The first poll tick will surface the same error via the
+  # normal dispatch path with the existing logging story.
+  defp run_boot_phi_scan do
+    case Tracker.fetch_candidate_issues_with_phi_findings() do
+      {:ok, %{phi_offenders: []}} ->
+        :ok
+
+      {:ok, %{phi_offenders: offenders}} ->
+        case PHIGate.mode() do
+          :strict ->
+            log_boot_refusal(offenders)
+            {:stop, {:phi_detected_in_active_items, length(offenders)}}
+
+          :warn ->
+            Enum.each(offenders, &PHIGate.warn/1)
+
+            Logger.warning(
+              "Symphony PHI gate (warn mode) at boot: #{length(offenders)} item(s) have PHI findings; continuing"
+            )
+
+            :ok
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "Symphony PHI boot scan failed (#{inspect(reason)}); continuing — first poll tick will retry"
+        )
+
+        :ok
+    end
+  end
+
+  defp log_boot_refusal(offenders) do
+    identifiers =
+      offenders
+      |> Enum.map(& &1.identifier)
+      |> Enum.join(", ")
+
+    message =
+      "Symphony refusing to boot in strict mode: #{length(offenders)} active/handoff item(s) have PHI findings. " <>
+        "Edit each item to remove the PHI, then restart. Items: #{identifiers}"
+
+    Logger.error(message)
+    IO.puts(:stderr, message)
+    :ok
+  end
+
+  defp release_heartbeat_safely do
+    try do
+      Tracker.release_heartbeat()
+    catch
+      _kind, _reason -> :ok
     end
   end
 
@@ -362,7 +437,9 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         {:ok, %{items: issues, phi_offenders: phi_offenders}} <-
+           Tracker.fetch_candidate_issues_with_phi_findings(),
+         :ok <- PHIGate.process_offenders(phi_offenders, []),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else

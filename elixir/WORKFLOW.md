@@ -1,6 +1,14 @@
 ---
 cost_cap:
   daily_usd: 50
+# Spec M-6 PHI gate. `strict` flips PHI-tainted items to "Cancelled" and posts
+# a `## Symphony PHI Refusal` workpad with finding *kinds* only (never raw
+# matched text). `warn` logs and continues dispatch. Strict is the refuse
+# default; flip explicitly to `warn` only when you understand the trade-off.
+# Boot-time scan refuses to start Symphony in strict mode if any active or
+# handoff-state item has PHI findings.
+phi_gate:
+  mode: strict
 tracker:
   kind: monday
   api_token: $MONDAY_API_TOKEN

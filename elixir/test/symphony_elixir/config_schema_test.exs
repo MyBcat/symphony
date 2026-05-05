@@ -600,4 +600,56 @@ defmodule SymphonyElixir.ConfigSchemaTest do
       assert profile.cost_per_output_token_usd == 0.0
     end
   end
+
+  describe "phi_gate (M-6 / SYM-11923088103)" do
+    test "schema defaults phi_gate.mode to strict when block is missing" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        }
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.phi_gate.mode == "strict"
+    end
+
+    test "schema parses phi_gate.mode = warn" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "phi_gate" => %{"mode" => "warn"}
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.phi_gate.mode == "warn"
+    end
+
+    test "schema rejects unknown phi_gate.mode values" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "phi_gate" => %{"mode" => "off"}
+      }
+
+      assert {:error, {:invalid_workflow_config, _msg}} =
+               SymphonyElixir.Config.Schema.parse(attrs)
+    end
+  end
 end
