@@ -10,8 +10,10 @@
 # Default workspace volume target. Override via SYMPHONY_WORKSPACE_HOST_DIR.
 /_symphony_workspaces/
 
-# Symphony orchestration artifact written by the agent at end-of-run.
+# Symphony orchestration artifacts written by the agent / orchestrator.
 _symphony_summary.md
+_pr_body.md
+resume.md
 
 # Editor / OS noise.
 .DS_Store
