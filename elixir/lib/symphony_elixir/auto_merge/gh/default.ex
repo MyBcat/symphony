@@ -11,7 +11,10 @@ defmodule SymphonyElixir.AutoMerge.GH.Default do
 
   @impl true
   def pr_diff_line_count(url) when is_binary(url) and url != "" do
-    case run_gh(["pr", "diff", url]) do
+    # Don't merge stderr into stdout for `gh pr diff` — stderr could
+    # contain CLI warnings, login banners, or rate-limit messages that
+    # would inflate the line count. We only want the diff body.
+    case run_gh_stdout_only(["pr", "diff", url]) do
       {:ok, body} ->
         # Match `gh pr diff | wc -l` semantics: count the number of '\n'
         # bytes. A trailing line with no newline is not counted, matching
@@ -63,6 +66,23 @@ defmodule SymphonyElixir.AutoMerge.GH.Default do
 
   defp run_gh(args) do
     case System.cmd(@gh_command, args, stderr_to_stdout: true) do
+      {output, 0} ->
+        {:ok, output}
+
+      {output, status} ->
+        {:error, {:gh_failed, status, String.trim(output)}}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, {:gh_unavailable, Exception.message(e)}}
+  end
+
+  # Variant for commands where we need stdout in isolation (e.g. `gh pr
+  # diff`, where stderr noise would corrupt the line count downstream).
+  # Errors still surface a trimmed stderr via the err path so operators
+  # can debug.
+  defp run_gh_stdout_only(args) do
+    case System.cmd(@gh_command, args, stderr_to_stdout: false) do
       {output, 0} ->
         {:ok, output}
 

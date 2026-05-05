@@ -287,7 +287,12 @@ defmodule SymphonyElixir.AutoMerge do
       _ -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning(
+        "AutoMerge: resolve_repo_entry failed repo_key=#{inspect(repo_key)} reason=#{Exception.message(e)}; falling back to nil"
+      )
+
+      nil
   end
 
   defp resolve_repo_entry(_ctx), do: nil
@@ -297,20 +302,46 @@ defmodule SymphonyElixir.AutoMerge do
 
   defp gate_repo_opt_in(_other), do: {:hold, :repo_opt_in}
 
+  # Spec 4 §2.8a fail-closed gate 2: Codex output must (a) match the
+  # configured pass pattern AND (b) NOT contain the spec-mandated block
+  # signal "BLOCKING ISSUES FOUND". The block signal is hardcoded — the
+  # spec prompt commits Codex to one of the two literal phrases, so an
+  # output that says "BLOCKING ISSUES FOUND: 1. …" but ALSO mentions
+  # "NO BLOCKING ISSUES" elsewhere (e.g., in a quoted spec snippet) must
+  # still hold. If the operator overrides `auto_merge_pass_pattern` to
+  # match a different review style ("LGTM", etc.), the block-signal
+  # check still fires defensively as long as the canonical Codex prompt
+  # is in use.
+  @block_signal "BLOCKING ISSUES FOUND"
+
   defp gate_pass_pattern(codex_output, %SymphonyElixir.Config.Schema.RepoEntry{
          auto_merge_pass_pattern: pattern
        })
        when is_binary(pattern) and pattern != "" do
-    case Regex.compile(pattern) do
-      {:ok, regex} ->
-        if Regex.match?(regex, codex_output || ""), do: :ok, else: {:hold, :codex_pass_pattern}
+    output = codex_output || ""
 
-      {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: invalid auto_merge_pass_pattern=#{inspect(pattern)} reason=#{inspect(reason)}; treating as held"
+    cond do
+      String.contains?(output, @block_signal) ->
+        Logger.info(
+          "AutoMerge: codex output contains explicit block signal #{inspect(@block_signal)}; holding"
         )
 
         {:hold, :codex_pass_pattern}
+
+      true ->
+        case Regex.compile(pattern) do
+          {:ok, regex} ->
+            if Regex.match?(regex, output),
+              do: :ok,
+              else: {:hold, :codex_pass_pattern}
+
+          {:error, reason} ->
+            Logger.warning(
+              "AutoMerge: invalid auto_merge_pass_pattern=#{inspect(pattern)} reason=#{inspect(reason)}; treating as held"
+            )
+
+            {:hold, :codex_pass_pattern}
+        end
     end
   end
 
@@ -377,20 +408,36 @@ defmodule SymphonyElixir.AutoMerge do
   end
 
   defp do_merge(ctx) do
-    Logger.info(
-      "AutoMerge: all gates passed; transitioning to Merging item_id=#{ctx.item_id} url=#{ctx.pr_url}"
-    )
-
-    case Tracker.update_issue_state(ctx.item_id, "Merging") do
+    # Spec 4 §2.8a gate 5 (TOCTOU defense): re-check Human Review state
+    # immediately before the Merging transition. The earlier
+    # `gate_still_in_human_review/1` already ran at evaluate-gates time, but
+    # there's a window between gates 1-4 (Codex review duration + GH calls)
+    # and the actual merge. An operator flip to Rework/Cancelled in that
+    # window MUST abort the merge.
+    case gate_still_in_human_review(ctx) do
       :ok ->
-        run_gh_merge(ctx)
-
-      {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: failed to transition to Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}"
+        Logger.info(
+          "AutoMerge: all gates passed; transitioning to Merging item_id=#{ctx.item_id} url=#{ctx.pr_url}"
         )
 
-        {:error, {:transition_failed, reason}}
+        case Tracker.update_issue_state(ctx.item_id, "Merging") do
+          :ok ->
+            run_gh_merge(ctx)
+
+          {:error, reason} ->
+            Logger.warning(
+              "AutoMerge: failed to transition to Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}"
+            )
+
+            {:error, {:transition_failed, reason}}
+        end
+
+      {:hold, gate} ->
+        Logger.info(
+          "AutoMerge: operator flipped item out of Human Review during review; aborting merge item_id=#{ctx.item_id} gate=#{gate}"
+        )
+
+        {:ok, {:held, gate}}
     end
   end
 
@@ -401,7 +448,16 @@ defmodule SymphonyElixir.AutoMerge do
           "AutoMerge: gh pr merge succeeded; transitioning to Done item_id=#{ctx.item_id} url=#{ctx.pr_url}"
         )
 
-        _ = Tracker.update_issue_state(ctx.item_id, "Done")
+        case Tracker.update_issue_state(ctx.item_id, "Done") do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "AutoMerge: post-merge transition to Done failed; item left in Merging item_id=#{ctx.item_id} reason=#{inspect(reason)}"
+            )
+        end
+
         {:ok, :merged}
 
       {:error, reason} ->

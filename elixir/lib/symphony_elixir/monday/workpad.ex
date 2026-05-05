@@ -220,6 +220,14 @@ defmodule SymphonyElixir.Monday.Workpad do
   end
 
   defp truncate_for_codex_review(text) when is_binary(text) do
+    text
+    |> truncate_to_codex_review_cap()
+    |> defang_code_fences()
+  end
+
+  defp truncate_for_codex_review(_), do: ""
+
+  defp truncate_to_codex_review_cap(text) when is_binary(text) do
     if byte_size(text) <= @codex_review_max_output_bytes do
       String.trim_trailing(text)
     else
@@ -228,7 +236,18 @@ defmodule SymphonyElixir.Monday.Workpad do
     end
   end
 
-  defp truncate_for_codex_review(_), do: ""
+  # Codex output is wrapped in a triple-backtick fenced block so Monday
+  # renders it as preformatted text. If the output itself contains a
+  # ```` ``` ```` sequence (very common — Codex quotes diffs), the fence
+  # closes early and the rest of the body becomes raw Markdown. That's
+  # both a UX bug and a defense-in-depth concern: any token-shaped or
+  # PHI-shaped string in the orphaned tail would render with full
+  # Markdown semantics. Replace `` ``` `` with `` `` `​`` (zero-width
+  # joiner between the second and third backtick) so the visual is
+  # preserved but Monday can't tokenize the sequence as a fence.
+  defp defang_code_fences(text) when is_binary(text) do
+    String.replace(text, "```", "``​`")
+  end
 
   @spec render_crash(session(), String.t()) :: String.t()
   def render_crash(session, reason) do

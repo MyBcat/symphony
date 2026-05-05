@@ -64,6 +64,78 @@ defmodule SymphonyElixir.AutoMergeTest do
     def last_input, do: Process.get({__MODULE__, :last_input})
   end
 
+  defmodule ToctouTracker do
+    @moduledoc """
+    Stub Tracker for the M-1 (TOCTOU defense) test. Returns
+    "Human Review" on the first `fetch_issue_states_by_ids` call and
+    "Cancelled" on every subsequent call, simulating an operator flip
+    between gate 5 evaluation and the Merging transition.
+
+    Other Tracker callbacks no-op so AutoMerge can invoke them without
+    side effects. The test pid + counter are passed in via
+    `:persistent_term` so the stub doesn't need a per-test process.
+    """
+    @behaviour SymphonyElixir.Tracker
+
+    @impl true
+    def fetch_candidate_issues, do: {:ok, []}
+    @impl true
+    def fetch_candidate_issues_with_phi_findings,
+      do: {:ok, %{items: [], phi_offenders: []}}
+    @impl true
+    def fetch_issues_by_states(_), do: {:ok, []}
+
+    @impl true
+    def fetch_issue_states_by_ids(_ids) do
+      {test_pid, counter} = :persistent_term.get(:auto_merge_toctou_state)
+      :ok = :counters.add(counter, 1, 1)
+      n = :counters.get(counter, 1)
+      send(test_pid, {:fetch_issue_states_call, n})
+
+      state =
+        if n >= 2 do
+          "Cancelled"
+        else
+          "Human Review"
+        end
+
+      {:ok,
+       [
+         %SymphonyElixir.Tracker.Issue{
+           id: "11923096520",
+           identifier: "SYM-11923096520",
+           title: "test",
+           state: state,
+           url: "https://example.org/x",
+           assigned_to_worker: true
+         }
+       ]}
+    end
+
+    @impl true
+    def update_issue_state(_id, _state), do: :ok
+    @impl true
+    def upsert_workpad(_id, _body), do: :ok
+    @impl true
+    def set_pr_url(_id, _url), do: :ok
+    @impl true
+    def post_failure_update(_id, _body), do: :ok
+    @impl true
+    def post_pr_refusal(_id, _body), do: :ok
+    @impl true
+    def post_phi_refusal(_id, _body), do: :ok
+    @impl true
+    def post_codex_review(_id, _body), do: :ok
+    @impl true
+    def post_auto_merge_failure(_id, _body), do: :ok
+    @impl true
+    def acquire_heartbeat, do: :ok
+    @impl true
+    def release_heartbeat, do: :ok
+    @impl true
+    def validate_no_phi(_), do: :ok
+  end
+
   @item_id "11923096520"
   @pr_url "https://github.com/MyBcat/symphony/pull/42"
 
@@ -312,6 +384,98 @@ defmodule SymphonyElixir.AutoMergeTest do
       assert {:ok, {:held, :still_in_human_review}} = AutoMerge.evaluate_human_review(ctx)
 
       refute StubGH.merge_called?(@pr_url)
+    end
+  end
+
+  describe "evaluate_human_review/1 — block signal short-circuit (Spec 4 §2.8a B-2)" do
+    test "Codex output containing 'BLOCKING ISSUES FOUND' holds even when pass pattern also matches",
+         %{ctx: ctx} do
+      # Adversarial Codex output: contains both the spec's block signal
+      # AND the spec's pass phrase. The block signal MUST win — otherwise
+      # a substring match for "NO BLOCKING ISSUES" would let a clearly-
+      # blocking review auto-merge.
+      adversarial_output = """
+      Reviewed PR.
+
+      BLOCKING ISSUES FOUND:
+      1. Race condition in gate 5 (TOCTOU window before Merging write).
+      2. Auto-merge would proceed despite NO BLOCKING ISSUES being mentioned in the spec.
+      """
+
+      StubCodexReview.stub_review({:ok, adversarial_output})
+
+      assert {:ok, {:held, :codex_pass_pattern}} = AutoMerge.evaluate_human_review(ctx)
+
+      refute StubGH.merge_called?(@pr_url)
+    end
+
+    test "Codex output without block signal but with pass pattern → merges", %{ctx: ctx} do
+      StubCodexReview.stub_review(
+        {:ok, "Reviewed PR. All looks good. NO BLOCKING ISSUES"}
+      )
+
+      assert {:ok, :merged} = AutoMerge.evaluate_human_review(ctx)
+    end
+  end
+
+  describe "evaluate_human_review/1 — TOCTOU defense on Merging (Spec 4 §2.8a M-1)" do
+    test "operator flips item out of Human Review between gate evaluation and Merging write → no merge",
+         %{ctx: ctx} do
+      # Set up a stateful counter so the second `fetch_issue_states_by_ids`
+      # call (the one inside do_merge) returns a Cancelled state, while
+      # the first call (inside evaluate_gates) still returns Human Review.
+      test_pid = self()
+
+      # Spawn a tiny GenServer-ish process to track the call count.
+      counter = :counters.new(1, [])
+      :persistent_term.put(:auto_merge_toctou_state, {test_pid, counter})
+
+      try do
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, ToctouTracker)
+
+        assert {:ok, {:held, :still_in_human_review}} =
+                 AutoMerge.evaluate_human_review(ctx)
+
+        # Both fetch calls observed (gate 5 in evaluate_gates, then again in do_merge).
+        assert_received {:fetch_issue_states_call, 1}
+        assert_received {:fetch_issue_states_call, 2}
+
+        # gh pr merge MUST NOT have been called — the second check caught the flip.
+        refute StubGH.merge_called?(@pr_url)
+      after
+        :persistent_term.erase(:auto_merge_toctou_state)
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      end
+    end
+  end
+
+  describe "evaluate_human_review/1 — cross-URL idempotency (Spec 4 §2.8a M-6)" do
+    test "same item with TWO different PR URLs records both; re-detection of either is idempotent",
+         %{ctx: ctx} do
+      url_a = "https://github.com/MyBcat/symphony/pull/100"
+      url_b = "https://github.com/MyBcat/symphony/pull/200"
+
+      StubGH.stub_pr_diff_line_count(url_a, {:ok, 10})
+      StubGH.stub_pr_diff_line_count(url_b, {:ok, 20})
+
+      ctx_a = Map.put(ctx, :pr_url, url_a)
+      ctx_b = Map.put(ctx, :pr_url, url_b)
+
+      assert {:ok, :merged} = AutoMerge.evaluate_human_review(ctx_a)
+      assert {:ok, :merged} = AutoMerge.evaluate_human_review(ctx_b)
+
+      # Both URLs are now in the reviewed set for this item.
+      assert AutoMergeState.reviewed?(@item_id, url_a)
+      assert AutoMergeState.reviewed?(@item_id, url_b)
+
+      # Re-detection of EITHER url returns idempotent (does NOT clobber
+      # the other).
+      _ = Process.delete({StubGH, :merge_called?, url_a})
+      assert {:ok, :idempotent} = AutoMerge.evaluate_human_review(ctx_a)
+      refute StubGH.merge_called?(url_a)
+
+      # The other url remains marked reviewed.
+      assert AutoMergeState.reviewed?(@item_id, url_b)
     end
   end
 

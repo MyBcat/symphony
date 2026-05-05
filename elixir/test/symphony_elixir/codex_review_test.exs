@@ -51,6 +51,45 @@ defmodule SymphonyElixir.CodexReviewTest do
     end
   end
 
+  describe "Default env safety (Spec 4 §2.8a M-2)" do
+    test "review_env allowlist includes PATH/HOME/USER but excludes secret-bearing env vars" do
+      previous = Map.new(System.get_env())
+
+      try do
+        # Set a few env vars representative of the inputs the operator's
+        # shell normally exports plus the per-repo resolved secrets we
+        # MUST NOT propagate to the codex CLI.
+        System.put_env("PATH", previous["PATH"] || "/usr/bin")
+        System.put_env("HOME", previous["HOME"] || "/tmp")
+        System.put_env("USER", previous["USER"] || "test")
+        System.put_env("MONDAY_API_TOKEN", "monday-secret-test-value")
+        System.put_env("GITHUB_TOKEN", "ghp_should_not_propagate_test")
+        System.put_env("OPENAI_API_KEY", "sk-leaked-key-test")
+        System.put_env("ANTHROPIC_API_KEY", "sk-ant-leaked-test")
+
+        env = SymphonyElixir.CodexReview.Default.review_env()
+        env_map = Map.new(env)
+
+        assert Map.has_key?(env_map, "PATH")
+        assert Map.has_key?(env_map, "HOME")
+
+        refute Map.has_key?(env_map, "MONDAY_API_TOKEN")
+        refute Map.has_key?(env_map, "GITHUB_TOKEN")
+        refute Map.has_key?(env_map, "OPENAI_API_KEY")
+        refute Map.has_key?(env_map, "ANTHROPIC_API_KEY")
+      after
+        # Restore env to whatever it was before (best-effort — clearing
+        # added keys + restoring originals).
+        for key <- ["MONDAY_API_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] do
+          case Map.get(previous, key) do
+            nil -> System.delete_env(key)
+            value -> System.put_env(key, value)
+          end
+        end
+      end
+    end
+  end
+
   describe "Default.build_args/2" do
     test "renders codex exec --skip-git-repo-check + model + reasoning_effort + prompt" do
       args =

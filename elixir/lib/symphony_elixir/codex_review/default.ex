@@ -91,33 +91,82 @@ defmodule SymphonyElixir.CodexReview.Default do
     end
   end
 
-  defp do_run_codex(args, cwd, _timeout_ms) do
-    case System.cmd(@codex_command, args,
-           cd: cwd,
-           stderr_to_stdout: true,
-           env: review_env()
-         ) do
-      {output, 0} ->
+  # Run codex exec under a hard timeout via Task. System.cmd has no
+  # timeout option; if codex hangs, the calling Task would otherwise leak
+  # forever under the orchestrator's TaskSupervisor. Spawn the System.cmd
+  # call in an inner Task and force-kill it with `Task.shutdown(:brutal_kill)`
+  # if it doesn't return inside `timeout_ms`.
+  defp do_run_codex(args, cwd, timeout_ms) do
+    task =
+      Task.async(fn ->
+        try do
+          System.cmd(@codex_command, args,
+            cd: cwd,
+            stderr_to_stdout: true,
+            env: review_env()
+          )
+        rescue
+          e in ErlangError ->
+            {:error_rescue, Exception.message(e)}
+        end
+      end)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} ->
         {:ok, output}
 
-      {output, status} ->
+      {:ok, {output, status}} when is_integer(status) ->
         {:error, {:codex_review_failed, status, String.trim(output)}}
+
+      {:ok, {:error_rescue, message}} ->
+        {:error, {:codex_review_unavailable, message}}
+
+      {:exit, reason} ->
+        {:error, {:codex_review_unavailable, inspect(reason)}}
+
+      nil ->
+        # Task.shutdown returned nil → it was killed mid-execution.
+        {:error, {:codex_review_timeout, timeout_ms}}
     end
-  rescue
-    e in ErlangError ->
-      {:error, {:codex_review_unavailable, Exception.message(e)}}
   end
 
-  # Codex review must NOT inherit MONDAY_API_TOKEN or any per-repo resolved
-  # secrets — the review itself doesn't need them and removing them defends
-  # against accidental log leaks if Codex echoes its env. Inherit the
-  # operator's PATH and HOME so the binary can find its config.
-  defp review_env do
-    base = System.get_env() |> Map.new()
+  # Codex review uses an explicit env ALLOWLIST. Inheriting all env vars
+  # and denying a few known names (MONDAY_API_TOKEN, ANTHROPIC_API_KEY) is
+  # not safe enough — per-repo resolved secrets (Spec 4 §2.4
+  # `repos.<key>.secrets`) inject GITHUB_TOKEN, OPENAI_API_KEY, and other
+  # names that Codex's `--debug` env-echo or downstream tool calls could
+  # leak. Codex itself only needs PATH/HOME/USER plus its own
+  # CODEX_*-prefixed configuration; everything else is deliberately
+  # withheld.
+  @env_allowlist ~w(
+    PATH
+    HOME
+    USER
+    LANG
+    LC_ALL
+    TERM
+    TMPDIR
+    PWD
+    XDG_CONFIG_HOME
+    XDG_CACHE_HOME
+    XDG_DATA_HOME
+  )
 
-    Enum.reduce(["MONDAY_API_TOKEN", "ANTHROPIC_API_KEY"], base, fn key, env ->
-      Map.delete(env, key)
-    end)
-    |> Map.to_list()
+  @env_allowlist_prefixes ~w(CODEX_ OPENAI_BASE_URL)
+
+  @doc false
+  @spec review_env() :: [{String.t(), String.t()}]
+  def review_env do
+    System.get_env()
+    |> Enum.filter(fn {k, _v} -> env_var_allowed?(k) end)
   end
+
+  @doc false
+  @spec env_var_allowed?(term()) :: boolean()
+  def env_var_allowed?(name) when is_binary(name) do
+    name in @env_allowlist or
+      Enum.any?(@env_allowlist_prefixes, &String.starts_with?(name, &1))
+  end
+
+  def env_var_allowed?(_), do: false
 end
