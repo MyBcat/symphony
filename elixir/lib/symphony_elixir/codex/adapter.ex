@@ -15,7 +15,7 @@ defmodule SymphonyElixir.Codex.Adapter do
   @behaviour SymphonyElixir.AgentRuntime
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.ProjectTrust, Config, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -65,6 +65,7 @@ defmodule SymphonyElixir.Codex.Adapter do
 
     with :ok <- validate_profile_config(opts_or_config),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+         :ok <- maybe_ensure_local_codex_trust(expanded_workspace, worker_host),
          {:ok, command} <- command_for_session(opts_or_config),
          {:ok, port} <- start_port(expanded_workspace, worker_host, command) do
       metadata = port_metadata(port, worker_host)
@@ -89,6 +90,29 @@ defmodule SymphonyElixir.Codex.Adapter do
           stop_port(port)
           {:error, reason}
       end
+    end
+  end
+
+  # SSH-backed sessions execute Codex on the remote worker, where the
+  # `~/.codex/config.toml` trust file is owned by that host. Local trust
+  # automation only runs when worker_host is absent; remote workers are
+  # responsible for their own trust setup.
+  defp maybe_ensure_local_codex_trust(_workspace, worker_host) when is_binary(worker_host),
+    do: :ok
+
+  defp maybe_ensure_local_codex_trust(workspace, nil) do
+    case ProjectTrust.ensure_trusted(workspace) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Codex project trust update failed for workspace=#{workspace}: #{inspect(reason)}; " <>
+            "if Codex emits 'remoteControl/status/changed status: disabled' the workspace " <>
+            "must be added manually to ~/.codex/config.toml"
+        )
+
+        :ok
     end
   end
 
@@ -1285,7 +1309,7 @@ defmodule SymphonyElixir.Codex.Adapter do
         {:error, {:response_error, response_payload}}
 
       {:ok, %{} = other} ->
-        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
+        log_pre_response_message(other)
         with_timeout_response(port, request_id, timeout_ms, "")
 
       {:error, _} ->
@@ -1302,12 +1326,42 @@ defmodule SymphonyElixir.Codex.Adapter do
       |> String.slice(0, @max_stream_log_bytes)
 
     if text != "" do
-      if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
-        Logger.warning("Codex #{stream_label} output: #{text}")
-      else
-        Logger.debug("Codex #{stream_label} output: #{text}")
+      cond do
+        config_trust_warning?(text) ->
+          Logger.warning(
+            "Codex #{stream_label} flagged untrusted workspace " <>
+              "(SymphonyElixir.Codex.ProjectTrust auto-trusts on session start; " <>
+              "if you see this message check ~/.codex/config.toml is writable): #{text}"
+          )
+
+        String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) ->
+          Logger.warning("Codex #{stream_label} output: #{text}")
+
+        true ->
+          Logger.debug("Codex #{stream_label} output: #{text}")
       end
     end
+  end
+
+  defp config_trust_warning?(text) when is_binary(text) do
+    String.contains?(text, "until the project is trusted") or
+      String.contains?(text, "Project-local config, hooks, and exec policies are disabled")
+  end
+
+  defp log_pre_response_message(%{
+         "method" => "remoteControl/status/changed",
+         "params" => %{"status" => "disabled"}
+       }) do
+    Logger.warning(
+      "Codex remoteControl reported status=disabled while awaiting JSON-RPC response. " <>
+        "This typically means the workspace is not listed as a trusted project in " <>
+        "~/.codex/config.toml. SymphonyElixir.Codex.ProjectTrust auto-adds workspaces " <>
+        "on session start; if this message persists the trust write may have failed."
+    )
+  end
+
+  defp log_pre_response_message(payload) do
+    Logger.debug("Ignoring message while waiting for response: #{inspect(payload)}")
   end
 
   defp protocol_message_candidate?(data) do
