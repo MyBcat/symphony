@@ -16,7 +16,12 @@ defmodule SymphonyElixir.Claude.AdapterTest do
       assert Adapter.build_full_command(command, config) ==
                "env -u ANTHROPIC_API_KEY claude --print --output-format stream-json --input-format stream-json " <>
                  "--model claude-opus-4-7 --permission-mode acceptEdits " <>
-                 "--allowed-tools 'Read,Edit,Bash(git:*)'"
+                 "--allowed-tools 'Read,Edit,Bash(git:*)' --verbose"
+    end
+
+    test "appends --verbose only once when base command already includes it" do
+      assert Adapter.build_full_command("claude --print --verbose", %{model: "claude-opus-4-7"}) ==
+               "env -u ANTHROPIC_API_KEY claude --print --verbose --model claude-opus-4-7"
     end
 
     test "does not modify non-Claude commands" do
@@ -31,29 +36,29 @@ defmodule SymphonyElixir.Claude.AdapterTest do
 
     test "shell-quotes allowed tool names containing shell metacharacters" do
       assert Adapter.build_full_command("claude --print", %{allowed_tools: ["Bash(git:*)"]}) ==
-               "env -u ANTHROPIC_API_KEY claude --print --allowed-tools 'Bash(git:*)'"
+               "env -u ANTHROPIC_API_KEY claude --print --allowed-tools 'Bash(git:*)' --verbose"
     end
 
     test "detects an absolute path to claude as a Claude invocation" do
       assert Adapter.build_full_command("/usr/bin/claude --print", %{model: "claude-sonnet-4-6"}) ==
-               "env -u ANTHROPIC_API_KEY /usr/bin/claude --print --model claude-sonnet-4-6"
+               "env -u ANTHROPIC_API_KEY /usr/bin/claude --print --model claude-sonnet-4-6 --verbose"
     end
 
     test "detects claude-code as a Claude invocation" do
       assert Adapter.build_full_command("claude-code --print", %{model: "claude-sonnet-4-6"}) ==
-               "env -u ANTHROPIC_API_KEY claude-code --print --model claude-sonnet-4-6"
+               "env -u ANTHROPIC_API_KEY claude-code --print --model claude-sonnet-4-6 --verbose"
     end
 
     test "detects env-wrapped claude commands" do
       assert Adapter.build_full_command("env -u FOO claude --print", %{
                permission_mode: "acceptEdits"
              }) ==
-               "env -u ANTHROPIC_API_KEY env -u FOO claude --print --permission-mode acceptEdits"
+               "env -u ANTHROPIC_API_KEY env -u FOO claude --print --permission-mode acceptEdits --verbose"
     end
 
     test "shell-quotes model values containing shell metacharacters" do
       assert Adapter.build_full_command("claude --print", %{model: "opus;rm -rf /"}) ==
-               "env -u ANTHROPIC_API_KEY claude --print --model 'opus;rm -rf /'"
+               "env -u ANTHROPIC_API_KEY claude --print --model 'opus;rm -rf /' --verbose"
     end
 
     test "prefixes claude commands with env -u ANTHROPIC_API_KEY to force OAuth/keychain auth" do
@@ -62,7 +67,7 @@ defmodule SymphonyElixir.Claude.AdapterTest do
       # try to use it as a literal API key and get HTTP 401. Stripping it
       # forces the child to fall back to OAuth/keychain auth.
       assert Adapter.build_full_command("claude --print", %{model: "claude-opus-4-7"}) ==
-               "env -u ANTHROPIC_API_KEY claude --print --model claude-opus-4-7"
+               "env -u ANTHROPIC_API_KEY claude --print --model claude-opus-4-7 --verbose"
     end
   end
 

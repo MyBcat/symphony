@@ -66,11 +66,25 @@ defmodule SymphonyElixir.Claude.Adapter do
         |> append_flag("--model", get_field(config, :model))
         |> append_flag("--permission-mode", get_field(config, :permission_mode))
         |> append_allowed_tools(get_field(config, :allowed_tools))
+        |> append_verbose_if_missing(base_cmd)
         |> Enum.join(" ")
 
       "env -u ANTHROPIC_API_KEY " <> flagged
     else
       base_cmd
+    end
+  end
+
+  # Claude requires --verbose when using --print with --output-format=stream-json
+  # ("When using --print, --output-format=stream-json requires --verbose").
+  # Append it idempotently — only if neither --verbose nor -v already appears.
+  defp append_verbose_if_missing(parts, base_cmd) do
+    cmd_text = Enum.join(parts, " ") <> " " <> base_cmd
+
+    if String.match?(cmd_text, ~r/(^|\s)(--verbose|-v)(\s|$)/) do
+      parts
+    else
+      parts ++ ["--verbose"]
     end
   end
 
