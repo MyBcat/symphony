@@ -1535,7 +1535,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
 
         {total_us, {result, log}} =
           :timer.tc(fn ->
-            with_log(fn -> Adapter.run(workspace, "Tolerate untrusted-workspace noise", issue) end)
+            with_log_local(fn -> Adapter.run(workspace, "Tolerate untrusted-workspace noise", issue) end)
           end)
 
         # Should complete in well under 30s (acceptance criterion §1) and in
@@ -1693,7 +1693,9 @@ defmodule SymphonyElixir.Codex.AdapterTest do
     end
   end
 
-  defp with_log(fun) when is_function(fun, 0) do
+  # Renamed from with_log to avoid clash with ExUnit.CaptureLog.with_log/1 in
+  # newer ExUnit versions (auto-imported by use ExUnit.Case).
+  defp with_log_local(fun) when is_function(fun, 0) do
     parent = self()
     ref = make_ref()
 

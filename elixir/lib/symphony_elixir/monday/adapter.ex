@@ -479,17 +479,23 @@ defmodule SymphonyElixir.Monday.Adapter do
   defp redact_phi(_), do: ""
 
   defp redact_secret_fragments(body) when is_binary(body) do
-    body
-    |> Regex.replace(
-      ~r/\b(Bearer\s+)[A-Za-z0-9._~+\/=-]{12,}/i,
-      fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
-    )
-    |> Regex.replace(
-      ~r/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS)[A-Za-z0-9_]*\s*[:=]\s*)[^\s,;&]+/i,
-      fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
-    )
-    |> Regex.replace(
+    body =
+      Regex.replace(
+        ~r/\b(Bearer\s+)[A-Za-z0-9._~+\/=-]{12,}/i,
+        body,
+        fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
+      )
+
+    body =
+      Regex.replace(
+        ~r/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS)[A-Za-z0-9_]*\s*[:=]\s*)[^\s,;&]+/i,
+        body,
+        fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
+      )
+
+    Regex.replace(
       ~r/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/,
+      body,
       "[REDACTED-SECRET]"
     )
   end
