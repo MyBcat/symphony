@@ -22,17 +22,29 @@ services:
         OTP_VERSION: 28.1.4
         DEBIAN_VERSION: bookworm-20251104
 
+    # The escript requires an explicit acknowledgement flag — Symphony has no
+    # guardrails on the spawned coding-agent CLIs. Operators who want a
+    # different config file or extra flags can override `command:` locally.
+    command: ["/workspace/WORKFLOW.md", "--i-understand-that-this-will-be-running-without-the-usual-guardrails"]
+
     # Host networking so OAuth redirect URIs handed out by Claude / Codex /
     # Gemini login flows (which target localhost:<port> on the host) can
-    # complete inside the container without docker port translation.
+    # complete inside the container without docker port translation. This
+    # expands lateral-movement surface; acceptable here because Symphony is
+    # an authenticated single-tenant orchestrator. Document this in your own
+    # threat model.
     network_mode: host
 
     # Picks up MONDAY_API_TOKEN and any other tracker / model credentials.
     # bin/setup.sh creates an empty .env from .env.example if one is not
-    # already present, so this reference is always resolvable. Generate real
-    # values from AWS Secrets Manager via:
+    # already present, so this reference is always resolvable.
+    #
+    # MyBCAT operators (HIPAA-aware): prefer running the orchestrator under
+    # `secret_exec.py` so secrets never hit disk, e.g.:
     #   /mnt/d_drive/repos/finances/scripts/secret_exec.py \
-    #       --emit-env-file .env mybcat/symphony
+    #       --secret-env MONDAY_API_TOKEN=mybcat/integrations/api-keys/monday:api_token \
+    #       -- docker compose up
+    # Anything else: hand-populate .env from .env.example.
     # Never commit .env. See .gitignore.
     env_file:
       - .env
@@ -71,19 +83,27 @@ services:
       # CLI auth + tool binaries from the host. These paths assume the
       # recommended installs documented in BOOTSTRAP.md. Adjust as needed for
       # your environment.
+      #
+      # All three auth mounts are read-only so a compromised agent process
+      # in the container cannot mutate the host's OAuth state. Token refresh
+      # writes happen on the host before the container starts.
       - type: bind
         source: ${HOME}/.codex
         target: /home/symphony/.codex
+        read_only: true
         bind:
           create_host_path: true
       - type: bind
         source: ${HOME}/.claude
         target: /home/symphony/.claude
+        read_only: true
         bind:
           create_host_path: true
+      # Gemini CLI auth lives at ~/.gemini (not ~/.config/gemini).
       - type: bind
-        source: ${HOME}/.config/gemini
-        target: /home/symphony/.config/gemini
+        source: ${HOME}/.gemini
+        target: /home/symphony/.gemini
+        read_only: true
         bind:
           create_host_path: true
 

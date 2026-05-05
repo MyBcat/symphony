@@ -108,9 +108,10 @@ Open `elixir/WORKFLOW.md` and update at minimum:
 - `tracker.kind` — `monday` or `linear`.
 - For Monday: `tracker.board_id` and the status-column mapping.
 - For Linear: `tracker.project_slug`.
-- `tracker.api_key` — set to `$MONDAY_API_TOKEN` (Monday) or
+- `tracker.api_token` — set to `$MONDAY_API_TOKEN` (Monday) or
   `$LINEAR_API_KEY` (Linear). Never paste the literal token here; it would
-  be committed.
+  be committed. (Note: the YAML key is `api_token`, not `api_key`. The
+  config schema rejects the older name.)
 - `workspace.root` — where per-issue workspaces are written.
 - `hooks.after_create` — the `git clone <repo> .` line that seeds each new
   workspace with your codebase.
@@ -126,7 +127,7 @@ A minimal Monday-tracker example:
 tracker:
   kind: monday
   board_id: 8173460438
-  api_key: $MONDAY_API_TOKEN
+  api_token: $MONDAY_API_TOKEN
 workspace:
   root: ~/code/symphony-workspaces
 hooks:
@@ -148,21 +149,36 @@ Body: {{ issue.description }}
 
 ### Secrets — do not paste tokens into committed files
 
-Populate `.env` (which is gitignored) with the env-var values referenced
-from `WORKFLOW.md`. On MyBCAT machines, generate `.env` directly from AWS
-Secrets Manager rather than typing tokens into the file:
+Two paths are supported. Pick one.
+
+**Path A — runtime wrapping with `secret_exec.py` (recommended for MyBCAT
+machines, HIPAA-aware).** Secrets are pulled from AWS Secrets Manager and
+injected as env vars for the lifetime of the child process. Nothing is
+written to disk.
 
 ```bash
-/mnt/d_drive/repos/finances/scripts/secret_exec.py --emit-env-file .env mybcat/symphony
+/mnt/d_drive/repos/finances/scripts/secret_exec.py --secret-env MONDAY_API_TOKEN=mybcat/integrations/api-keys/monday:api_token -- ./elixir/bin/symphony ./elixir/WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
-`secret_exec.py` reads the `mybcat/symphony` namespace in AWS Secrets
-Manager and writes the resulting `KEY=VALUE` pairs to `.env`. Re-run any
-time you rotate a secret. The script is the recommended path for HIPAA
-operating-environment compliance because it keeps secrets off shell
-history, terminal scrollback, and disk in any other form.
+`--secret-env ENV=SECRET_ID[:FIELD]` maps an env var to a secret in AWS
+Secrets Manager, optionally selecting a JSON field. Repeat the flag for each
+additional secret. See `secret_exec.py --help` for full usage.
 
-For non-MyBCAT installs, edit `.env` by hand. Only commit `.env.example`.
+For Docker:
+
+```bash
+/mnt/d_drive/repos/finances/scripts/secret_exec.py --secret-env MONDAY_API_TOKEN=mybcat/integrations/api-keys/monday:api_token -- docker compose up
+```
+
+**Path B — hand-populated `.env` (non-MyBCAT installs).** Copy
+`.env.example` to `.env` and fill in the `MONDAY_API_TOKEN`,
+`LINEAR_API_KEY`, or model API keys you need. `.env` is gitignored. Only
+`.env.example` is committed.
+
+```bash
+cp .env.example .env
+${EDITOR:-vi} .env
+```
 
 ---
 
@@ -176,7 +192,7 @@ re-used by subsequent runs.
 |------------------|------------------------------------------|---------------------------|
 | Claude Code      | `claude /login`                          | `~/.claude/`              |
 | Codex            | `codex login`                            | `~/.codex/`               |
-| Gemini           | `gemini auth login`                      | `~/.config/gemini/`       |
+| Gemini           | `gemini auth login`                      | `~/.gemini/`              |
 
 If Symphony is running inside Docker, the bundled `docker-compose.yml`
 already mounts those three host directories into the container, so a host
@@ -233,22 +249,22 @@ docker compose up
 ```
 
 This starts the `symphony` service in the foreground using
-`./elixir/WORKFLOW.md` as the workflow file. To run a smoke check that
-just exercises the escript:
+`./elixir/WORKFLOW.md` as the workflow file. The compose file already
+embeds the required `--i-understand-that-this-will-be-running-without-the-usual-guardrails`
+flag in `command:`, so a plain `docker compose up` boots Symphony.
+
+To run a smoke check that just exercises the escript without the
+acknowledgement flag (it will print the guardrails banner and exit
+non-zero — that is the smoke success signal):
 
 ```bash
-docker compose run --rm symphony --help
+docker compose run --rm --entrypoint /usr/local/bin/symphony symphony /workspace/WORKFLOW.md
 ```
 
-The escript does not implement an explicit `--help` switch; it falls
-through to the usage banner. That is expected — the smoke test is checking
-that the binary inside the image actually executes.
-
-To pass additional flags through to Symphony:
+To pass additional flags through to Symphony in a one-shot run:
 
 ```bash
-docker compose run --rm symphony /workspace/WORKFLOW.md --port 4000 \
-    --i-understand-that-this-will-be-running-without-the-usual-guardrails
+docker compose run --rm symphony /workspace/WORKFLOW.md --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ---

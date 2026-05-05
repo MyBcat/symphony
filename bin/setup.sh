@@ -116,9 +116,13 @@ cat <<'EOF'
 [setup] Next steps:
 [setup]   1. Edit elixir/WORKFLOW.md to point at your tracker (Monday board
 [setup]      or Linear project), set repo URLs, and tune agent limits.
-[setup]   2. Populate .env (gitignored). On MyBCAT machines:
+[setup]   2. Populate .env (gitignored). On MyBCAT machines, prefer wrapping
+[setup]      the run with secret_exec.py so secrets stay off disk:
 [setup]        /mnt/d_drive/repos/finances/scripts/secret_exec.py \
-[setup]            --emit-env-file .env mybcat/symphony
+[setup]            --secret-env MONDAY_API_TOKEN=mybcat/integrations/api-keys/monday:api_token \
+[setup]            -- ./elixir/bin/symphony ./elixir/WORKFLOW.md \
+[setup]                --i-understand-that-this-will-be-running-without-the-usual-guardrails
+[setup]      Otherwise: hand-populate .env from .env.example.
 [setup]   3. Authenticate the coding-agent CLIs you plan to use. Each is
 [setup]      an interactive browser login tied to the host user:
 [setup]        claude  login          (or `claude /login`)
