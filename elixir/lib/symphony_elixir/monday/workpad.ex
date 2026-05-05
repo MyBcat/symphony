@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Monday.Workpad do
   """
 
   @marker "## Symphony Workpad"
+  @pr_refusal_marker "## Symphony PR Refusal"
 
   @type session :: %{
           required(:identifier) => String.t(),
@@ -53,6 +54,34 @@ defmodule SymphonyElixir.Monday.Workpad do
     Profile: `#{session.profile_name}`
 
     #{summary}
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony PR Refusal` Monday Update for an agent PR
+  that violated the M-8 PR safety rules. The marker is part of the body so
+  Monday's update history clearly tags refusals separately from regular
+  workpad / failure traffic.
+
+  `reason_label` is the structured reason emitted by `PRSafety.evaluate_pr/2`
+  (e.g. `"branch_convention_violation: got <head>, expected <pattern>"` or
+  `"force_push_detected"`).
+  """
+  @spec render_pr_refusal(session(), String.t()) :: String.t()
+  def render_pr_refusal(session, reason_label) do
+    stamp = stamp_line(session)
+
+    """
+    #{@pr_refusal_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Refusal
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+    Reason: `#{reason_label}`
     """
   end
 

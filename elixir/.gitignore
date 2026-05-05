@@ -46,6 +46,10 @@ erl_crash.dump
 status.txt
 .codex/original-user-prompt.txt
 
+# Symphony PR safety state (M-8). Persists per-item PR head SHAs across runs;
+# never commit operator-local state.
+/state/
+
 # Also ignore archive artifacts (built via "mix archive.build").
 *.ez
 

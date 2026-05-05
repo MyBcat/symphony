@@ -113,6 +113,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   @workpad_marker "## Symphony Workpad"
   @failure_marker "## Symphony Failures"
   @heartbeat_marker "## Symphony Heartbeat"
+  @pr_refusal_marker "## Symphony PR Refusal"
   @status_label_cache_ttl_ms :timer.minutes(5)
 
   # Cap a single failure update body to 8 KiB to stay well under Monday's
@@ -439,6 +440,19 @@ defmodule SymphonyElixir.Monday.Adapter do
   def post_failure_update(item_id, body) do
     safe_body = sanitize_failure_body(body || "")
     full_body = "#{@failure_marker}\n#{safe_body}"
+    capped = cap_failure_body(full_body)
+
+    case client_module().graphql(@create_update, %{"itemId" => parse_item_id(item_id), "body" => capped}, []) do
+      {:ok, %{"data" => %{"create_update" => %{"id" => _}}}} -> :ok
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected_response, other}}
+    end
+  end
+
+  @impl true
+  def post_pr_refusal(item_id, body) do
+    safe_body = sanitize_failure_body(body || "")
+    full_body = ensure_marker(safe_body, @pr_refusal_marker)
     capped = cap_failure_body(full_body)
 
     case client_module().graphql(@create_update, %{"itemId" => parse_item_id(item_id), "body" => capped}, []) do

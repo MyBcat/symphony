@@ -136,6 +136,40 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
     end
   end
 
+  describe "render_pr_refusal/2" do
+    test "renders the Symphony PR Refusal marker as the body header" do
+      session = %{
+        identifier: "SYM-11923258050",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_default"
+      }
+
+      body =
+        Workpad.render_pr_refusal(
+          session,
+          "branch_convention_violation: got main, expected symphony/SYM-11923258050/attempt-N"
+        )
+
+      assert String.starts_with?(body, "## Symphony PR Refusal")
+      assert body =~ "Refusal"
+      assert body =~ "codex_default"
+      assert body =~ "branch_convention_violation"
+      assert body =~ "symphony/SYM-11923258050/attempt-N"
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "renders force_push_detected reason verbatim" do
+      session = %{identifier: "SYM-1", profile_name: "claude_test"}
+      body = Workpad.render_pr_refusal(session, "force_push_detected")
+
+      assert body =~ "## Symphony PR Refusal"
+      assert body =~ "force_push_detected"
+      assert body =~ "claude_test"
+    end
+  end
+
   describe "tail_lines/2" do
     test "returns the last n lines, joined by newline" do
       text = "a\nb\nc\nd\ne"

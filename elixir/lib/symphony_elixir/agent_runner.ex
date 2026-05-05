@@ -13,6 +13,7 @@ defmodule SymphonyElixir.AgentRunner do
     Config,
     Monday.PRDetector,
     Monday.Workpad,
+    PRSafety,
     Profile,
     ProfileResolver,
     PromptBuilder,
@@ -24,6 +25,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   @summary_filename "_symphony_summary.md"
   @summary_max_bytes 32_768
+  @pr_scan_buffer_max_chars 2_048
   @default_profile_name "codex_default"
 
   @adapter_for_kind %{
@@ -663,6 +665,8 @@ defmodule SymphonyElixir.AgentRunner do
       %{
         session: session,
         pr_url_written?: false,
+        pr_refused?: false,
+        pr_scan_buffer: "",
         session_started_emitted?: false
       }
     end)
@@ -843,15 +847,20 @@ defmodule SymphonyElixir.AgentRunner do
     issue_id = issue_id(issue)
 
     if is_binary(issue_id) do
-      {session, pr_url_written?} =
-        Agent.get(writer_pid, fn state -> {state.session, state.pr_url_written?} end)
+      {session, pr_url_written?, pr_refused?} =
+        Agent.get(writer_pid, fn state ->
+          {state.session, state.pr_url_written?, state.pr_refused?}
+        end)
 
       case read_summary(Map.get(session, :workspace_path)) do
         {:ok, summary_body} ->
           body = Workpad.render_completion(session, summary_body)
           _ = Tracker.upsert_workpad(issue_id, body)
 
-          if pr_url_written? do
+          # M-8 PR safety: if PRSafety refused the PR (branch convention or
+          # force-push violation), the item is already in `Cancelled`. Do not
+          # transition to Human Review and undo the refusal.
+          if pr_url_written? and not pr_refused? do
             _ = Tracker.update_issue_state(issue_id, "Human Review")
           end
 
@@ -877,29 +886,19 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_detect_pr_url(writer_pid, issue, message) do
     issue_id = issue_id(issue)
 
-    if is_binary(issue_id) do
-      already_written? = Agent.get(writer_pid, fn state -> state.pr_url_written? end)
+    if is_binary(issue_id) and is_pid(writer_pid) and Process.alive?(writer_pid) do
+      {already_written?, scan_buffer} =
+        Agent.get(writer_pid, fn state ->
+          {state.pr_url_written?, Map.get(state, :pr_scan_buffer, "")}
+        end)
 
       if !already_written? do
-        case scan_message_for_pr(message) do
+        case scan_message_for_pr(message, scan_buffer) do
           {:ok, url} ->
-            updated? =
-              Agent.get_and_update(writer_pid, fn state ->
-                if state.pr_url_written? do
-                  {false, state}
-                else
-                  {true, %{state | pr_url_written?: true}}
-                end
-              end)
+            handle_detected_pr_url(writer_pid, issue_id, url)
 
-            if updated? do
-              _ = Tracker.set_pr_url(issue_id, url)
-            end
-
-            :ok
-
-          :no_match ->
-            :ok
+          {:no_match, next_buffer} ->
+            Agent.update(writer_pid, fn state -> %{state | pr_scan_buffer: next_buffer} end)
         end
       end
     end
@@ -907,25 +906,86 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp scan_message_for_pr(message) when is_map(message) do
-    [Map.get(message, :raw), Map.get(message, :payload)]
-    |> Enum.reduce_while(:no_match, fn candidate, acc ->
-      case scan_value_for_pr(candidate) do
-        {:ok, _url} = hit -> {:halt, hit}
-        :no_match -> {:cont, acc}
+  # M-8 PR safety: route a freshly detected PR URL through `PRSafety.evaluate_pr/2`
+  # and dispatch the resulting Monday writes (set_pr_url + Human Review on a
+  # clean first detection; refusal Workpad + Cancelled on branch / force-push
+  # violations; no-op on idempotent re-detection).
+  defp handle_detected_pr_url(writer_pid, issue_id, url) do
+    claimed? =
+      Agent.get_and_update(writer_pid, fn state ->
+        if state.pr_url_written? do
+          {false, state}
+        else
+          {true, %{state | pr_url_written?: true}}
+        end
+      end)
+
+    if claimed? do
+      case PRSafety.evaluate_pr(url, issue_id) do
+        {:ok, :transition} ->
+          _ = Tracker.set_pr_url(issue_id, url)
+          _ = Tracker.update_issue_state(issue_id, "Human Review")
+          :ok
+
+        {:ok, :idempotent_no_force_push} ->
+          # Already recorded for this item with the same URL; the prior run
+          # already wrote PR URL + Human Review. Don't duplicate writes.
+          :ok
+
+        {:error, refusal} ->
+          emit_pr_refusal(writer_pid, issue_id, refusal)
+          :ok
       end
-    end)
+    else
+      :ok
+    end
   end
 
-  defp scan_message_for_pr(_), do: :no_match
+  defp emit_pr_refusal(writer_pid, issue_id, refusal) do
+    session =
+      Agent.get_and_update(writer_pid, fn state ->
+        {state.session, %{state | pr_refused?: true}}
+      end)
 
-  defp scan_value_for_pr(value) when is_binary(value), do: PRDetector.scan(value)
+    label = PRSafety.reason_label(refusal)
+    body = Workpad.render_pr_refusal(session, label)
 
-  defp scan_value_for_pr(value) when is_map(value) or is_list(value) do
-    PRDetector.scan(safe_inspect(value))
+    _ = Tracker.post_pr_refusal(issue_id, body)
+    _ = Tracker.update_issue_state(issue_id, "Cancelled")
+
+    Logger.warning("Symphony refused PR for issue_id=#{issue_id}: #{label}")
+
+    :ok
   end
 
-  defp scan_value_for_pr(_), do: :no_match
+  defp scan_message_for_pr(message, prior_buffer) when is_map(message) do
+    current =
+      [Map.get(message, :raw), Map.get(message, :payload)]
+      |> Enum.map(&scan_text_for_value/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n")
+
+    buffer = trim_pr_scan_buffer(to_string(prior_buffer) <> current)
+
+    case PRDetector.scan(buffer) do
+      {:ok, _url} = hit -> hit
+      :no_match -> {:no_match, buffer}
+    end
+  end
+
+  defp scan_message_for_pr(_, prior_buffer), do: {:no_match, to_string(prior_buffer)}
+
+  defp scan_text_for_value(value) when is_binary(value), do: value
+
+  defp scan_text_for_value(value) when is_map(value) or is_list(value) do
+    safe_inspect(value)
+  end
+
+  defp scan_text_for_value(_), do: ""
+
+  defp trim_pr_scan_buffer(buffer) do
+    String.slice(buffer, -@pr_scan_buffer_max_chars, @pr_scan_buffer_max_chars) || buffer
+  end
 
   defp safe_inspect(value) do
     try do
