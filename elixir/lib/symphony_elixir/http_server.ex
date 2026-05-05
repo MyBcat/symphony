@@ -24,6 +24,12 @@ defmodule SymphonyElixir.HttpServer do
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
+        if host in ["0.0.0.0", "[::]", "::"] do
+          raise RuntimeError,
+                "Symphony dashboard MUST NOT bind to #{host} (HIPAA — agent stderr can leak). " <>
+                  "Set server.host to 127.0.0.1 in WORKFLOW.md."
+        end
+
         with {:ok, ip} <- parse_host(host) do
           endpoint_opts = [
             server: true,
