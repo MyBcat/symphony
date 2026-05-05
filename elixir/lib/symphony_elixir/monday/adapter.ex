@@ -881,7 +881,10 @@ defmodule SymphonyElixir.Monday.Adapter do
       {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
         items =
           Enum.map(raw_items, fn raw ->
-            %{id: to_string(Map.get(raw, "id", "")), name: Map.get(raw, "name", "")}
+            %{
+              id: to_string(Map.get(raw, "id", "")),
+              name: Map.get(raw, "name") || ""
+            }
           end)
 
         {:ok, items}

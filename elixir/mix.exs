@@ -28,6 +28,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
           SymphonyElixir.Workspace,
+          SymphonyElixir.E2E.SymphonyRunner,
+          Mix.Tasks.Symphony.E2eNightly,
           SymphonyElixir.Secrets.Resolver,
           SymphonyElixir.Secrets.Scrubber,
           SymphonyElixir.Secrets.BootCheck,

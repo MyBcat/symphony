@@ -34,6 +34,7 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
   use Mix.Task
 
   alias SymphonyElixir.E2E.Harness
+  alias SymphonyElixir.E2E.SymphonyRunner
   alias SymphonyElixir.Monday.Adapter
 
   @shortdoc "Live e2e nightly smoke against a sandbox Monday board"
@@ -342,100 +343,8 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
       clock: &DateTime.utc_now/0,
       monotonic_now_ms: fn -> System.monotonic_time(:millisecond) end,
       sleeper: &Process.sleep/1,
-      symphony_subprocess: &spawn_symphony_subprocess/1,
+      symphony_subprocess: &SymphonyRunner.spawn/1,
       harness_run: &Harness.run/2
     }
-  end
-
-  defp spawn_symphony_subprocess(opts) do
-    Process.flag(:trap_exit, true)
-
-    binary = Keyword.fetch!(opts, :binary)
-    log_path = Keyword.fetch!(opts, :log_path)
-    runner_opts = Keyword.fetch!(opts, :opts)
-    workflow_path = Keyword.fetch!(runner_opts, :workflow_path)
-
-    File.mkdir_p!(Path.dirname(log_path))
-    {:ok, log_io} = File.open(log_path, [:write, :binary])
-
-    args = [
-      "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
-      workflow_path
-    ]
-
-    binary_path = System.find_executable(binary) || binary
-
-    cond do
-      not File.regular?(binary_path) ->
-        File.close(log_io)
-        {:error, {:symphony_binary_not_found, binary}, ""}
-
-      true ->
-        port =
-          Port.open({:spawn_executable, binary_path}, [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            {:args, args}
-          ])
-
-        os_pid = port_os_pid(port)
-        result = collect_port_output(port, log_io, log_path, os_pid)
-        File.close(log_io)
-        result
-    end
-  end
-
-  defp port_os_pid(port) do
-    case :erlang.port_info(port, :os_pid) do
-      {:os_pid, pid} -> pid
-      _ -> nil
-    end
-  end
-
-  defp collect_port_output(port, log_io, log_path, os_pid) do
-    receive do
-      {^port, {:data, data}} ->
-        IO.binwrite(log_io, data)
-        collect_port_output(port, log_io, log_path, os_pid)
-
-      {^port, {:exit_status, 0}} ->
-        {:ok, %{log_tail: tail_log(log_path)}}
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit_nonzero, status}, tail_log(log_path)}
-
-      {:EXIT, _from, reason} ->
-        # Harness polling loop hit the desired terminal state and called
-        # Task.shutdown/2 on us. trap_exit lets us catch the :shutdown signal
-        # so the OS subprocess actually dies (Erlang ports do not propagate
-        # signals on close by default).
-        _ = maybe_kill_os_pid(os_pid)
-        {:error, {:shutdown, reason}, tail_log(log_path)}
-    after
-      30_000 -> collect_port_output(port, log_io, log_path, os_pid)
-    end
-  end
-
-  defp maybe_kill_os_pid(nil), do: :ok
-
-  defp maybe_kill_os_pid(os_pid) when is_integer(os_pid) do
-    System.cmd("kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    Process.sleep(2_000)
-    System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    :ok
-  end
-
-  defp tail_log(path) do
-    case File.read(path) do
-      {:ok, content} ->
-        content
-        |> String.split("\n")
-        |> Enum.take(-200)
-        |> Enum.join("\n")
-
-      _ ->
-        ""
-    end
   end
 end
