@@ -6,7 +6,7 @@ defmodule SymphonyElixir.StatusDashboard do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, HttpServer}
+  alias SymphonyElixir.{Config, CostMeter, HttpServer}
   alias SymphonyElixir.Orchestrator
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -361,7 +361,10 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow)
+         ] ++
+           cost_line_lines() ++
+         [
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
@@ -379,14 +382,17 @@ defmodule SymphonyElixir.StatusDashboard do
         |> Enum.join("\n")
 
       :error ->
-        [
-          colorize("╭─ SYMPHONY STATUS", @ansi_bold),
-          colorize("│ Orchestrator snapshot unavailable", @ansi_red),
-          colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
-          format_project_link_lines(),
-          format_project_refresh_line(nil),
-          closing_border()
-        ]
+        ([
+           colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+           colorize("│ Orchestrator snapshot unavailable", @ansi_red),
+           colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan)
+         ] ++
+           cost_line_lines() ++
+           [
+             format_project_link_lines(),
+             format_project_refresh_line(nil),
+             closing_border()
+           ])
         |> List.flatten()
         |> Enum.join("\n")
     end
@@ -920,6 +926,63 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp in_bucket?(timestamp, bucket_start, bucket_end, false),
     do: timestamp >= bucket_start and timestamp < bucket_end
+
+  # Returns a list so the dashboard layout can `++` it in-place. Empty list
+  # when the kill switch isn't configured (the spec ties spend display to
+  # cap utilization, so surfacing a zero-spend / no-cap row would just be
+  # noise on operators that haven't enabled cost guardrails).
+  defp cost_line_lines do
+    case cost_meter_snapshot() do
+      %{spend_usd: spend, cap_usd: cap} = snapshot when is_number(cap) and cap > 0 ->
+        remaining = Map.get(snapshot, :remaining_usd, max(0.0, cap - spend))
+        spend_color = cost_color(spend, cap)
+
+        line =
+          colorize("│ Cost: ", @ansi_bold) <>
+            colorize("$#{format_usd(spend)}", spend_color) <>
+            colorize(" / ", @ansi_gray) <>
+            colorize("$#{format_usd(cap)}", @ansi_gray) <>
+            colorize(" | ", @ansi_gray) <>
+            colorize("remaining $#{format_usd(remaining)}", @ansi_yellow)
+
+        [line]
+
+      _ ->
+        []
+    end
+  end
+
+  defp cost_meter_snapshot do
+    case Process.whereis(CostMeter) do
+      pid when is_pid(pid) ->
+        try do
+          CostMeter.snapshot(pid)
+        catch
+          :exit, _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp cost_color(spend, cap) when is_number(spend) and is_number(cap) and cap > 0 do
+    ratio = spend / cap
+
+    cond do
+      ratio >= 1.0 -> @ansi_red
+      ratio >= 0.8 -> @ansi_orange
+      true -> @ansi_green
+    end
+  end
+
+  defp cost_color(_spend, _cap), do: @ansi_green
+
+  defp format_usd(value) when is_number(value) do
+    :erlang.float_to_binary(value * 1.0, decimals: 2)
+  end
+
+  defp format_usd(_), do: "0.00"
 
   defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
 

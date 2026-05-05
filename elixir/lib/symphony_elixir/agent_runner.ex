@@ -11,6 +11,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   alias SymphonyElixir.{
     Config,
+    CostMeter,
     Monday.PRDetector,
     Monday.Workpad,
     PRSafety,
@@ -79,6 +80,15 @@ defmodule SymphonyElixir.AgentRunner do
 
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
+        :ok
+
+      {:error, {:cost_cap_exceeded, _refusal}} ->
+        # Spec M-3 / SYM-11923119477 AC4: cost cap refusals already posted
+        # the `## Symphony Cost Cap` workpad; the item must stay in
+        # `Symphony Ready` so the operator can bump the cap or wait for
+        # UTC midnight. Exit :normal so the orchestrator's DOWN handler
+        # treats this as a clean completion + continuation reschedule
+        # rather than a dispatch failure.
         :ok
 
       {:error, reason} ->
@@ -173,6 +183,14 @@ defmodule SymphonyElixir.AgentRunner do
         :erlang.raise(kind, reason, __STACKTRACE__)
     else
       {:error, {:profile_resolution_failed, _reason}} = err ->
+        err
+
+      {:error, {:cost_cap_exceeded, _refusal}} = err ->
+        # Cost cap refusal already posted its own `## Symphony Cost Cap`
+        # workpad and intentionally leaves the item in `Symphony Ready` so
+        # the orchestrator's poll loop revisits it after rollover or
+        # operator cap bump. Skip the generic failure update +
+        # `finalize_crash` (which would transition to `Cancelled`).
         err
 
       {:error, reason} = err ->
@@ -273,12 +291,100 @@ defmodule SymphonyElixir.AgentRunner do
     }
   end
 
-  defp codex_message_handler(recipient, issue, writer_pid) do
+  defp codex_message_handler(recipient, issue, writer_pid, profile) do
     fn message ->
       observe_codex_message(writer_pid, issue, message)
+      observe_token_usage_for_cost_meter(profile, message)
       send_codex_update(recipient, issue, message)
     end
   end
+
+  # Forward per-turn token usage to CostMeter so the running daily total
+  # tracks every Claude/Codex/Gemini agent run. We hook the
+  # `:turn_completed` envelope (which carries the *final* usage for that
+  # turn) rather than `:turn_delta` events (Claude emits per-message
+  # `usage:` payloads on every assistant chunk, which would double-count
+  # if added each time). Each turn's tokens are reported exactly once on
+  # the `:turn_completed` boundary.
+  defp observe_token_usage_for_cost_meter(%Profile{} = profile, %{event: :turn_completed} = message) do
+    case extract_token_delta(message) do
+      :no_tokens ->
+        :ok
+
+      {in_tokens, out_tokens} when in_tokens + out_tokens > 0 ->
+        case Process.whereis(CostMeter) do
+          pid when is_pid(pid) ->
+            try do
+              _ = CostMeter.add(pid, profile, %{in_tokens: in_tokens, out_tokens: out_tokens})
+            catch
+              :exit, _ -> :ok
+            end
+
+          _ ->
+            :ok
+        end
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp observe_token_usage_for_cost_meter(_profile, _message), do: :ok
+
+  # Pull `(in_tokens, out_tokens)` off the message envelope. Returns
+  # `:no_tokens` when the message has no usable counters, otherwise a 2-tuple
+  # of non-negative integers. We accept multiple shapes because Codex puts
+  # absolute totals under `:usage` while Claude/Gemini emit per-turn
+  # `:tokens` snapshots — both are normalized by the AgentRuntime
+  # translators above.
+  defp extract_token_delta(%{usage: usage}) when is_map(usage) do
+    extract_token_delta_from_usage(usage)
+  end
+
+  defp extract_token_delta(_message), do: :no_tokens
+
+  defp extract_token_delta_from_usage(usage) when is_map(usage) do
+    # Cover all three adapter shapes:
+    #   Claude: %{input: <int>, output: <int>, ...}
+    #   Gemini: %{prompt: <int>, candidates: <int>, ...}
+    #   Codex/raw JSON: %{"input_tokens" => <int>, "output_tokens" => <int>}
+    in_keys = [
+      "input_tokens", :input_tokens, "in_tokens", :in_tokens, "input", :input,
+      "prompt_tokens", :prompt_tokens, "prompt", :prompt,
+      "promptTokens", :promptTokens
+    ]
+
+    out_keys = [
+      "output_tokens", :output_tokens, "out_tokens", :out_tokens, "output", :output,
+      "candidates_tokens", :candidates_tokens, "candidates", :candidates,
+      "completion_tokens", :completion_tokens, "completionTokens", :completionTokens
+    ]
+
+    in_tokens = first_int(usage, in_keys)
+    out_tokens = first_int(usage, out_keys)
+
+    cond do
+      is_integer(in_tokens) or is_integer(out_tokens) ->
+        {clamp_non_neg_int(in_tokens), clamp_non_neg_int(out_tokens)}
+
+      true ->
+        :no_tokens
+    end
+  end
+
+  defp first_int(map, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) -> value
+        _ -> nil
+      end
+    end)
+  end
+
+  defp clamp_non_neg_int(value) when is_integer(value) and value >= 0, do: value
+  defp clamp_non_neg_int(_), do: 0
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -318,33 +424,90 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher =
       Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    adapter = adapter_for_kind(profile.kind)
-    session_config = build_session_config(profile, worker_host)
+    case check_cost_cap(profile, max_turns, issue, writer_pid) do
+      :ok ->
+        adapter = adapter_for_kind(profile.kind)
+        session_config = build_session_config(profile, worker_host)
 
-    Logger.info(
-      "Dispatching agent run for #{issue_context(issue)} profile=#{profile.name} kind=#{profile.kind}"
+        Logger.info(
+          "Dispatching agent run for #{issue_context(issue)} profile=#{profile.name} kind=#{profile.kind}"
+        )
+
+        with {:ok, session} <- adapter.start_session(workspace, session_config) do
+          try do
+            do_run_agent_turns(
+              adapter,
+              profile,
+              session,
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              issue_state_fetcher,
+              1,
+              max_turns,
+              writer_pid
+            )
+          after
+            record_native_tokens(adapter, session, profile, codex_update_recipient, issue)
+            adapter.stop_session(session)
+          end
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Spec M-3 / SYM-11923119477 AC4 — refuse new dispatches when today's
+  # spend plus the estimated dispatch cost exceeds `cost_cap.daily_usd`.
+  # On refusal: log a warning, post a `## Symphony Cost Cap` Workpad block
+  # via Tracker (Spec 1 DL-005 requires Monday writes go through the
+  # Adapter, which `Tracker.upsert_workpad/2` already does), and leave the
+  # item in `Symphony Ready` so the orchestrator's poll loop revisits it
+  # after rollover or operator action.
+  defp check_cost_cap(%Profile{} = profile, max_turns, %Issue{} = issue, writer_pid) do
+    case Process.whereis(CostMeter) do
+      pid when is_pid(pid) ->
+        do_check_cost_cap(pid, profile, max_turns, issue, writer_pid)
+
+      _ ->
+        # CostMeter not started (e.g., unit tests for AgentRunner that
+        # bypass the application supervisor). Treat as no cap configured.
+        :ok
+    end
+  end
+
+  defp do_check_cost_cap(meter_pid, profile, max_turns, issue, writer_pid) do
+    case CostMeter.can_dispatch?(meter_pid, profile, max_turns) do
+      :ok ->
+        :ok
+
+      {:error, refusal} ->
+        emit_cost_cap_refusal(writer_pid, issue, profile, refusal)
+        {:error, {:cost_cap_exceeded, refusal}}
+    end
+  end
+
+  defp emit_cost_cap_refusal(writer_pid, %Issue{} = issue, %Profile{} = profile, refusal) do
+    {:cost_cap_exceeded, scope, current, cap, estimated} = refusal
+    issue_id = issue_id(issue)
+
+    Logger.warning(
+      "Symphony cost cap exceeded for #{issue_context(issue)} profile=#{profile.name} scope=#{scope} current=$#{:erlang.float_to_binary(current * 1.0, decimals: 2)} cap=$#{:erlang.float_to_binary(cap * 1.0, decimals: 2)} estimated=$#{:erlang.float_to_binary(estimated * 1.0, decimals: 2)}"
     )
 
-    with {:ok, session} <- adapter.start_session(workspace, session_config) do
+    if is_pid(writer_pid) and Process.alive?(writer_pid) and is_binary(issue_id) do
       try do
-        do_run_agent_turns(
-          adapter,
-          profile,
-          session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          opts,
-          issue_state_fetcher,
-          1,
-          max_turns,
-          writer_pid
-        )
-      after
-        record_native_tokens(adapter, session, profile, codex_update_recipient, issue)
-        adapter.stop_session(session)
+        session = Agent.get(writer_pid, fn state -> state.session end)
+        body = CostMeter.render_cap_workpad(session, refusal)
+        _ = Tracker.upsert_workpad(issue_id, body)
+      catch
+        :exit, _ -> :ok
       end
     end
+
+    :ok
   end
 
   defp do_run_agent_turns(
@@ -361,7 +524,7 @@ defmodule SymphonyElixir.AgentRunner do
          writer_pid
        ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
-    handler = codex_message_handler(codex_update_recipient, issue, writer_pid)
+    handler = codex_message_handler(codex_update_recipient, issue, writer_pid, profile)
 
     case run_single_turn(adapter, profile, app_session, prompt, issue, handler) do
       :ok ->

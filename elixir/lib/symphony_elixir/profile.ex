@@ -11,10 +11,19 @@ defmodule SymphonyElixir.Profile do
           name: String.t(),
           kind: kind(),
           max_concurrent: pos_integer() | nil,
+          cost_per_input_token_usd: float() | nil | :invalid,
+          cost_per_output_token_usd: float() | nil | :invalid,
           config: map()
         }
 
-  defstruct [:name, :kind, :max_concurrent, :config]
+  defstruct [
+    :name,
+    :kind,
+    :max_concurrent,
+    :cost_per_input_token_usd,
+    :cost_per_output_token_usd,
+    :config
+  ]
 
   @secret_patterns [
     ~r/(?i)(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MONDAY_API_TOKEN)\s*=\s*['"]?([A-Za-z0-9_\-\.]+)['"]?/,

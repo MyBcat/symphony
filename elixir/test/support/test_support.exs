@@ -165,6 +165,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          cost_cap_daily_usd: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -216,6 +217,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    cost_cap_daily_usd = Keyword.get(config, :cost_cap_daily_usd)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -271,6 +273,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms
         ),
         server_yaml(server_port, server_host),
+        cost_cap_yaml(cost_cap_daily_usd),
         "---",
         prompt
       ]
@@ -284,6 +287,7 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
+  defp yaml_value(value) when is_float(value), do: Float.to_string(value)
   defp yaml_value(true), do: "true"
   defp yaml_value(false), do: "false"
   defp yaml_value(nil), do: "null"
@@ -358,6 +362,12 @@ defmodule SymphonyElixir.TestSupport do
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+  end
+
+  defp cost_cap_yaml(nil), do: nil
+
+  defp cost_cap_yaml(daily_usd) do
+    "cost_cap:\n  daily_usd: #{yaml_value(daily_usd)}"
   end
 
   defp hook_entry(_name, nil), do: nil

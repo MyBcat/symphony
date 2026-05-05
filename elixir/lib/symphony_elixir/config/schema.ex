@@ -370,6 +370,30 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule CostCap do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Default `nil` means "no cap configured" so legacy WORKFLOW.md files
+      # without a `cost_cap:` block keep dispatching unchanged. Operators
+      # opt in to the kill switch by adding `cost_cap.daily_usd: 50` to
+      # WORKFLOW.md (the shipped default). Per the SYM-11923119477 spec:
+      # "default $50/day" refers to the value in the shipped config, not a
+      # mandatory schema default.
+      field(:daily_usd, :float, default: nil)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:daily_usd], empty_values: [])
+      |> validate_number(:daily_usd, greater_than: 0.0)
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -381,6 +405,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:repo_policy, RepoPolicy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:cost_cap, CostCap, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
     field(:repos, :map, default: %{})
   end
@@ -476,6 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:repo_policy, with: &RepoPolicy.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:cost_cap, with: &CostCap.changeset/2)
     |> parse_profiles()
     |> parse_repos()
   end
@@ -511,9 +537,34 @@ defmodule SymphonyElixir.Config.Schema do
       name: name,
       kind: kind,
       max_concurrent: Map.get(raw_cfg, "max_concurrent") || Map.get(raw_cfg, :max_concurrent),
+      cost_per_input_token_usd:
+        coerce_cost_per_token(
+          Map.get(raw_cfg, "cost_per_input_token_usd") ||
+            Map.get(raw_cfg, :cost_per_input_token_usd)
+        ),
+      cost_per_output_token_usd:
+        coerce_cost_per_token(
+          Map.get(raw_cfg, "cost_per_output_token_usd") ||
+            Map.get(raw_cfg, :cost_per_output_token_usd)
+        ),
       config: config
     }
   end
+
+  defp coerce_cost_per_token(nil), do: nil
+
+  defp coerce_cost_per_token(value) when is_float(value) and value >= 0.0, do: value
+
+  defp coerce_cost_per_token(value) when is_integer(value) and value >= 0, do: value * 1.0
+
+  defp coerce_cost_per_token(value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} when float >= 0.0 -> float
+      _ -> :invalid
+    end
+  end
+
+  defp coerce_cost_per_token(_), do: :invalid
 
   defp parse_repos(changeset) do
     case get_change(changeset, :repos) do

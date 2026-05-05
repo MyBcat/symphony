@@ -1,4 +1,6 @@
 ---
+cost_cap:
+  daily_usd: 50
 tracker:
   kind: monday
   api_token: $MONDAY_API_TOKEN
@@ -123,6 +125,8 @@ profiles:
   claude_opus:
     kind: claude
     max_concurrent: 2
+    cost_per_input_token_usd: 0.000015
+    cost_per_output_token_usd: 0.000075
     claude:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-opus-4-7"
@@ -131,6 +135,8 @@ profiles:
   claude_sonnet:
     kind: claude
     max_concurrent: 6
+    cost_per_input_token_usd: 0.000003
+    cost_per_output_token_usd: 0.000015
     claude:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-sonnet-4-6"
@@ -139,6 +145,8 @@ profiles:
   codex_gpt55_xhigh:
     kind: codex
     max_concurrent: 4
+    cost_per_input_token_usd: 0.000010
+    cost_per_output_token_usd: 0.000030
     codex:
       command: "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=xhigh app-server"
       approval_policy: never
@@ -146,6 +154,8 @@ profiles:
   gemini_long_context:
     kind: gemini
     max_concurrent: 3
+    cost_per_input_token_usd: 0.00000125
+    cost_per_output_token_usd: 0.000005
     gemini:
       command: "gemini --model gemini-2.5-pro --output-format stream-json --sandbox"
 agent:
