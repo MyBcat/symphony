@@ -55,11 +55,20 @@ defmodule SymphonyElixir.Claude.Adapter do
   @spec build_full_command(String.t(), map()) :: String.t()
   def build_full_command(base_cmd, config) when is_binary(base_cmd) do
     if claude_invocation?(base_cmd) do
-      [base_cmd]
-      |> append_flag("--model", get_field(config, :model))
-      |> append_flag("--permission-mode", get_field(config, :permission_mode))
-      |> append_allowed_tools(get_field(config, :allowed_tools))
-      |> Enum.join(" ")
+      # Unset ANTHROPIC_API_KEY in the child env. The parent (Claude Code in
+      # Ankit's session) has it set to an OAuth-flavored bearer token that the
+      # parent process knows how to use, but a child `claude --print` will try
+      # to use it as a literal API key and get HTTP 401. Unsetting it forces
+      # the child to fall back to OAuth/keychain auth — same path as
+      # interactive `claude` use.
+      flagged =
+        [base_cmd]
+        |> append_flag("--model", get_field(config, :model))
+        |> append_flag("--permission-mode", get_field(config, :permission_mode))
+        |> append_allowed_tools(get_field(config, :allowed_tools))
+        |> Enum.join(" ")
+
+      "env -u ANTHROPIC_API_KEY " <> flagged
     else
       base_cmd
     end
@@ -179,10 +188,15 @@ defmodule SymphonyElixir.Claude.Adapter do
   def send_turn(%{port: port}, prompt, _opts) when is_port(port) do
     # stream-json input is newline-delimited over a live stdin stream; AgentRunner
     # consumes stdout until Claude emits a terminal turn event or exits.
+    # Claude's stream-json input parser requires `message.role` to be present
+    # (returns `Expected message role 'user', got 'undefined'` if omitted).
     payload =
       Jason.encode!(%{
         "type" => "user",
-        "message" => %{"content" => [%{"type" => "text", "text" => prompt}]}
+        "message" => %{
+          "role" => "user",
+          "content" => [%{"type" => "text", "text" => prompt}]
+        }
       })
 
     Port.command(port, payload <> "\n")
