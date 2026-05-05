@@ -117,6 +117,23 @@ defmodule SymphonyElixir.CostMeterTest do
 
       assert CostMeter.today_spend(pid) == 0.0
     end
+
+    @tag cost_cap_daily_usd: 50.0
+    test "accumulates tiny token costs without rounding each update down to zero" do
+      pid = start_meter(:cost_meter_decimal_precision_test)
+
+      profile =
+        claude_opus_profile(
+          cost_per_input_token_usd: 0.00000001,
+          cost_per_output_token_usd: 0.0
+        )
+
+      Enum.each(1..100, fn _ ->
+        CostMeter.add(pid, profile, %{in_tokens: 1, out_tokens: 0})
+      end)
+
+      assert_in_delta CostMeter.today_spend(pid), 0.000001, 0.0000000001
+    end
   end
 
   describe "can_dispatch?/3" do
@@ -229,6 +246,24 @@ defmodule SymphonyElixir.CostMeterTest do
       pid = start_meter(:cost_meter_persist_test)
 
       assert_in_delta CostMeter.today_spend(pid), 30.0, 0.0001
+    end
+
+    @tag cost_cap_daily_usd: 50.0
+    test "corrupt persisted state fails closed at the configured cap instead of resetting spend" do
+      File.write!(
+        Application.get_env(:symphony_elixir, :cost_meter_state_path),
+        "not json"
+      )
+
+      pid = start_meter(:cost_meter_corrupt_state_test)
+
+      assert {:error, {:cost_cap_exceeded, :daily, current, cap, estimated}} =
+               CostMeter.can_dispatch?(pid, claude_opus_profile(), 1)
+
+      assert cap == 50.0
+      assert current == 50.0
+      assert estimated > 0.0
+      assert CostMeter.today_spend(pid) == 50.0
     end
   end
 

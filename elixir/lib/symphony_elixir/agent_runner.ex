@@ -85,11 +85,10 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, {:cost_cap_exceeded, _refusal}} ->
         # Spec M-3 / SYM-11923119477 AC4: cost cap refusals already posted
         # the `## Symphony Cost Cap` workpad; the item must stay in
-        # `Symphony Ready` so the operator can bump the cap or wait for
-        # UTC midnight. Exit :normal so the orchestrator's DOWN handler
-        # treats this as a clean completion + continuation reschedule
-        # rather than a dispatch failure.
-        :ok
+        # `Symphony Ready` so the operator can bump the cap or wait for UTC
+        # midnight. Exit with a dedicated shutdown reason so the orchestrator
+        # can back off instead of treating this as a one-second continuation.
+        exit({:shutdown, :cost_cap_exceeded})
 
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")

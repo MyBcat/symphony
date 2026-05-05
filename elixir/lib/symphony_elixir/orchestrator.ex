@@ -243,6 +243,21 @@ defmodule SymphonyElixir.Orchestrator do
                 workspace_path: Map.get(running_entry, :workspace_path)
               })
 
+            {:shutdown, :cost_cap_exceeded} ->
+              Logger.warning(
+                "Agent task refused by cost cap for issue_id=#{issue_id} session_id=#{session_id}; scheduling cost-cap backoff"
+              )
+
+              next_attempt = next_retry_attempt_from_running(running_entry)
+
+              schedule_issue_retry(state, issue_id, next_attempt, %{
+                identifier: running_entry.identifier,
+                delay_type: :cost_cap,
+                error: "cost cap exceeded",
+                worker_host: Map.get(running_entry, :worker_host),
+                workspace_path: Map.get(running_entry, :workspace_path)
+              })
+
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 

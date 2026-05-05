@@ -36,6 +36,7 @@ defmodule SymphonyElixir.CostMeter do
 
   @default_state_path "state/cost_meter.json"
   @cap_block_marker "## Symphony Cost Cap"
+  @zero Decimal.new("0")
 
   @typedoc """
   Public snapshot exposed by `snapshot/0`. The TUI dashboard reads this on
@@ -139,15 +140,9 @@ defmodule SymphonyElixir.CostMeter do
   """
   @spec estimated_cost(Profile.t(), pos_integer() | nil) :: float() | :invalid
   def estimated_cost(%Profile{} = profile, max_turns) do
-    case profile_cost_rates(profile) do
-      :invalid ->
-        :invalid
-
-      {in_rate, out_rate} ->
-        turns = max(max_turns || 1, 1)
-        in_tokens = turns * input_tokens_per_turn()
-        out_tokens = turns * output_tokens_per_turn()
-        in_tokens * in_rate + out_tokens * out_rate
+    case estimated_cost_decimal(profile, max_turns) do
+      :invalid -> :invalid
+      %Decimal{} = estimated -> decimal_to_float(estimated)
     end
   end
 
@@ -205,13 +200,19 @@ defmodule SymphonyElixir.CostMeter do
   def init(_opts) do
     state =
       case load_persisted() do
-        {:ok, persisted} -> persisted
+        {:ok, persisted} ->
+          persisted
+
         {:error, reason} ->
+          state = fail_closed_state()
+
           Logger.warning(
-            "CostMeter: failed to load #{path()}: #{inspect(reason)}; starting at $0.00 today"
+            "CostMeter: failed to load #{path()}: #{inspect(reason)}; " <>
+              "starting fail-closed at $#{format_usd(state.spend_usd)} today"
           )
 
-          fresh_state()
+          persist(state)
+          state
       end
       |> apply_rollover()
 
@@ -228,34 +229,37 @@ defmodule SymphonyElixir.CostMeter do
           # Profile has no cost config — `can_dispatch?/2` already refused
           # on uncertainty, so an in-flight token event from a misconfigured
           # profile shouldn't fabricate retroactive spend.
-          0.0
+          @zero
 
         {in_rate, out_rate} ->
-          max(0, in_tokens) * in_rate + max(0, out_tokens) * out_rate
+          Decimal.add(
+            Decimal.mult(Decimal.new(max(0, in_tokens)), in_rate),
+            Decimal.mult(Decimal.new(max(0, out_tokens)), out_rate)
+          )
       end
 
-    new_total = round_usd(state.spend_usd + delta)
+    new_total = Decimal.add(state.spend_usd, delta)
     new_state = %{state | spend_usd: new_total}
 
     persist(new_state)
-    {:reply, new_total, new_state}
+    {:reply, decimal_to_float(new_total), new_state}
   end
 
   def handle_call(:today_spend, _from, state) do
     state = apply_rollover(state)
-    {:reply, state.spend_usd, state}
+    {:reply, decimal_to_float(state.spend_usd), state}
   end
 
   def handle_call(:snapshot, _from, state) do
     state = apply_rollover(state)
-    cap = current_cap()
+    cap = current_cap_decimal()
+    remaining = Decimal.sub(cap, state.spend_usd) |> max_decimal(@zero)
 
     snapshot = %{
       date_utc: state.date_utc,
-      spend_usd: state.spend_usd,
-      cap_usd: cap,
-      remaining_usd:
-        if(cap > 0, do: max(0.0, round_usd(cap - state.spend_usd)), else: 0.0)
+      spend_usd: decimal_to_float(state.spend_usd),
+      cap_usd: decimal_to_float(cap),
+      remaining_usd: decimal_to_float(remaining)
     }
 
     {:reply, snapshot, state}
@@ -263,7 +267,7 @@ defmodule SymphonyElixir.CostMeter do
 
   def handle_call({:can_dispatch?, profile, max_turns}, _from, state) do
     state = apply_rollover(state)
-    cap = current_cap()
+    cap = current_cap_decimal()
     {:reply, evaluate_dispatch(state, cap, profile, max_turns), state}
   end
 
@@ -275,21 +279,31 @@ defmodule SymphonyElixir.CostMeter do
 
   ## --- Helpers ------------------------------------------------------------
 
-  defp evaluate_dispatch(_state, cap, _profile, _max_turns) when cap <= 0.0, do: :ok
-
   defp evaluate_dispatch(state, cap, profile, max_turns) do
+    if Decimal.compare(cap, @zero) != :gt do
+      :ok
+    else
+      evaluate_dispatch_with_cap(state, cap, profile, max_turns)
+    end
+  end
+
+  defp evaluate_dispatch_with_cap(state, cap, profile, max_turns) do
     resolved_max_turns = max_turns || default_max_turns()
 
-    case estimated_cost(profile, resolved_max_turns) do
+    case estimated_cost_decimal(profile, resolved_max_turns) do
       :invalid ->
         # Fail-closed: missing cost config — refuse with estimated = cap so
         # the operator sees an estimate that trips the kill switch on
         # first encounter. Spec requirement: "treat its spend as MAX".
-        {:error, {:cost_cap_exceeded, :daily, state.spend_usd, cap, cap}}
+        {:error,
+         {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap),
+          decimal_to_float(cap)}}
 
-      estimated when is_number(estimated) ->
-        if state.spend_usd + estimated > cap do
-          {:error, {:cost_cap_exceeded, :daily, state.spend_usd, cap, round_usd(estimated)}}
+      %Decimal{} = estimated ->
+        if Decimal.compare(Decimal.add(state.spend_usd, estimated), cap) == :gt do
+          {:error,
+           {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap),
+            decimal_to_float(estimated)}}
         else
           :ok
         end
@@ -315,22 +329,30 @@ defmodule SymphonyElixir.CostMeter do
          cost_per_input_token_usd: in_rate,
          cost_per_output_token_usd: out_rate
        })
-       when is_number(in_rate) and is_number(out_rate) and in_rate >= 0 and out_rate >= 0 do
-    {in_rate, out_rate}
+       when (is_number(in_rate) or is_binary(in_rate)) and
+              (is_number(out_rate) or is_binary(out_rate)) do
+    with {:ok, in_rate} <- decimal_from_number(in_rate),
+         {:ok, out_rate} <- decimal_from_number(out_rate),
+         true <- Decimal.compare(in_rate, @zero) != :lt,
+         true <- Decimal.compare(out_rate, @zero) != :lt do
+      {in_rate, out_rate}
+    else
+      _ -> :invalid
+    end
   end
 
   defp profile_cost_rates(_profile), do: :invalid
 
-  defp current_cap do
+  defp current_cap_decimal do
     case safe_settings() do
       {:ok, settings} ->
         case Map.get(settings, :cost_cap) do
-          %{daily_usd: cap} when is_number(cap) and cap > 0 -> cap * 1.0
-          _ -> 0.0
+          %{daily_usd: cap} when is_number(cap) and cap > 0 -> decimal_from_number!(cap)
+          _ -> @zero
         end
 
       :error ->
-        0.0
+        @zero
     end
   end
 
@@ -370,7 +392,7 @@ defmodule SymphonyElixir.CostMeter do
         "CostMeter: UTC day rollover from #{Date.to_iso8601(date)} to #{Date.to_iso8601(today)}; resetting spend to $0.00"
       )
 
-      new_state = %{state | date_utc: today, spend_usd: 0.0}
+      new_state = %{state | date_utc: today, spend_usd: @zero}
       persist(new_state)
       new_state
     end
@@ -383,7 +405,11 @@ defmodule SymphonyElixir.CostMeter do
   end
 
   defp fresh_state do
-    %{date_utc: Date.utc_today(), spend_usd: 0.0}
+    %{date_utc: Date.utc_today(), spend_usd: @zero}
+  end
+
+  defp fail_closed_state do
+    %{date_utc: Date.utc_today(), spend_usd: current_cap_decimal()}
   end
 
   defp persist(state) do
@@ -394,7 +420,7 @@ defmodule SymphonyElixir.CostMeter do
     body =
       Jason.encode!(%{
         "date_utc" => Date.to_iso8601(state.date_utc),
-        "spend_usd" => state.spend_usd
+        "spend_usd" => Decimal.to_string(state.spend_usd, :normal)
       })
 
     with :ok <- File.mkdir_p(dir),
@@ -427,10 +453,14 @@ defmodule SymphonyElixir.CostMeter do
 
   defp decode(body) do
     case Jason.decode(body) do
-      {:ok, %{"date_utc" => date_str, "spend_usd" => spend}} when is_number(spend) ->
-        case Date.from_iso8601(date_str) do
-          {:ok, date} -> {:ok, %{date_utc: date, spend_usd: spend * 1.0}}
-          {:error, reason} -> {:error, {:invalid_date, reason}}
+      {:ok, %{"date_utc" => date_str, "spend_usd" => spend}} ->
+        with {:ok, date} <- Date.from_iso8601(date_str),
+             {:ok, spend} <- decimal_from_number(spend),
+             true <- Decimal.compare(spend, @zero) != :lt do
+          {:ok, %{date_utc: date, spend_usd: spend}}
+        else
+          {:error, reason} -> {:error, {:invalid_state_field, reason}}
+          false -> {:error, {:invalid_state_field, :negative_spend}}
         end
 
       {:ok, _other} ->
@@ -439,10 +469,6 @@ defmodule SymphonyElixir.CostMeter do
       {:error, reason} ->
         {:error, {:state_decode_failed, reason}}
     end
-  end
-
-  defp round_usd(value) when is_number(value) do
-    Float.round(value * 1.0, 4)
   end
 
   defp stamp_for_session(session) do
@@ -457,11 +483,59 @@ defmodule SymphonyElixir.CostMeter do
   defp stringify_field(value) when is_binary(value), do: value
   defp stringify_field(value), do: to_string(value)
 
+  defp format_usd(%Decimal{} = value) do
+    value
+    |> decimal_to_float()
+    |> format_usd()
+  end
+
   defp format_usd(value) when is_number(value) do
     :erlang.float_to_binary(value * 1.0, decimals: 2)
   end
 
   defp format_usd(_), do: "0.00"
+
+  defp estimated_cost_decimal(%Profile{} = profile, max_turns) do
+    case profile_cost_rates(profile) do
+      :invalid ->
+        :invalid
+
+      {in_rate, out_rate} ->
+        turns = max(max_turns || 1, 1)
+        in_tokens = turns * input_tokens_per_turn()
+        out_tokens = turns * output_tokens_per_turn()
+
+        in_tokens
+        |> Decimal.new()
+        |> Decimal.mult(in_rate)
+        |> Decimal.add(Decimal.mult(Decimal.new(out_tokens), out_rate))
+    end
+  end
+
+  defp decimal_from_number!(value) do
+    {:ok, decimal} = decimal_from_number(value)
+    decimal
+  end
+
+  defp decimal_from_number(value) when is_integer(value), do: {:ok, Decimal.new(value)}
+  defp decimal_from_number(value) when is_float(value), do: {:ok, Decimal.from_float(value)}
+
+  defp decimal_from_number(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {decimal, ""} -> {:ok, decimal}
+      _ -> {:error, :invalid_decimal}
+    end
+  end
+
+  defp decimal_from_number(_value), do: {:error, :invalid_decimal}
+
+  defp decimal_to_float(%Decimal{} = value) do
+    Decimal.to_float(value)
+  end
+
+  defp max_decimal(left, right) do
+    if Decimal.compare(left, right) == :lt, do: right, else: left
+  end
 
   @doc false
   @spec marker() :: String.t()

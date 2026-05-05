@@ -181,7 +181,8 @@ defmodule SymphonyElixir.Monday.Item do
     "## Symphony Failures",
     "## Symphony Heartbeat",
     "## Symphony Completion",
-    "## Symphony PR Refusal"
+    "## Symphony PR Refusal",
+    "## Symphony Cost Cap"
   ]
 
   defp description_from_updates(raw) do

@@ -148,6 +148,47 @@ defmodule SymphonyElixir.Monday.ItemTest do
       refute item.description =~ "branch_convention_violation"
     end
 
+    test "filters Symphony Cost Cap updates out of the synthesized description" do
+      raw = %{
+        "id" => "11923119477",
+        "name" => "Cost cap task",
+        "url" => "https://example.org",
+        "created_at" => "2026-05-01T10:00:00Z",
+        "updated_at" => "2026-05-01T10:00:00Z",
+        "column_values" => [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+        ],
+        "updates" => [
+          %{
+            "id" => "u1",
+            "body" => "Operator note: retry when cap resets",
+            "created_at" => "2026-05-01T10:00:00Z"
+          },
+          %{
+            "id" => "u2",
+            "body" =>
+              "## Symphony Cost Cap\n\nToday's spend: `$50.00`\nSymphony refused dispatch.\n",
+            "created_at" => "2026-05-01T11:00:00Z"
+          }
+        ]
+      }
+
+      config = %{
+        identifier_prefix: "SYM",
+        symphony_status_column_id: "symphony_status_xyz",
+        priority_column_id: nil,
+        description_column_id: nil,
+        branch_column_id: nil,
+        labels_column_id: nil,
+        profile_column_id: nil
+      }
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.description == "Operator note: retry when cap resets"
+      refute item.description =~ "Symphony Cost Cap"
+      refute item.description =~ "Today's spend"
+    end
+
     test "profile is trimmed and nil when whitespace-only" do
       raw =
         put_in(@raw_item["column_values"], [
