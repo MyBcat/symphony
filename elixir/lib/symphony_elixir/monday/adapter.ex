@@ -110,6 +110,37 @@ defmodule SymphonyElixir.Monday.Adapter do
   }
   """
 
+  @create_item_mutation """
+  mutation SymphonyCreateItem($boardId: ID!, $itemName: String!) {
+    create_item(board_id: $boardId, item_name: $itemName, create_labels_if_missing: false) {
+      id
+      name
+    }
+  }
+  """
+
+  @delete_item_mutation """
+  mutation SymphonyDeleteItem($itemId: ID!) {
+    delete_item(item_id: $itemId) {
+      id
+    }
+  }
+  """
+
+  @list_board_item_names_query """
+  query SymphonyBoardItemNames($boardId: ID!, $limit: Int!) {
+    boards(ids: [$boardId]) {
+      items_page(limit: $limit) {
+        cursor
+        items {
+          id
+          name
+        }
+      }
+    }
+  }
+  """
+
   @workpad_marker "## Symphony Workpad"
   @failure_marker "## Symphony Failures"
   @heartbeat_marker "## Symphony Heartbeat"
@@ -791,6 +822,79 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   defp do_utf8_prefix(<<_invalid_byte, rest::binary>>, remaining, acc) do
     do_utf8_prefix(rest, remaining, acc)
+  end
+
+  @doc """
+  Create an item on a Monday board. Used by the e2e nightly harness
+  (SYM-11923096576) to seed synthetic test items. Goes through the Adapter so
+  the DL-005 "all Monday writes via Monday.Adapter" rule holds for harness
+  fixtures the same way it does for orchestrator writes.
+  """
+  @spec create_item(integer() | String.t(), String.t()) ::
+          {:ok, %{id: String.t(), name: String.t()}} | {:error, term()}
+  def create_item(board_id, name) when is_binary(name) do
+    vars = %{"boardId" => board_id, "itemName" => name}
+
+    case client_module().graphql(@create_item_mutation, vars, []) do
+      {:ok, %{"data" => %{"create_item" => %{"id" => id, "name" => returned_name}}}}
+      when is_binary(id) ->
+        {:ok, %{id: id, name: returned_name}}
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:unexpected_response, other}}
+    end
+  end
+
+  @doc """
+  Delete a Monday item by id. Used by the e2e nightly harness to tear down
+  synthetic items at the end of the run; never invoked from the orchestrator's
+  dispatch loop.
+  """
+  @spec delete_item(integer() | String.t()) :: :ok | {:error, term()}
+  def delete_item(item_id) do
+    vars = %{"itemId" => parse_item_id(item_id)}
+
+    case client_module().graphql(@delete_item_mutation, vars, []) do
+      {:ok, %{"data" => %{"delete_item" => %{"id" => _}}}} -> :ok
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected_response, other}}
+    end
+  end
+
+  @doc """
+  Return a flat list of `%{id, name}` items on the given board (limit = 50 by
+  default). Used by the e2e harness's "non-synthetic count" guard: refuse to
+  run if the sandbox board has more than N items not prefixed with the
+  synthetic marker, since that means the operator pointed the harness at a
+  non-sandbox board by mistake.
+  """
+  @spec list_board_items(integer() | String.t(), keyword()) ::
+          {:ok, [%{id: String.t(), name: String.t()}]} | {:error, term()}
+  def list_board_items(board_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 50)
+    vars = %{"boardId" => board_id, "limit" => limit}
+
+    case client_module().graphql(@list_board_item_names_query, vars, []) do
+      {:ok, %{"data" => %{"boards" => [%{"items_page" => %{"items" => raw_items}}]}}} ->
+        items =
+          Enum.map(raw_items, fn raw ->
+            %{id: to_string(Map.get(raw, "id", "")), name: Map.get(raw, "name", "")}
+          end)
+
+        {:ok, items}
+
+      {:ok, %{"data" => %{"boards" => []}}} ->
+        {:error, :board_not_found}
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:unexpected_response, other}}
+    end
   end
 
   @impl true
