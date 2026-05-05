@@ -634,6 +634,263 @@ defmodule SymphonyElixir.OrchestratorTest do
     end
   end
 
+  describe "tracker outage tolerance (Spec M-7 AC3)" do
+    alias SymphonyElixir.Orchestrator.State
+
+    test "5xx http responses are classified as outage; 4xx and other errors are not" do
+      assert :outage = SymphonyElixir.Orchestrator.classify_tracker_error_for_test(:timeout)
+      assert :outage = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 500})
+      assert :outage = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 503})
+      assert :outage = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 599})
+
+      assert :outage =
+               SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:transport, :nxdomain})
+
+      assert :other = SymphonyElixir.Orchestrator.classify_tracker_error_for_test(:auth_failed)
+      assert :other = SymphonyElixir.Orchestrator.classify_tracker_error_for_test(:rate_limited)
+      assert :other = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 400})
+      assert :other = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 401})
+      assert :other = SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:http, 404})
+
+      assert :other =
+               SymphonyElixir.Orchestrator.classify_tracker_error_for_test({:graphql_errors, []})
+    end
+
+    test "Nth consecutive 5xx/timeout failure logs outage entry exactly once" do
+      state = %State{outage_threshold: 3}
+
+      log =
+        capture_log(fn ->
+          state =
+            Enum.reduce(1..5, state, fn _i, acc ->
+              SymphonyElixir.Orchestrator.record_tracker_outage_failure_for_test(
+                acc,
+                {:http, 503}
+              )
+            end)
+
+          assert state.outage_active? == true
+          assert state.outage_failure_count == 5
+        end)
+
+      # "outage entry" fires exactly once — subsequent failures stay in
+      # outage and emit only debug-level "still in outage" messages.
+      assert log =~ "outage entry"
+      refute log =~ ~r/outage entry.*outage entry/s
+    end
+
+    test "successful tracker call after outage logs outage exit and resets counter" do
+      state =
+        %State{outage_threshold: 2}
+        |> SymphonyElixir.Orchestrator.record_tracker_outage_failure_for_test({:http, 503})
+        |> SymphonyElixir.Orchestrator.record_tracker_outage_failure_for_test(:timeout)
+
+      assert state.outage_active? == true
+      assert state.outage_failure_count == 2
+
+      log =
+        capture_log(fn ->
+          state = SymphonyElixir.Orchestrator.record_tracker_success_for_test(state)
+          assert state.outage_active? == false
+          assert state.outage_failure_count == 0
+        end)
+
+      assert log =~ "outage exit"
+    end
+
+    test "tracker success while not in outage just resets the counter without logging" do
+      state =
+        %State{outage_threshold: 5}
+        |> SymphonyElixir.Orchestrator.record_tracker_outage_failure_for_test(:timeout)
+        |> SymphonyElixir.Orchestrator.record_tracker_outage_failure_for_test({:http, 503})
+
+      assert state.outage_active? == false
+      assert state.outage_failure_count == 2
+
+      log =
+        capture_log(fn ->
+          state = SymphonyElixir.Orchestrator.record_tracker_success_for_test(state)
+          assert state.outage_failure_count == 0
+          assert state.outage_active? == false
+        end)
+
+      refute log =~ "outage exit"
+    end
+  end
+
+  describe "tracker outage tolerance — orchestrator integration (Spec M-7 AC3)" do
+    alias SymphonyElixir.Tracker.MemoryMonday
+
+    setup do
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      MemoryMonday.reset()
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+      end)
+
+      :ok
+    end
+
+    defmodule FlakyTracker do
+      @moduledoc false
+      @behaviour SymphonyElixir.Tracker
+
+      use Agent
+
+      def start_link(_opts \\ []) do
+        case Agent.start_link(
+               fn -> initial_state() end,
+               name: __MODULE__
+             ) do
+          {:ok, pid} ->
+            {:ok, pid}
+
+          {:error, {:already_started, pid}} ->
+            Agent.update(pid, fn _ -> initial_state() end)
+            {:ok, pid}
+        end
+      end
+
+      defp initial_state do
+        %{
+          fail_remaining: 0,
+          fail_reason: {:http, 503},
+          acquire_count: 0
+        }
+      end
+
+      def set_fail(count, reason) do
+        Agent.update(__MODULE__, fn s ->
+          %{s | fail_remaining: count, fail_reason: reason}
+        end)
+      end
+
+      def acquire_count, do: Agent.get(__MODULE__, & &1.acquire_count)
+
+      @impl true
+      def fetch_candidate_issues_with_phi_findings do
+        decide_fetch()
+      end
+
+      def fetch_candidate_issues_with_phi_findings(_opts), do: decide_fetch()
+
+      defp decide_fetch do
+        Agent.get_and_update(__MODULE__, fn s ->
+          if s.fail_remaining > 0 do
+            {{:error, s.fail_reason}, %{s | fail_remaining: s.fail_remaining - 1}}
+          else
+            {{:ok, %{items: [], phi_offenders: []}}, s}
+          end
+        end)
+      end
+
+      @impl true
+      def fetch_candidate_issues, do: {:ok, []}
+
+      @impl true
+      def fetch_issues_by_states(_states), do: {:ok, []}
+
+      @impl true
+      def fetch_issue_states_by_ids(_ids), do: {:ok, []}
+
+      @impl true
+      def update_issue_state(_id, _state), do: :ok
+
+      @impl true
+      def upsert_workpad(_id, _body), do: :ok
+
+      @impl true
+      def set_pr_url(_id, _url), do: :ok
+
+      @impl true
+      def post_failure_update(_id, _body), do: :ok
+
+      @impl true
+      def post_pr_refusal(_id, _body), do: :ok
+
+      @impl true
+      def post_phi_refusal(_id, _body), do: :ok
+
+      @impl true
+      def acquire_heartbeat do
+        Agent.update(__MODULE__, fn s -> %{s | acquire_count: s.acquire_count + 1} end)
+        :ok
+      end
+
+      @impl true
+      def release_heartbeat, do: :ok
+
+      @impl true
+      def validate_no_phi(_item), do: :ok
+    end
+
+    test "5 consecutive 5xx responses log outage entry but do NOT terminate the orchestrator" do
+      {:ok, _flaky} = FlakyTracker.start_link()
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, FlakyTracker)
+
+      # Push enough flakes to cross the default threshold (5) plus margin.
+      FlakyTracker.set_fail(7, {:http, 503})
+
+      orchestrator_name = Module.concat(__MODULE__, :OutageTolerantOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      log =
+        capture_log(fn ->
+          # Drive multiple poll cycles so the outage counter crosses threshold.
+          Enum.each(1..7, fn _ ->
+            send(pid, :run_poll_cycle)
+            Process.sleep(20)
+          end)
+        end)
+
+      assert Process.alive?(pid),
+             "expected orchestrator to keep running through 5xx outage; pid=#{inspect(pid)}"
+
+      assert log =~ "outage entry",
+             "expected an outage-entry log line after consecutive 5xx; got=#{log}"
+    end
+
+    test "outage exit fires once tracker recovers" do
+      {:ok, _flaky} = FlakyTracker.start_link()
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, FlakyTracker)
+
+      # 6 failures then recovery.
+      FlakyTracker.set_fail(6, :timeout)
+
+      orchestrator_name = Module.concat(__MODULE__, :OutageRecoveryOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      log =
+        capture_log(fn ->
+          # First wave: drive enough cycles to enter outage.
+          Enum.each(1..6, fn _ ->
+            send(pid, :run_poll_cycle)
+            Process.sleep(15)
+          end)
+
+          # Second wave: tracker now succeeds — the next cycle should log exit.
+          send(pid, :run_poll_cycle)
+          Process.sleep(50)
+        end)
+
+      assert log =~ "outage entry"
+      assert log =~ "outage exit"
+    end
+  end
+
   defp write_workflow!(path, opts \\ []) do
     phi_block =
       case Keyword.get(opts, :phi_gate_mode) do

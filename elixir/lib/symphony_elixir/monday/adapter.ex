@@ -917,24 +917,35 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   defp render_heartbeat_body(instance_id) do
     ts = DateTime.utc_now() |> DateTime.to_iso8601()
-    "instance_id: #{instance_id}\ntimestamp: #{ts}\n"
+    token = mint_lock_token(instance_id)
+    # Spec M-7 AC1: lock token = "<instance_id>::<random>". The `token:` line is
+    # authoritative for ownership comparison; `instance_id:` and `timestamp:` are
+    # kept for backward compatibility with bodies written by pre-M-7 instances
+    # so an old leader's body still parses cleanly during a rolling upgrade.
+    "token: #{token}\ninstance_id: #{instance_id}\ntimestamp: #{ts}\n"
+  end
+
+  defp mint_lock_token(instance_id) do
+    nonce = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+    "#{instance_id}::#{nonce}"
   end
 
   defp heartbeat_acquire_decision(existing_body, current_instance_id, ttl_ms) do
     heartbeat = parse_heartbeat(existing_body)
+    existing_owner = heartbeat_owner(heartbeat)
 
     cond do
       heartbeat.released? ->
         :refresh
 
-      heartbeat.instance_id in [nil, ""] ->
+      existing_owner in [nil, ""] ->
         :refresh
 
-      heartbeat.instance_id == current_instance_id ->
+      existing_owner == current_instance_id ->
         :refresh
 
       heartbeat_fresh?(heartbeat.timestamp, ttl_ms) ->
-        {:conflict, heartbeat.instance_id, DateTime.to_iso8601(heartbeat.timestamp)}
+        {:conflict, existing_owner, DateTime.to_iso8601(heartbeat.timestamp)}
 
       true ->
         :refresh
@@ -944,8 +955,20 @@ defmodule SymphonyElixir.Monday.Adapter do
   defp heartbeat_releasable?(existing_body, current_instance_id) do
     heartbeat = parse_heartbeat(existing_body)
 
-    heartbeat.instance_id in [nil, "", current_instance_id]
+    heartbeat_owner(heartbeat) in [nil, "", current_instance_id]
   end
+
+  # Owner of the lock = instance_id portion of the token if present, else the
+  # legacy `instance_id:` field. This lets us recognize bodies written by
+  # pre-M-7 instances during upgrade.
+  defp heartbeat_owner(%{token: token}) when is_binary(token) and token != "" do
+    case String.split(token, "::", parts: 2) do
+      [owner | _] -> owner
+      _ -> nil
+    end
+  end
+
+  defp heartbeat_owner(%{instance_id: instance_id}), do: instance_id
 
   defp heartbeat_fresh?(%DateTime{} = timestamp, ttl_ms) when is_integer(ttl_ms) and ttl_ms > 0 do
     DateTime.diff(DateTime.utc_now(), timestamp, :millisecond) < ttl_ms
@@ -956,12 +979,14 @@ defmodule SymphonyElixir.Monday.Adapter do
   defp parse_heartbeat(body) when is_binary(body) do
     %{
       released?: String.contains?(body, "released"),
+      token: heartbeat_field(body, "token"),
       instance_id: heartbeat_field(body, "instance_id"),
       timestamp: parse_heartbeat_timestamp(heartbeat_field(body, "timestamp"))
     }
   end
 
-  defp parse_heartbeat(_body), do: %{released?: false, instance_id: nil, timestamp: nil}
+  defp parse_heartbeat(_body),
+    do: %{released?: false, token: nil, instance_id: nil, timestamp: nil}
 
   defp heartbeat_field(body, field_name) do
     body

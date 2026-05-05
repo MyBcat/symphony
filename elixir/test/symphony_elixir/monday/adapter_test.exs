@@ -835,11 +835,202 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert body =~ "timestamp:"
     end
 
+    test "acquire_heartbeat encodes a Spec M-7 lock token (instance_id::random)" do
+      assert :ok = Adapter.acquire_heartbeat()
+      assert_received {:graphql, _q1, _}
+      assert_received {:graphql, q2, %{"body" => body}}
+      assert q2 =~ "create_update"
+      # Token line is on its own row, prefix is the instance_id, "::" separator,
+      # nonce is hex.
+      assert body =~ ~r/\ntoken: test-instance::[0-9a-f]+\n/
+    end
+
+    test "successive acquire_heartbeat calls mint distinct tokens (per-renewal nonce)" do
+      assert :ok = Adapter.acquire_heartbeat()
+      assert_received {:graphql, _q1a, _}
+      assert_received {:graphql, _q2a, %{"body" => body_a}}
+
+      assert :ok = Adapter.acquire_heartbeat()
+      assert_received {:graphql, _q1b, _}
+      assert_received {:graphql, _q2b, %{"body" => body_b}}
+
+      [_, token_a] = Regex.run(~r/\ntoken: (\S+)\n/, body_a)
+      [_, token_b] = Regex.run(~r/\ntoken: (\S+)\n/, body_b)
+
+      # Owner prefix matches; nonce differs.
+      assert String.starts_with?(token_a, "test-instance::")
+      assert String.starts_with?(token_b, "test-instance::")
+      refute token_a == token_b
+    end
+
     test "release_heartbeat marks the existing heartbeat as released (or no-op if none)" do
       assert :ok = Adapter.release_heartbeat()
       # No existing heartbeat → no-op (no edit_update mutation)
       assert_received {:graphql, q1, _}
       assert q1 =~ "items"
+    end
+  end
+
+  describe "heartbeat takeover (Spec M-7 AC2)" do
+    defmodule StaleHeartbeatClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "items" and query =~ "updates" ->
+            stale_ts =
+              DateTime.utc_now()
+              |> DateTime.add(-10 * 60, :second)
+              |> DateTime.to_iso8601()
+
+            body = "## Symphony Heartbeat\ntoken: previous-leader::abc123\ntimestamp: #{stale_ts}\n"
+
+            {:ok,
+             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-stale", "body" => body}]}]}}}
+
+          query =~ "edit_update" ->
+            {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, StaleHeartbeatClient)
+      previous_instance_id = Application.get_env(:symphony_elixir, :instance_id)
+      Application.put_env(:symphony_elixir, :instance_id, "test-instance")
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :monday_client_module)
+
+        if is_nil(previous_instance_id) do
+          Application.delete_env(:symphony_elixir, :instance_id)
+        else
+          Application.put_env(:symphony_elixir, :instance_id, previous_instance_id)
+        end
+      end)
+
+      :ok
+    end
+
+    test "acquire_heartbeat takes over a stale token via edit_update (no conflict)" do
+      assert :ok = Adapter.acquire_heartbeat()
+
+      assert_received {:graphql, q_get, _}
+      assert q_get =~ "updates"
+
+      assert_received {:graphql, q_edit, %{"id" => "u-stale", "body" => new_body}}
+      assert q_edit =~ "edit_update"
+      # The takeover writes our token, replacing the stale one.
+      assert new_body =~ ~r/\ntoken: test-instance::[0-9a-f]+\n/
+      refute new_body =~ "previous-leader::abc123"
+    end
+  end
+
+  describe "heartbeat token-aware quick restart (Spec M-7 AC2)" do
+    defmodule SameOwnerFreshHeartbeatClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "items" and query =~ "updates" ->
+            fresh_ts = DateTime.utc_now() |> DateTime.to_iso8601()
+
+            body = "## Symphony Heartbeat\ntoken: test-instance::oldnonce\ntimestamp: #{fresh_ts}\n"
+
+            {:ok,
+             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-self", "body" => body}]}]}}}
+
+          query =~ "edit_update" ->
+            {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, SameOwnerFreshHeartbeatClient)
+      previous_instance_id = Application.get_env(:symphony_elixir, :instance_id)
+      Application.put_env(:symphony_elixir, :instance_id, "test-instance")
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :monday_client_module)
+
+        if is_nil(previous_instance_id) do
+          Application.delete_env(:symphony_elixir, :instance_id)
+        else
+          Application.put_env(:symphony_elixir, :instance_id, previous_instance_id)
+        end
+      end)
+
+      :ok
+    end
+
+    test "fresh token from the same instance is treated as ours and refreshed" do
+      assert :ok = Adapter.acquire_heartbeat()
+
+      assert_received {:graphql, _q_get, _}
+      assert_received {:graphql, q_edit, %{"id" => "u-self", "body" => new_body}}
+      assert q_edit =~ "edit_update"
+      assert new_body =~ "token: test-instance::"
+    end
+  end
+
+  describe "heartbeat backward-compat parsing (Spec M-7 AC2)" do
+    defmodule LegacyOwnerHeartbeatClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "items" and query =~ "updates" ->
+            fresh_ts = DateTime.utc_now() |> DateTime.to_iso8601()
+            # Pre-M-7 body: only `instance_id:` line, no `token:` line.
+            body =
+              "## Symphony Heartbeat\n\ninstance_id: legacy-leader\ntimestamp: #{fresh_ts}\n"
+
+            {:ok,
+             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-legacy", "body" => body}]}]}}}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, LegacyOwnerHeartbeatClient)
+      previous_instance_id = Application.get_env(:symphony_elixir, :instance_id)
+      Application.put_env(:symphony_elixir, :instance_id, "test-instance")
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :monday_client_module)
+
+        if is_nil(previous_instance_id) do
+          Application.delete_env(:symphony_elixir, :instance_id)
+        else
+          Application.put_env(:symphony_elixir, :instance_id, previous_instance_id)
+        end
+      end)
+
+      :ok
+    end
+
+    test "fresh pre-M-7 body owned by a different instance still surfaces a conflict" do
+      # Owner from `instance_id:` line (no token: line) — must still block us.
+      assert {:error, {:lock_held_by_other, "legacy-leader", _ts}} = Adapter.acquire_heartbeat()
     end
   end
 
