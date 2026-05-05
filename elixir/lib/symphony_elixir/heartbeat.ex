@@ -109,12 +109,6 @@ defmodule SymphonyElixir.Heartbeat do
     end
   end
 
-  @doc false
-  @spec trigger_refresh_for_test(GenServer.server()) :: :ok
-  def trigger_refresh_for_test(server \\ __MODULE__) do
-    GenServer.call(server, :refresh_now)
-  end
-
   defp resolve_server(pid) when is_pid(pid) do
     if Process.alive?(pid), do: pid, else: nil
   end
@@ -160,11 +154,6 @@ defmodule SymphonyElixir.Heartbeat do
     }
 
     {:reply, snapshot, state}
-  end
-
-  def handle_call(:refresh_now, _from, %State{} = state) do
-    state = run_refresh(state)
-    {:reply, :ok, schedule_refresh(state)}
   end
 
   @impl true
