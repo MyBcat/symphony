@@ -236,9 +236,7 @@ defmodule SymphonyElixir.AutoMerge do
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: failed to post Codex Review workpad item_id=#{ctx.item_id} reason=#{inspect(reason)}"
-        )
+        Logger.warning("AutoMerge: failed to post Codex Review workpad item_id=#{ctx.item_id} reason=#{inspect(reason)}")
 
         :ok
     end
@@ -252,9 +250,7 @@ defmodule SymphonyElixir.AutoMerge do
         :ok
 
       {:error, post_reason} ->
-        Logger.warning(
-          "AutoMerge: failed to post Codex Review failure workpad item_id=#{ctx.item_id} reason=#{inspect(post_reason)}"
-        )
+        Logger.warning("AutoMerge: failed to post Codex Review failure workpad item_id=#{ctx.item_id} reason=#{inspect(post_reason)}")
 
         :ok
     end
@@ -282,9 +278,7 @@ defmodule SymphonyElixir.AutoMerge do
     end
   rescue
     e ->
-      Logger.warning(
-        "AutoMerge: resolve_repo_entry failed repo_key=#{inspect(repo_key)} reason=#{Exception.message(e)}; falling back to nil"
-      )
+      Logger.warning("AutoMerge: resolve_repo_entry failed repo_key=#{inspect(repo_key)} reason=#{Exception.message(e)}; falling back to nil")
 
       nil
   end
@@ -301,9 +295,7 @@ defmodule SymphonyElixir.AutoMerge do
   @symphony_repo_key "symphony"
 
   defp gate_repo_opt_in(%SymphonyElixir.Config.Schema.RepoEntry{key: @symphony_repo_key}) do
-    Logger.info(
-      "AutoMerge: gate_repo_opt_in held for hardcoded symphony repo (Spec 4 constraint #5); auto-merge is permanently disabled for this repo regardless of config"
-    )
+    Logger.info("AutoMerge: gate_repo_opt_in held for hardcoded symphony repo (Spec 4 constraint #5); auto-merge is permanently disabled for this repo regardless of config")
 
     {:hold, :repo_opt_in}
   end
@@ -333,9 +325,7 @@ defmodule SymphonyElixir.AutoMerge do
 
     cond do
       String.contains?(output, @block_signal) ->
-        Logger.info(
-          "AutoMerge: codex output contains explicit block signal #{inspect(@block_signal)}; holding"
-        )
+        Logger.info("AutoMerge: codex output contains explicit block signal #{inspect(@block_signal)}; holding")
 
         {:hold, :codex_pass_pattern}
 
@@ -347,9 +337,7 @@ defmodule SymphonyElixir.AutoMerge do
               else: {:hold, :codex_pass_pattern}
 
           {:error, reason} ->
-            Logger.warning(
-              "AutoMerge: invalid auto_merge_pass_pattern=#{inspect(pattern)} reason=#{inspect(reason)}; treating as held"
-            )
+            Logger.warning("AutoMerge: invalid auto_merge_pass_pattern=#{inspect(pattern)} reason=#{inspect(reason)}; treating as held")
 
             {:hold, :codex_pass_pattern}
         end
@@ -368,9 +356,7 @@ defmodule SymphonyElixir.AutoMerge do
         {:hold, :pr_size}
 
       {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: pr_diff_line_count failed url=#{pr_url} reason=#{inspect(reason)}; treating as held"
-        )
+        Logger.warning("AutoMerge: pr_diff_line_count failed url=#{pr_url} reason=#{inspect(reason)}; treating as held")
 
         {:hold, :pr_size}
     end
@@ -410,9 +396,7 @@ defmodule SymphonyElixir.AutoMerge do
         {:hold, :still_in_human_review}
 
       {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: fetch_issue_states_by_ids failed item_id=#{item_id} reason=#{inspect(reason)}; treating as held"
-        )
+        Logger.warning("AutoMerge: fetch_issue_states_by_ids failed item_id=#{item_id} reason=#{inspect(reason)}; treating as held")
 
         {:hold, :still_in_human_review}
     end
