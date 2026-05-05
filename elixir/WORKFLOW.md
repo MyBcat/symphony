@@ -131,7 +131,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-opus-4-7"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(make:*)", "Bash(mix:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)"]
   claude_sonnet:
     kind: claude
     max_concurrent: 6
@@ -141,7 +141,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-sonnet-4-6"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(make:*)", "Bash(mix:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)"]
   codex_gpt55_xhigh:
     kind: codex
     max_concurrent: 4
