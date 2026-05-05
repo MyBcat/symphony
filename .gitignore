@@ -1,0 +1,24 @@
+# Repo-root .gitignore — covers packaging artifacts added by Spec 4 §M-1
+# (Dockerfile / docker-compose.yml / bin/setup.sh / BOOTSTRAP.md). The Elixir
+# subtree carries its own elixir/.gitignore for build artifacts.
+
+# Per-host secrets — never commit. .env.example is the template.
+.env
+.env.*
+!.env.example
+
+# Default workspace volume target. Override via SYMPHONY_WORKSPACE_HOST_DIR.
+/_symphony_workspaces/
+
+# Symphony orchestration artifacts written by the agent / orchestrator.
+_symphony_summary.md
+_pr_body.md
+resume.md
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

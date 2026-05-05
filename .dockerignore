@@ -1,0 +1,47 @@
+# Keep the docker build context small and reproducible.
+# The Dockerfile only needs the Elixir tree under elixir/.
+
+# Top-level docs / packaging that have no role in the build.
+README.md
+RESUME.md
+SPEC.md
+NOTICE
+LICENSE
+BOOTSTRAP.md
+docker-compose.yml
+.gitignore
+.gitattributes
+.dockerignore
+.git
+.github
+.codex
+.claude
+docs
+
+# Repo-root packaging artifacts that are not needed inside the image.
+bin
+_symphony_workspaces
+_symphony_summary.md
+.env
+.env.*
+
+# Elixir-local build / runtime artefacts.
+elixir/_build
+elixir/deps
+elixir/cover
+elixir/doc
+elixir/log
+elixir/logs
+elixir/tmp
+elixir/bin
+elixir/.elixir_ls
+elixir/.fetch
+elixir/.codex
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+*.swo
+*~
+.idea
+.vscode
