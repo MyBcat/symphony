@@ -310,6 +310,115 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert is_binary(session.short_sha)
       assert %DateTime{} = session.started_at
     end
+
+    test "build_session carries the issue's repo into the session map" do
+      issue = %Issue{
+        id: "issue-build-repo-1",
+        identifier: "SYM-REPO",
+        title: "Repo session field",
+        description: "no PHI",
+        state: "Symphony Ready",
+        repo: "symphony"
+      }
+
+      session = AgentRunner.build_session(issue, "/tmp/x", nil)
+
+      assert session.repo == "symphony"
+    end
+
+    test "emit_failure_update posts a Monday Update with the SYM-11923123790 AC2 block format" do
+      session = %{
+        identifier: "SYM-FAIL",
+        profile_name: "claude_sonnet",
+        repo: "symphony",
+        host: "devbox",
+        workspace_path: "/tmp/ws",
+        short_sha: "abc1234",
+        started_at: DateTime.utc_now()
+      }
+
+      :ok =
+        AgentRunner.emit_failure_update(session, "issue-fail-1", :port_exit_nonzero,
+          message: "agent crashed with status 137",
+          stderr_tail: "boom\nfatal: out of memory"
+        )
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:failure_write, "issue-fail-1", body} ->
+                 lines = String.split(body, "\n")
+
+                 [first | _] = lines
+
+                 String.match?(
+                   first,
+                   ~r/^[\d\-T:Z\.]+ \| profile=claude_sonnet \| repo=symphony \| reason=port_exit_nonzero$/
+                 ) and
+                   Enum.member?(lines, "agent crashed with status 137") and
+                   Enum.member?(lines, "--- last 20 lines stderr ---") and
+                   Enum.any?(lines, &(&1 =~ "fatal: out of memory"))
+
+               _ ->
+                 false
+             end),
+             "expected failure_write with AC2 block format; got events=#{inspect(events)}"
+    end
+
+    test "emit_failure_update is a no-op when issue_id is empty" do
+      :ok =
+        AgentRunner.emit_failure_update(
+          %{profile_name: "p", repo: "r"},
+          "",
+          :workspace_create_failed,
+          message: "x"
+        )
+
+      events = MemoryMonday.events()
+
+      refute Enum.any?(events, fn
+               {:failure_write, _, _} -> true
+               _ -> false
+             end)
+    end
+
+    test "emit_failure_update_via_writer pulls session off the writer pid",
+         %{issue: issue, writer_pid: writer_pid} do
+      :ok =
+        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded,
+          message: "max_turns reached"
+        )
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:failure_write, "issue-runner-1", body} ->
+                 String.contains?(body, "reason=max_turns_exceeded") and
+                   String.contains?(body, "max_turns reached")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write via writer; got events=#{inspect(events)}"
+    end
+
+    test "emit_failure_update_via_writer is a no-op when the writer is already dead",
+         %{issue: issue} do
+      {:ok, dead_pid} = Agent.start(fn -> %{session: %{}} end)
+      Agent.stop(dead_pid)
+
+      :ok =
+        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter,
+          message: "should not be posted"
+        )
+
+      events = MemoryMonday.events()
+
+      refute Enum.any?(events, fn
+               {:failure_write, _, _} -> true
+               _ -> false
+             end)
+    end
   end
 
   describe "profile-based dispatch" do
@@ -617,6 +726,17 @@ defmodule SymphonyElixir.AgentRunnerTest do
                {:status_write, "issue-profile-error-1", "Cancelled"} -> true
                _ -> false
              end)
+
+      # SYM-11923123790 AC1: profile resolution failures must post a Monday
+      # failure update so the operator sees the denial without grepping logs.
+      assert Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, "issue-profile-error-1", body} ->
+                 String.contains?(body, "reason=profile_resolution_failed")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write for profile_resolution_failed; got events=#{inspect(MemoryMonday.events())}"
     end
 
     test "repo allowed_profiles blocks disallowed profile before adapter dispatch" do
@@ -666,6 +786,53 @@ defmodule SymphonyElixir.AgentRunnerTest do
       end
 
       refute_received {:start_session, _pid, _workspace, _config}
+
+      # SYM-11923123790 AC1: per-repo allowlist denial must post a Monday
+      # failure update naming the profile and repo.
+      assert Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, "issue-repo-profile-denied", body} ->
+                 String.contains?(body, "reason=profile_not_allowed_on_repo") and
+                   String.contains?(body, "claude_opus") and
+                   String.contains?(body, "symphony")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write for profile_not_allowed_on_repo; got events=#{inspect(MemoryMonday.events())}"
+    end
+
+    test "max_turns_exceeded posts a Monday failure update with reason=max_turns_exceeded" do
+      install_recording_adapter(:claude)
+      configure_profiles_workflow(:claude, "claude_test")
+
+      issue = %Issue{
+        id: "issue-max-turns-1",
+        identifier: "SYM-MAXT",
+        title: "Max turns",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-MAXT",
+        profile: "claude_test",
+        assigned_to_worker: true
+      }
+
+      # Force the issue to look active after each turn so the runner exhausts
+      # max_turns rather than seeing the issue transition out of an active
+      # state.
+      fetcher = fn _ids -> {:ok, [%{issue | state: "In Progress"}]} end
+
+      AgentRunner.run(issue, self(), max_turns: 1, issue_state_fetcher: fetcher)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:failure_write, "issue-max-turns-1", body} ->
+                 String.contains?(body, "reason=max_turns_exceeded")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write reason=max_turns_exceeded; got events=#{inspect(events)}"
     end
 
     test "Codex AgentRuntime map config controls launched command and session policies" do
@@ -790,6 +957,85 @@ defmodule SymphonyElixir.AgentRunnerTest do
       end
     end
 
+    test "exception raised by an adapter posts a failure update with reason=exception_in_adapter" do
+      Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
+        claude: SymphonyElixir.AgentRunnerTest.RaisingAdapter
+      })
+
+      configure_profiles_workflow(:claude, "claude_test")
+
+      issue = %Issue{
+        id: "issue-raise-1",
+        identifier: "SYM-RAISE",
+        title: "Raising adapter",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-RAISE",
+        profile: "claude_test",
+        repo: "symphony",
+        assigned_to_worker: true
+      }
+
+      assert_raise RuntimeError, ~r/boom in start_session/, fn ->
+        AgentRunner.run(issue, self(), max_turns: 1)
+      end
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:failure_write, "issue-raise-1", body} ->
+                 String.contains?(body, "reason=exception_in_adapter") and
+                   String.contains?(body, "boom in start_session")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write reason=exception_in_adapter; got events=#{inspect(events)}"
+
+      # Crash workpad still renders + status flips to Cancelled (existing
+      # behaviour preserved alongside the new failure update).
+      assert Enum.any?(events, fn
+               {:status_write, "issue-raise-1", "Cancelled"} -> true
+               _ -> false
+             end)
+    end
+
+    test "{:error, reason} from an adapter posts a failure update tagged with the reason atom" do
+      Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
+        claude: SymphonyElixir.AgentRunnerTest.PortExitAdapter
+      })
+
+      configure_profiles_workflow(:claude, "claude_test")
+
+      issue = %Issue{
+        id: "issue-portexit-1",
+        identifier: "SYM-PE",
+        title: "Port exit adapter",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-PE",
+        profile: "claude_test",
+        repo: "symphony",
+        assigned_to_worker: true
+      }
+
+      assert_raise RuntimeError, ~r/port_exit/, fn ->
+        AgentRunner.run(issue, self(), max_turns: 1)
+      end
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:failure_write, "issue-portexit-1", body} ->
+                 String.contains?(body, "reason=port_exit_nonzero") and
+                   String.contains?(body, "agent run failed")
+
+               _ ->
+                 false
+             end),
+             "expected failure_write reason=port_exit_nonzero; got events=#{inspect(events)}"
+    end
+
     defp install_recording_adapter(kind) do
       Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
         kind => RecordingAdapter
@@ -858,6 +1104,52 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
     @impl true
     def start_session(_workspace, _config), do: {:ok, %{}}
+
+    @impl true
+    def send_turn(_session, _prompt, _opts), do: :ok
+
+    @impl true
+    def stream_events(_session), do: Stream.cycle([]) |> Stream.take(0)
+
+    @impl true
+    def stop_session(_session), do: :ok
+
+    @impl true
+    def runtime_native_tokens(_session), do: %{input: 0, output: 0, total: 0}
+
+    @impl true
+    def passes_safety_floor?(_config, _floor), do: true
+  end
+
+  defmodule RaisingAdapter do
+    @moduledoc false
+    @behaviour SymphonyElixir.AgentRuntime
+
+    @impl true
+    def start_session(_workspace, _config), do: raise("boom in start_session")
+
+    @impl true
+    def send_turn(_session, _prompt, _opts), do: :ok
+
+    @impl true
+    def stream_events(_session), do: Stream.cycle([]) |> Stream.take(0)
+
+    @impl true
+    def stop_session(_session), do: :ok
+
+    @impl true
+    def runtime_native_tokens(_session), do: %{input: 0, output: 0, total: 0}
+
+    @impl true
+    def passes_safety_floor?(_config, _floor), do: true
+  end
+
+  defmodule PortExitAdapter do
+    @moduledoc false
+    @behaviour SymphonyElixir.AgentRuntime
+
+    @impl true
+    def start_session(_workspace, _config), do: {:error, {:port_exit, 137}}
 
     @impl true
     def send_turn(_session, _prompt, _opts), do: :ok
