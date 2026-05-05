@@ -20,34 +20,35 @@ defmodule SymphonyElixir.HttpServer do
   def start_link(opts \\ []) do
     case Keyword.get(opts, :port, Config.server_port()) do
       port when is_integer(port) and port >= 0 ->
-        host = Keyword.get(opts, :host, Config.settings!().server.host)
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
-        if host in ["0.0.0.0", "[::]", "::"] do
+        # Localhost binding is hard-coded per HIPAA constraint — agent stderr must
+        # never be exposed externally via the dashboard.
+        if Keyword.get(opts, :host) in ["0.0.0.0", "[::]", "::"] do
           raise RuntimeError,
-                "Symphony dashboard MUST NOT bind to #{host} (HIPAA — agent stderr can leak). " <>
-                  "Set server.host to 127.0.0.1 in WORKFLOW.md."
+                "Symphony dashboard MUST NOT bind to 0.0.0.0 (HIPAA — agent stderr can leak via dashboard if exposed). " <>
+                  "Localhost binding is non-negotiable."
         end
 
-        with {:ok, ip} <- parse_host(host) do
-          endpoint_opts = [
-            server: true,
-            http: [ip: ip, port: port],
-            url: [host: normalize_host(host)],
-            orchestrator: orchestrator,
-            snapshot_timeout_ms: snapshot_timeout_ms,
-            secret_key_base: secret_key_base()
-          ]
+        ip = {127, 0, 0, 1}
 
-          endpoint_config =
-            :symphony_elixir
-            |> Application.get_env(Endpoint, [])
-            |> Keyword.merge(endpoint_opts)
+        endpoint_opts = [
+          server: true,
+          http: [ip: ip, port: port],
+          url: [host: "127.0.0.1"],
+          orchestrator: orchestrator,
+          snapshot_timeout_ms: snapshot_timeout_ms,
+          secret_key_base: secret_key_base()
+        ]
 
-          Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
-          Endpoint.start_link()
-        end
+        endpoint_config =
+          :symphony_elixir
+          |> Application.get_env(Endpoint, [])
+          |> Keyword.merge(endpoint_opts)
+
+        Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
+        Endpoint.start_link()
 
       _ ->
         :ignore

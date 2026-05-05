@@ -61,6 +61,7 @@ defmodule SymphonyElixirWeb.AgentsLive do
                 <tr>
                   <th>ID</th>
                   <th>Repo</th>
+                  <th>Profile</th>
                   <th>Age / Turns</th>
                   <th>Tokens</th>
                   <th>Last Event</th>
@@ -70,6 +71,7 @@ defmodule SymphonyElixirWeb.AgentsLive do
                 <tr :for={entry <- @payload.running}>
                   <td><span class="issue-id"><%= entry.issue_identifier %></span></td>
                   <td><%= repo_from_entry(entry) %></td>
+                  <td><%= entry.profile || "—" %></td>
                   <td class="numeric"><%= format_age_and_turns(entry.started_at, entry.turn_count, @now) %></td>
                   <td class="numeric">
                     <div class="token-stack">
@@ -105,11 +107,14 @@ defmodule SymphonyElixirWeb.AgentsLive do
   end
 
   defp repo_from_entry(entry) do
-    case Map.get(entry, :workspace_path) do
-      path when is_binary(path) and path != "" ->
-        path |> Path.basename() |> String.slice(0, 30)
+    cond do
+      is_binary(Map.get(entry, :repo)) and entry.repo != "" ->
+        entry.repo |> String.slice(0, 30)
 
-      _ ->
+      is_binary(Map.get(entry, :workspace_path)) and entry.workspace_path != "" ->
+        entry.workspace_path |> Path.basename() |> String.slice(0, 30)
+
+      true ->
         "n/a"
     end
   end
