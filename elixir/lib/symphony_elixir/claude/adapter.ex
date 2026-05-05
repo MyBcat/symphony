@@ -36,6 +36,8 @@ defmodule SymphonyElixir.Claude.Adapter do
         {:error, {:sandbox_floor_violation, :claude, :config}}
 
       true ->
+        cmd = build_full_command(cmd, config)
+
         with {:ok, port} <- open_bash_port(cmd, workspace_path) do
           {:ok,
            %{
@@ -47,6 +49,59 @@ defmodule SymphonyElixir.Claude.Adapter do
            }}
         end
     end
+  end
+
+  @doc false
+  @spec build_full_command(String.t(), map()) :: String.t()
+  def build_full_command(base_cmd, config) when is_binary(base_cmd) do
+    if claude_invocation?(base_cmd) do
+      [base_cmd]
+      |> append_flag("--model", get_field(config, :model))
+      |> append_flag("--permission-mode", get_field(config, :permission_mode))
+      |> append_allowed_tools(get_field(config, :allowed_tools))
+      |> Enum.join(" ")
+    else
+      base_cmd
+    end
+  end
+
+  defp claude_invocation?(cmd) when is_binary(cmd) do
+    cmd
+    |> String.split(~r/\s+/, parts: 2, trim: true)
+    |> List.first("")
+    |> Path.basename()
+    |> String.equivalent?("claude")
+  end
+
+  defp append_flag(parts, _flag, nil), do: parts
+  defp append_flag(parts, _flag, ""), do: parts
+
+  defp append_flag(parts, flag, value) when is_binary(value) do
+    parts ++ [flag, shell_quote(value)]
+  end
+
+  defp append_flag(parts, flag, value) when is_atom(value) do
+    append_flag(parts, flag, Atom.to_string(value))
+  end
+
+  defp append_allowed_tools(parts, nil), do: parts
+  defp append_allowed_tools(parts, []), do: parts
+
+  defp append_allowed_tools(parts, tools) when is_list(tools) do
+    quoted = tools |> Enum.map(&shell_quote/1) |> Enum.join(" ")
+    parts ++ ["--allowed-tools", quoted]
+  end
+
+  defp shell_quote(value) when is_binary(value) do
+    if String.match?(value, ~r/^[A-Za-z0-9_\-\.,\/:=]+$/) do
+      value
+    else
+      "'" <> String.replace(value, "'", "'\\''") <> "'"
+    end
+  end
+
+  defp get_field(config, key) when is_atom(key) do
+    config[key] || config[Atom.to_string(key)]
   end
 
   @impl SymphonyElixir.AgentRuntime
