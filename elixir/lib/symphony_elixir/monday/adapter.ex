@@ -437,7 +437,7 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   @impl true
   def post_failure_update(item_id, body) do
-    safe_body = redact_phi(body || "")
+    safe_body = sanitize_failure_body(body || "")
     full_body = "#{@failure_marker}\n#{safe_body}"
     capped = cap_failure_body(full_body)
 
@@ -451,6 +451,15 @@ defmodule SymphonyElixir.Monday.Adapter do
   # Defense in depth: scrub PHI before posting any failure body, in case a
   # call site forgets to scrub stderr or includes a copied-in error string.
   # Per Spec 4 §2.5 / SYM-11923123790 AC5: NEVER post the raw body.
+  defp sanitize_failure_body(body) when is_binary(body) do
+    body
+    |> redact_phi()
+    |> redact_secret_fragments()
+    |> redact_home_paths()
+  end
+
+  defp sanitize_failure_body(_), do: ""
+
   defp redact_phi(body) when is_binary(body) do
     case PHIDetector.scan(body) do
       :clean ->
@@ -469,6 +478,30 @@ defmodule SymphonyElixir.Monday.Adapter do
 
   defp redact_phi(_), do: ""
 
+  defp redact_secret_fragments(body) when is_binary(body) do
+    body
+    |> Regex.replace(
+      ~r/\b(Bearer\s+)[A-Za-z0-9._~+\/=-]{12,}/i,
+      fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
+    )
+    |> Regex.replace(
+      ~r/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS)[A-Za-z0-9_]*\s*[:=]\s*)[^\s,;&]+/i,
+      fn _full, prefix -> prefix <> "[REDACTED-SECRET]" end
+    )
+    |> Regex.replace(
+      ~r/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/,
+      "[REDACTED-SECRET]"
+    )
+  end
+
+  defp redact_home_paths(body) when is_binary(body) do
+    Regex.replace(
+      ~r{(?<![A-Za-z0-9._-])/(?:home|Users)/[^/\s:]+(?:/[^\s]*)?},
+      body,
+      "[REDACTED-HOME-PATH]"
+    )
+  end
+
   defp cap_failure_body(body) when is_binary(body) do
     cond do
       byte_size(body) <= @failure_body_max_bytes ->
@@ -481,8 +514,38 @@ defmodule SymphonyElixir.Monday.Adapter do
 
       true ->
         budget = @failure_body_max_bytes - byte_size(@failure_truncation_suffix)
-        binary_part(body, 0, budget) <> @failure_truncation_suffix
+        utf8_prefix(body, budget) <> @failure_truncation_suffix
     end
+  end
+
+  defp utf8_prefix(body, max_bytes) when byte_size(body) <= max_bytes, do: body
+
+  defp utf8_prefix(body, max_bytes)
+       when is_binary(body) and is_integer(max_bytes) and max_bytes > 0 do
+    do_utf8_prefix(body, max_bytes, [])
+  end
+
+  defp utf8_prefix(_body, _max_bytes), do: ""
+
+  defp do_utf8_prefix(<<>>, _remaining, acc),
+    do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp do_utf8_prefix(_body, remaining, acc) when remaining <= 0,
+    do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp do_utf8_prefix(<<char::utf8, rest::binary>>, remaining, acc) do
+    encoded = <<char::utf8>>
+    size = byte_size(encoded)
+
+    if size <= remaining do
+      do_utf8_prefix(rest, remaining - size, [encoded | acc])
+    else
+      acc |> Enum.reverse() |> IO.iodata_to_binary()
+    end
+  end
+
+  defp do_utf8_prefix(<<_invalid_byte, rest::binary>>, remaining, acc) do
+    do_utf8_prefix(rest, remaining, acc)
   end
 
   @impl true

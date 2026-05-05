@@ -467,6 +467,50 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert String.starts_with?(body, "## Symphony Failures")
     end
 
+    test "post_failure_update leaves an exactly 8 KiB body uncapped" do
+      marker_bytes = byte_size("## Symphony Failures\n")
+      raw_body = String.duplicate("a", 8 * 1024 - marker_bytes)
+
+      assert :ok = Adapter.post_failure_update("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      assert byte_size(body) == 8 * 1024
+      refute String.ends_with?(body, "[truncated]")
+    end
+
+    test "post_failure_update truncates on valid UTF-8 boundaries" do
+      marker_bytes = byte_size("## Symphony Failures\n")
+      suffix_bytes = byte_size("[truncated]")
+      prefix_bytes = 8 * 1024 - suffix_bytes
+      ascii_before_multibyte = prefix_bytes - marker_bytes - 1
+      raw_body = String.duplicate("a", ascii_before_multibyte) <> "🙂" <> String.duplicate("b", 128)
+
+      assert :ok = Adapter.post_failure_update("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      assert byte_size(body) <= 8 * 1024
+      assert String.valid?(body)
+      assert String.ends_with?(body, "[truncated]")
+      refute body =~ "🙂"
+    end
+
+    test "post_failure_update redacts common secrets and home paths before posting" do
+      raw_body = """
+      token escaped in stderr: MONDAY_API_TOKEN=secret-token-value
+      bearer escaped in stderr: Bearer abcdefghijklmnop1234567890
+      home path escaped in stderr: /home/ankit114/code/symphony-workspaces/SYM-1
+      """
+
+      assert :ok = Adapter.post_failure_update("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      refute body =~ "secret-token-value"
+      refute body =~ "abcdefghijklmnop1234567890"
+      refute body =~ "/home/ankit114"
+      assert body =~ "[REDACTED-SECRET]"
+      assert body =~ "[REDACTED-HOME-PATH]"
+    end
+
     test "post_failure_update leaves bodies under the cap untouched and uses single-newline marker" do
       assert :ok = Adapter.post_failure_update("9482736152", "short body")
       assert_received {:graphql, _query, %{"body" => body}}
