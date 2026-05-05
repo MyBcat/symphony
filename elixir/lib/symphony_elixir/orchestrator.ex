@@ -173,7 +173,7 @@ defmodule SymphonyElixir.Orchestrator do
   # orchestrator. The first poll tick will surface the same error via the
   # normal dispatch path with the existing logging story.
   defp run_boot_phi_scan do
-    case Tracker.fetch_candidate_issues_with_phi_findings() do
+    case Tracker.fetch_candidate_issues_with_phi_findings(limit: 50) do
       {:ok, %{phi_offenders: []}} ->
         :ok
 
@@ -962,6 +962,12 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
+      {:error, {:phi_detected, offender}} ->
+        handle_dispatch_phi_offender(state, offender, issue, attempt, preferred_worker_host)
+
+      {:error, {:phi_detector_failed, offender}} ->
+        handle_dispatch_phi_offender(state, offender, issue, attempt, preferred_worker_host)
+
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
         state
@@ -974,11 +980,34 @@ defmodule SymphonyElixir.Orchestrator do
         do_dispatch_issue_after_phi(state, issue, attempt, preferred_worker_host)
 
       {:error, reason} ->
-        Logger.error("PHI detected in tracker item; skipping dispatch (operator must redact): #{issue_context(issue)} reason=#{inspect(reason)}")
-
-        state
+        offender = phi_offender_from_issue(issue, reason)
+        handle_dispatch_phi_offender(state, offender, issue, attempt, preferred_worker_host)
     end
   end
+
+  defp handle_dispatch_phi_offender(%State{} = state, offender, issue, attempt, preferred_worker_host)
+       when is_map(offender) do
+    case PHIGate.mode() do
+      :strict ->
+        PHIGate.refuse(offender)
+        state
+
+      :warn ->
+        PHIGate.warn(offender)
+        do_dispatch_issue_after_phi(state, issue, attempt, preferred_worker_host)
+    end
+  end
+
+  defp phi_offender_from_issue(%Issue{} = issue, reason) do
+    %{
+      id: issue.id,
+      identifier: issue.identifier || issue.id || "unknown",
+      kinds: [phi_reason_kind(reason)]
+    }
+  end
+
+  defp phi_reason_kind(reason) when is_atom(reason), do: reason
+  defp phi_reason_kind(_reason), do: :unknown
 
   defp do_dispatch_issue_after_phi(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()

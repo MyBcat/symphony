@@ -25,11 +25,16 @@ defmodule SymphonyElixir.Monday.Item do
 
   @type t :: Issue.t()
 
-  @spec from_monday(map(), config()) ::
+  @spec from_monday(map(), config(), keyword()) ::
           {:ok, t()}
-          | {:error, {:missing_column, String.t()} | {:phi_detected, [PHIDetector.finding()]}}
-  def from_monday(raw, config) when is_map(raw) and is_map(config) do
+          | {:error,
+             {:missing_column, String.t()}
+             | {:phi_detected, [PHIDetector.finding()]}
+             | {:phi_detector_failed, :title | :description}}
+  def from_monday(raw, config, opts \\ []) when is_map(raw) and is_map(config) do
+    scan_phi? = Keyword.get(opts, :scan_phi?, true)
     title = Map.get(raw, "name", "")
+
     description =
       column_text(raw, config[:description_column_id])
       |> ensure_blank()
@@ -38,8 +43,8 @@ defmodule SymphonyElixir.Monday.Item do
         text -> text
       end
 
-    with :clean <- PHIDetector.scan(title),
-         :clean <- PHIDetector.scan(description),
+    with :clean <- scan_phi(:title, title, scan_phi?),
+         :clean <- scan_phi(:description, description, scan_phi?),
          {:ok, state} <- require_column_text(raw, config.symphony_status_column_id) do
       identifier = "#{config.identifier_prefix}-#{raw["id"]}"
 
@@ -63,8 +68,25 @@ defmodule SymphonyElixir.Monday.Item do
       {:ok, item}
     else
       {:phi, findings} -> {:error, {:phi_detected, findings}}
+      {:error, {:phi_detector_failed, _field}} = err -> err
       {:error, _} = err -> err
     end
+  end
+
+  defp scan_phi(_field, _text, false), do: :clean
+
+  defp scan_phi(field, text, true) when field in [:title, :description] do
+    try do
+      phi_detector().scan(text)
+    catch
+      _kind, _reason -> {:error, {:phi_detector_failed, field}}
+    rescue
+      _error -> {:error, {:phi_detector_failed, field}}
+    end
+  end
+
+  defp phi_detector do
+    Application.get_env(:symphony_elixir, :phi_detector_module, PHIDetector)
   end
 
   defp require_column_text(raw, column_id) when is_binary(column_id) do

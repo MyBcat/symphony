@@ -40,6 +40,18 @@ defmodule SymphonyElixir.Tracker do
   def fetch_candidate_issues_with_phi_findings,
     do: adapter().fetch_candidate_issues_with_phi_findings()
 
+  @spec fetch_candidate_issues_with_phi_findings(keyword()) ::
+          {:ok, fetch_with_phi_result()} | {:error, term()}
+  def fetch_candidate_issues_with_phi_findings(opts) when is_list(opts) do
+    adapter = adapter()
+
+    if function_exported?(adapter, :fetch_candidate_issues_with_phi_findings, 1) do
+      adapter.fetch_candidate_issues_with_phi_findings(opts)
+    else
+      adapter.fetch_candidate_issues_with_phi_findings()
+    end
+  end
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issues_by_states(states), do: adapter().fetch_issues_by_states(states)
 

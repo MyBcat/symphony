@@ -26,7 +26,12 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
   def fetch_issues_by_states(states), do: {:ok, get_state({:items_in_states, states}, [])}
 
   @impl true
-  def fetch_issue_states_by_ids(_ids), do: {:ok, get_state(:item_states, [])}
+  def fetch_issue_states_by_ids(_ids) do
+    case get_state(:item_states_result, nil) do
+      nil -> {:ok, get_state(:item_states, [])}
+      result -> result
+    end
+  end
 
   @impl true
   def update_issue_state(item_id, state) do

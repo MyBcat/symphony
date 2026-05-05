@@ -413,6 +413,65 @@ defmodule SymphonyElixir.OrchestratorTest do
       end)
     end
 
+    test "strict mode refuses PHI introduced between page fetch and dispatch refresh" do
+      issue = %Issue{
+        id: "issue-phi-race-1",
+        identifier: "SYM-PHI-RACE-1",
+        title: "Engineering task",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-PHI-RACE-1",
+        assigned_to_worker: true
+      }
+
+      offender = %{
+        id: issue.id,
+        identifier: issue.identifier,
+        kinds: [:patient_name]
+      }
+
+      MemoryMonday.set(:phi_findings_result, {:ok, %{items: [issue], phi_offenders: []}})
+      MemoryMonday.set(:item_states_result, {:error, {:phi_detected, offender}})
+
+      orchestrator_name = Module.concat(__MODULE__, :PHIRefreshRaceOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      _ = :sys.get_state(pid)
+      MemoryMonday.set(:events, [])
+
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+        Process.sleep(150)
+      end)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:phi_refusal_write, "issue-phi-race-1", body} ->
+                 String.starts_with?(body, "## Symphony PHI Refusal") and
+                   body =~ "patient_name"
+
+               _ ->
+                 false
+             end),
+             "expected PHI refusal write for refresh race; events=#{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:status_write, "issue-phi-race-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected status flip to Cancelled for refresh race; events=#{inspect(events)}"
+
+      state = :sys.get_state(pid)
+      refute Map.has_key?(state.running, issue.id)
+    end
+
     test "strict mode does not crash the orchestrator when PHI offenders coexist with handoff-state items" do
       # Handoff-state items are claimed but not dispatched to new agents, so
       # this test asserts the PHI refusal flow does not poison the same poll
