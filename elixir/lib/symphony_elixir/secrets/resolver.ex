@@ -142,9 +142,22 @@ defmodule SymphonyElixir.Secrets.Resolver do
         annotate(err, repo_key)
 
       {:error, _reason} = err ->
+        # Defense in depth: a post-write failure (e.g., chmod or verify_env_file
+        # tripping after the Python writer already produced a partial file)
+        # could otherwise leave a `.env.symphony` on disk with potentially
+        # unsafe perms. Remove it on every error path so the caller sees a
+        # clean workspace plus the structured failure tuple.
+        cleanup_partial_env_file(workspace_path)
         annotate(err, repo_key)
     end
   end
+
+  defp cleanup_partial_env_file(workspace_path) when is_binary(workspace_path) do
+    _ = File.rm_rf(env_file_path(workspace_path))
+    :ok
+  end
+
+  defp cleanup_partial_env_file(_workspace_path), do: :ok
 
   @doc """
   Verify every declared secret resolves successfully. Used at boot

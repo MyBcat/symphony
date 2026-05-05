@@ -184,6 +184,29 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
 
       refute File.exists?(Path.join(workspace, ".env.symphony"))
     end
+
+    test "cleans up an unsafe-mode .env.symphony left on disk by a post-write failure" do
+      # Simulate the rare race where the Python writer succeeded but a later
+      # step in `write_env_file/3` (e.g., chmod denied by a quirky filesystem)
+      # erred out. Pre-create a `.env.symphony` and a manifest that's missing
+      # one of the requested keys so secret_exec.py exits non-zero AFTER the
+      # post-write cleanup branch is exercised. The `cleanup_partial_env_file`
+      # helper must remove the file so the caller never sees stale bindings.
+      workspace = make_workspace!()
+      stale_path = Path.join(workspace, ".env.symphony")
+      File.write!(stale_path, "STALE_TOKEN='leftover-from-prior-attempt'\n")
+      File.chmod!(stale_path, 0o600)
+
+      assert {:error, {:secret_resolution_failed, "demo-repo", _reason}} =
+               Resolver.write_env_file(
+                 ["mybcat/does-not-exist:UNKNOWN_TOKEN"],
+                 workspace,
+                 secret_exec_path: @fake_secret_exec,
+                 repo_key: "demo-repo"
+               )
+
+      refute File.exists?(stale_path)
+    end
   end
 
   describe "check_one/3 (with fake secret_exec)" do
