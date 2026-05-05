@@ -3,6 +3,60 @@ defmodule SymphonyElixir.Claude.AdapterTest do
 
   alias SymphonyElixir.Claude.Adapter
 
+  describe "build_full_command/2" do
+    test "appends model permission mode and allowed tools to a Claude command" do
+      command = "claude --print --output-format stream-json --input-format stream-json"
+
+      config = %{
+        model: "claude-opus-4-7",
+        permission_mode: "acceptEdits",
+        allowed_tools: ["Read", "Edit", "Bash(git:*)"]
+      }
+
+      assert Adapter.build_full_command(command, config) ==
+               "claude --print --output-format stream-json --input-format stream-json " <>
+                 "--model claude-opus-4-7 --permission-mode acceptEdits " <>
+                 "--allowed-tools 'Read,Edit,Bash(git:*)'"
+    end
+
+    test "does not modify non-Claude commands" do
+      command = "printf '%s\\n' ok"
+
+      assert Adapter.build_full_command(command, %{
+               model: "claude-opus-4-7",
+               permission_mode: "acceptEdits",
+               allowed_tools: ["Read"]
+             }) == command
+    end
+
+    test "shell-quotes allowed tool names containing shell metacharacters" do
+      assert Adapter.build_full_command("claude --print", %{allowed_tools: ["Bash(git:*)"]}) ==
+               "claude --print --allowed-tools 'Bash(git:*)'"
+    end
+
+    test "detects an absolute path to claude as a Claude invocation" do
+      assert Adapter.build_full_command("/usr/bin/claude --print", %{model: "claude-sonnet-4-6"}) ==
+               "/usr/bin/claude --print --model claude-sonnet-4-6"
+    end
+
+    test "detects claude-code as a Claude invocation" do
+      assert Adapter.build_full_command("claude-code --print", %{model: "claude-sonnet-4-6"}) ==
+               "claude-code --print --model claude-sonnet-4-6"
+    end
+
+    test "detects env-wrapped claude commands" do
+      assert Adapter.build_full_command("env -u FOO claude --print", %{
+               permission_mode: "acceptEdits"
+             }) ==
+               "env -u FOO claude --print --permission-mode acceptEdits"
+    end
+
+    test "shell-quotes model values containing shell metacharacters" do
+      assert Adapter.build_full_command("claude --print", %{model: "opus;rm -rf /"}) ==
+               "claude --print --model 'opus;rm -rf /'"
+    end
+  end
+
   describe "passes_safety_floor?/2" do
     test "passes when permission_mode is acceptEdits and allowed_tools have no danger Bash globs" do
       safe = %{permission_mode: "acceptEdits", allowed_tools: ["Read", "Edit", "Bash(git:*)"]}
@@ -55,8 +109,7 @@ defmodule SymphonyElixir.Claude.AdapterTest do
 
     test "stream_events halts after emitting port exit" do
       config = %{
-        command:
-          "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess_stream\"}'",
+        command: "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess_stream\"}'",
         permission_mode: "acceptEdits",
         allowed_tools: ["Read"],
         _safety_floor: %{"permission_mode" => "acceptEdits"}

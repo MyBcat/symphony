@@ -67,10 +67,79 @@ defmodule SymphonyElixir.Claude.Adapter do
 
   defp claude_invocation?(cmd) when is_binary(cmd) do
     cmd
-    |> String.split(~r/\s+/, parts: 2, trim: true)
-    |> List.first("")
+    |> shell_words()
+    |> invocation_executable()
+    |> claude_executable?()
+  end
+
+  defp shell_words(cmd) do
+    ~r/(?:[^\s'"]+|'[^']*'|"[^"]*")+/u
+    |> Regex.scan(cmd)
+    |> Enum.map(fn [word] -> strip_wrapping_quotes(word) end)
+  end
+
+  defp strip_wrapping_quotes(<<quote, rest::binary>>) when quote in [?\", ?'] do
+    if String.ends_with?(rest, <<quote>>) do
+      binary_part(rest, 0, byte_size(rest) - 1)
+    else
+      <<quote, rest::binary>>
+    end
+  end
+
+  defp strip_wrapping_quotes(word), do: word
+
+  defp invocation_executable([]), do: nil
+
+  defp invocation_executable([token | rest]) do
+    cond do
+      env_assignment?(token) ->
+        invocation_executable(rest)
+
+      env_executable?(token) ->
+        rest
+        |> drop_env_prefix()
+        |> invocation_executable()
+
+      true ->
+        token
+    end
+  end
+
+  defp env_assignment?(token) when is_binary(token) do
+    String.match?(token, ~r/^[A-Za-z_][A-Za-z0-9_]*=.*/)
+  end
+
+  defp env_executable?(token) when is_binary(token) do
+    token
     |> Path.basename()
-    |> String.equivalent?("claude")
+    |> String.equivalent?("env")
+  end
+
+  defp drop_env_prefix([]), do: []
+  defp drop_env_prefix(["--" | rest]), do: rest
+  defp drop_env_prefix(["-u", _name | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["--unset", _name | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix([<<"--unset=", _::binary>> | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["-C", _dir | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["--chdir", _dir | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix([<<"--chdir=", _::binary>> | rest]), do: drop_env_prefix(rest)
+
+  defp drop_env_prefix([option | rest]) when option in ["-i", "--ignore-environment"] do
+    drop_env_prefix(rest)
+  end
+
+  defp drop_env_prefix([token | rest]) do
+    if env_assignment?(token), do: drop_env_prefix(rest), else: [token | rest]
+  end
+
+  defp claude_executable?(nil), do: false
+
+  defp claude_executable?(token) do
+    # Symphony workers are Linux hosts; Windows-only names like claude.exe are
+    # intentionally out of scope.
+    token
+    |> Path.basename()
+    |> then(&(&1 in ["claude", "claude-code"]))
   end
 
   defp append_flag(parts, _flag, nil), do: parts
@@ -88,7 +157,9 @@ defmodule SymphonyElixir.Claude.Adapter do
   defp append_allowed_tools(parts, []), do: parts
 
   defp append_allowed_tools(parts, tools) when is_list(tools) do
-    quoted = tools |> Enum.map(&shell_quote/1) |> Enum.join(" ")
+    # Claude accepts comma- or space-separated values; a single comma-separated
+    # shell word avoids the variadic flag swallowing later flags if we add any.
+    quoted = tools |> Enum.join(",") |> shell_quote()
     parts ++ ["--allowed-tools", quoted]
   end
 
@@ -106,6 +177,8 @@ defmodule SymphonyElixir.Claude.Adapter do
 
   @impl SymphonyElixir.AgentRuntime
   def send_turn(%{port: port}, prompt, _opts) when is_port(port) do
+    # stream-json input is newline-delimited over a live stdin stream; AgentRunner
+    # consumes stdout until Claude emits a terminal turn event or exits.
     payload =
       Jason.encode!(%{
         "type" => "user",
