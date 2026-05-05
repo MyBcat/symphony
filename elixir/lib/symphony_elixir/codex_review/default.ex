@@ -89,15 +89,29 @@ defmodule SymphonyElixir.CodexReview.Default do
         false
 
       root ->
-        canonical_cwd = Path.expand(cwd)
-        canonical_root = Path.expand(root)
-
-        # Allow exact match OR descendant; reject siblings or unrelated.
-        canonical_cwd == canonical_root or
-          String.starts_with?(canonical_cwd <> "/", canonical_root <> "/")
+        # Resolve symlinks via :file.read_link_all/1 (Path.expand only resolves
+        # `..` segments, not symlinks — a symlink inside the workspace pointing
+        # outside it would otherwise pass the prefix check).
+        with {:ok, canonical_cwd} <- realpath(cwd),
+             {:ok, canonical_root} <- realpath(root) do
+          # Allow exact match OR descendant; reject siblings or unrelated.
+          canonical_cwd == canonical_root or
+            String.starts_with?(canonical_cwd <> "/", canonical_root <> "/")
+        else
+          _ -> false
+        end
     end
   rescue
     _ -> false
+  end
+
+  defp realpath(path) when is_binary(path) do
+    expanded = Path.expand(path)
+
+    case :file.read_link_all(String.to_charlist(expanded)) do
+      {:ok, resolved} -> {:ok, List.to_string(resolved)}
+      {:error, _} -> {:error, :realpath_failed}
+    end
   end
 
   defp workspace_root do

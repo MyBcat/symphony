@@ -185,7 +185,7 @@ defmodule SymphonyElixir.AutoMergeTest do
     end)
 
     repo_entry = %SymphonyElixir.Config.Schema.RepoEntry{
-      key: "symphony",
+      key: "test-repo",
       auto_merge_on_codex_pass: true,
       auto_merge_max_lines: 500,
       auto_merge_pass_pattern: "NO BLOCKING ISSUES"
@@ -201,7 +201,7 @@ defmodule SymphonyElixir.AutoMergeTest do
         workspace_path: "/tmp/work",
         short_sha: "abc1234"
       },
-      repo_key: "symphony",
+      repo_key: "test-repo",
       repo_entry: repo_entry,
       workspace_path: "/tmp/work",
       base_branch: "main"
