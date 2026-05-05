@@ -136,6 +136,96 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
     end
   end
 
+  describe "render_codex_review/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Codex Review marker with full output" do
+      session = %{
+        identifier: "SYM-11923096520",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_gpt55_xhigh"
+      }
+
+      body =
+        Workpad.render_codex_review(session, """
+        Reviewed PR 42. Notes:
+        1. Tests look good.
+        2. No regressions detected.
+
+        NO BLOCKING ISSUES
+        """)
+
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "Codex Review"
+      assert body =~ "codex_gpt55_xhigh"
+      assert body =~ "NO BLOCKING ISSUES"
+      assert body =~ "Reviewed PR 42."
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "truncates long Codex output with sentinel" do
+      session = %{identifier: "SYM-1", profile_name: "codex_gpt55_xhigh"}
+      long_output = String.duplicate("a", 8 * 1024)
+
+      body = Workpad.render_codex_review(session, long_output)
+
+      assert body =~ "## Symphony Codex Review"
+      assert body =~ "... (truncated)"
+    end
+
+    test "handles nil output gracefully" do
+      body = Workpad.render_codex_review(%{identifier: "SYM-1", profile_name: "x"}, nil)
+
+      assert body =~ "## Symphony Codex Review"
+      # No crash; output rendered as empty string.
+    end
+  end
+
+  describe "render_codex_review_failure/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Codex Review marker with failure reason" do
+      session = %{identifier: "SYM-1", profile_name: "codex_gpt55_xhigh"}
+      body = Workpad.render_codex_review_failure(session, "codex_not_found")
+
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "Codex Review Unavailable"
+      assert body =~ "codex_not_found"
+      assert body =~ "operator review is required"
+    end
+  end
+
+  describe "render_auto_merge_failure/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Auto-Merge Failed marker with gh stderr" do
+      session = %{
+        identifier: "SYM-11923096520",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_gpt55_xhigh"
+      }
+
+      body =
+        Workpad.render_auto_merge_failure(
+          session,
+          "gh pr merge exited 1\n\nbranch protection requires reviews"
+        )
+
+      assert String.starts_with?(body, "## Symphony Auto-Merge Failed")
+      assert body =~ "Auto-Merge Failed"
+      assert body =~ "gh pr merge exited 1"
+      assert body =~ "branch protection requires reviews"
+      assert body =~ "Rework"
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "truncates long stderr with sentinel" do
+      long_output = String.duplicate("err\n", 4_000)
+      body = Workpad.render_auto_merge_failure(%{profile_name: "x"}, long_output)
+
+      assert body =~ "## Symphony Auto-Merge Failed"
+      assert body =~ "... (truncated)"
+    end
+  end
+
   describe "render_pr_refusal/2" do
     test "renders the Symphony PR Refusal marker as the body header" do
       session = %{

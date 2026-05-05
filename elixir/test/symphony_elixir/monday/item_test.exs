@@ -230,6 +230,55 @@ defmodule SymphonyElixir.Monday.ItemTest do
       refute item.description =~ "Today's spend"
     end
 
+    test "filters Symphony Codex Review and Auto-Merge Failed updates out of the synthesized description (Spec 4 §2.8a)" do
+      raw = %{
+        "id" => "11923096520",
+        "name" => "Codex review filtering",
+        "url" => "https://example.org",
+        "created_at" => "2026-05-05T10:00:00Z",
+        "updated_at" => "2026-05-05T10:00:00Z",
+        "column_values" => [
+          %{"id" => "symphony_status_xyz", "text" => "Human Review"}
+        ],
+        "updates" => [
+          %{
+            "id" => "u1",
+            "body" => "Operator: looks good once tests are added",
+            "created_at" => "2026-05-05T10:00:00Z"
+          },
+          %{
+            "id" => "u2",
+            "body" =>
+              "## Symphony Codex Review\n\n```text\nReviewed PR. NO BLOCKING ISSUES\n```\n",
+            "created_at" => "2026-05-05T10:30:00Z"
+          },
+          %{
+            "id" => "u3",
+            "body" =>
+              "## Symphony Auto-Merge Failed\n\n```text\ngh pr merge exited 1\n```\n",
+            "created_at" => "2026-05-05T11:00:00Z"
+          }
+        ]
+      }
+
+      config = %{
+        identifier_prefix: "SYM",
+        symphony_status_column_id: "symphony_status_xyz",
+        priority_column_id: nil,
+        description_column_id: nil,
+        branch_column_id: nil,
+        labels_column_id: nil,
+        profile_column_id: nil
+      }
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.description == "Operator: looks good once tests are added"
+      refute item.description =~ "Symphony Codex Review"
+      refute item.description =~ "NO BLOCKING ISSUES"
+      refute item.description =~ "Symphony Auto-Merge Failed"
+      refute item.description =~ "gh pr merge"
+    end
+
     test "profile is trimmed and nil when whitespace-only" do
       raw =
         put_in(@raw_item["column_values"], [

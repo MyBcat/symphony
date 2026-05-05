@@ -318,6 +318,14 @@ defmodule SymphonyElixir.Config.Schema do
   defmodule RepoEntry do
     @moduledoc false
 
+    # Spec 4 §2.8a default: regex literal that Codex must conclude with for
+    # auto-merge to proceed. The shipped Codex review prompt instructs the
+    # reviewer to terminate output with this exact phrase on a clean review.
+    @default_auto_merge_pass_pattern "NO BLOCKING ISSUES"
+    # Spec 4 §2.8a default: PRs with diff line count >= this cap require human
+    # review regardless of Codex pass. 500 is the spec-recommended default.
+    @default_auto_merge_max_lines 500
+
     defstruct [
       :key,
       :clone_url,
@@ -325,7 +333,10 @@ defmodule SymphonyElixir.Config.Schema do
       :before_remove,
       :allowed_profiles,
       :default_branch,
-      :secrets
+      :secrets,
+      auto_merge_on_codex_pass: false,
+      auto_merge_max_lines: @default_auto_merge_max_lines,
+      auto_merge_pass_pattern: @default_auto_merge_pass_pattern
     ]
 
     @type t :: %__MODULE__{
@@ -335,8 +346,19 @@ defmodule SymphonyElixir.Config.Schema do
             before_remove: String.t() | nil,
             allowed_profiles: [String.t()] | nil,
             default_branch: String.t() | nil,
-            secrets: [String.t()] | nil
+            secrets: [String.t()] | nil,
+            auto_merge_on_codex_pass: boolean(),
+            auto_merge_max_lines: pos_integer(),
+            auto_merge_pass_pattern: String.t()
           }
+
+    @doc "Default auto-merge pass-pattern regex literal."
+    @spec default_auto_merge_pass_pattern() :: String.t()
+    def default_auto_merge_pass_pattern, do: @default_auto_merge_pass_pattern
+
+    @doc "Default auto-merge max-lines cap."
+    @spec default_auto_merge_max_lines() :: pos_integer()
+    def default_auto_merge_max_lines, do: @default_auto_merge_max_lines
   end
 
   defmodule Secrets do
@@ -650,13 +672,46 @@ defmodule SymphonyElixir.Config.Schema do
       before_remove: Map.get(cfg, "before_remove"),
       allowed_profiles: normalize_string_list(Map.get(cfg, "allowed_profiles")),
       default_branch: Map.get(cfg, "default_branch"),
-      secrets: normalize_string_list(Map.get(cfg, "secrets"))
+      secrets: normalize_string_list(Map.get(cfg, "secrets")),
+      auto_merge_on_codex_pass:
+        normalize_auto_merge_flag(Map.get(cfg, "auto_merge_on_codex_pass")),
+      auto_merge_max_lines:
+        normalize_auto_merge_max_lines(Map.get(cfg, "auto_merge_max_lines")),
+      auto_merge_pass_pattern:
+        normalize_auto_merge_pass_pattern(Map.get(cfg, "auto_merge_pass_pattern"))
     }
   end
 
   defp repo_entry_struct(key, _raw_cfg) do
     %RepoEntry{key: key}
   end
+
+  # Spec 4 §2.8a: opt-in flag. Default false so unset / non-boolean values
+  # never accidentally enable auto-merge. YAML lets the operator write
+  # `auto_merge_on_codex_pass: true` without quotes.
+  defp normalize_auto_merge_flag(true), do: true
+  defp normalize_auto_merge_flag(false), do: false
+  defp normalize_auto_merge_flag("true"), do: true
+  defp normalize_auto_merge_flag("false"), do: false
+  defp normalize_auto_merge_flag(nil), do: false
+  defp normalize_auto_merge_flag(_other), do: false
+
+  defp normalize_auto_merge_max_lines(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_auto_merge_max_lines(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} when parsed > 0 -> parsed
+      _ -> RepoEntry.default_auto_merge_max_lines()
+    end
+  end
+
+  defp normalize_auto_merge_max_lines(_other),
+    do: RepoEntry.default_auto_merge_max_lines()
+
+  defp normalize_auto_merge_pass_pattern(value) when is_binary(value) and value != "", do: value
+
+  defp normalize_auto_merge_pass_pattern(_other),
+    do: RepoEntry.default_auto_merge_pass_pattern()
 
   defp normalize_string_list(nil), do: nil
 

@@ -205,7 +205,9 @@ defmodule SymphonyElixir.Monday.Item do
     "## Symphony Completion",
     "## Symphony PR Refusal",
     "## Symphony PHI Refusal",
-    "## Symphony Cost Cap"
+    "## Symphony Cost Cap",
+    "## Symphony Codex Review",
+    "## Symphony Auto-Merge Failed"
   ]
 
   defp description_from_updates(raw) do

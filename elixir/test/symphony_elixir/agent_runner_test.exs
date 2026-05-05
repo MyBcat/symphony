@@ -36,6 +36,18 @@ defmodule SymphonyElixir.AgentRunnerTest do
       Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
       Application.put_env(:symphony_elixir, :pr_safety_gh_module, PRSafetyStubGH)
 
+      # Spec 4 §2.8a: prevent the real AutoMerge pipeline from spawning during
+      # existing PR-detection tests. Tests that want to assert AutoMerge was
+      # invoked install their own capture fn via `:auto_merge_runner`.
+      test_pid = self()
+
+      auto_merge_runner = fn ctx ->
+        send(test_pid, {:auto_merge_invoked, ctx})
+        :ok
+      end
+
+      Application.put_env(:symphony_elixir, :auto_merge_runner, auto_merge_runner)
+
       pr_state_path =
         Path.join(
           System.tmp_dir!(),
@@ -55,6 +67,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
         Application.delete_env(:symphony_elixir, :tracker_adapter_override)
         Application.delete_env(:symphony_elixir, :pr_safety_gh_module)
         Application.delete_env(:symphony_elixir, :pr_safety_state_path)
+        Application.delete_env(:symphony_elixir, :auto_merge_runner)
         File.rm(pr_state_path)
 
         if pid = Process.whereis(MemoryMonday) do
@@ -183,6 +196,66 @@ defmodule SymphonyElixir.AgentRunnerTest do
                _ -> false
              end),
              "expected status_write Human Review on PR detection; got events=#{inspect(events)}"
+    end
+
+    test "on PR URL with valid branch, AutoMerge.evaluate_human_review is invoked once with the right ctx (Spec 4 §2.8a)",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/142"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      assert_receive {:auto_merge_invoked, ctx}, 500
+      assert ctx.item_id == "11923258050"
+      assert ctx.pr_url == url
+      assert is_map(ctx.session)
+      # Repo column unset for this test issue → repo_key is nil. AutoMerge
+      # gate 1 (repo opt-in) handles a missing repo_key by holding.
+      assert ctx[:repo_key] in [nil, ""]
+
+      # Idempotency: second observation should not re-invoke AutoMerge.
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+      refute_receive {:auto_merge_invoked, _}, 100
+    end
+
+    test "PR refusal path does NOT invoke AutoMerge.evaluate_human_review (Spec 4 §2.8a)",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/156"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "feature/wrong-branch",
+           url: url,
+           head_sha: "deadbeef"
+         }}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      refute_receive {:auto_merge_invoked, _}, 100
     end
 
     test "duplicate PR URL in stream does not trigger duplicate writes",

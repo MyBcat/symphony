@@ -8,6 +8,9 @@ defmodule SymphonyElixir.Monday.Workpad do
   @marker "## Symphony Workpad"
   @pr_refusal_marker "## Symphony PR Refusal"
   @phi_refusal_marker "## Symphony PHI Refusal"
+  @codex_review_marker "## Symphony Codex Review"
+  @auto_merge_failure_marker "## Symphony Auto-Merge Failed"
+  @codex_review_max_output_bytes 6 * 1024
 
   @type session :: %{
           required(:identifier) => String.t(),
@@ -120,6 +123,112 @@ defmodule SymphonyElixir.Monday.Workpad do
     Symphony Status back to an active state.
     """
   end
+
+  @doc """
+  Render the body of a `## Symphony Codex Review` Monday Update for an
+  agent PR that just transitioned to Human Review (Spec 4 §2.8a).
+
+  `codex_output` is the full stdout/stderr capture from `codex exec`. It
+  is truncated to `#{@codex_review_max_output_bytes}` bytes so a long
+  Codex response never blows past Monday's update size cap; the
+  `Monday.Adapter.post_codex_review/2` write also re-applies its own
+  global cap.
+
+  Operators read this block to confirm the auto-merge gate decision.
+  """
+  @spec render_codex_review(session(), String.t() | nil) :: String.t()
+  def render_codex_review(session, codex_output) do
+    stamp = stamp_line(session)
+    body = truncate_for_codex_review(to_string(codex_output))
+
+    """
+    #{@codex_review_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Codex Review
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+
+    ```text
+    #{body}
+    ```
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony Codex Review` block for a failure
+  case (e.g. Codex CLI errored, network unavailable). The body explains
+  why the auto-merge gate could not run and instructs the operator to
+  resolve manually.
+  """
+  @spec render_codex_review_failure(session(), String.t()) :: String.t()
+  def render_codex_review_failure(session, reason_label) do
+    stamp = stamp_line(session)
+
+    """
+    #{@codex_review_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Codex Review Unavailable
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+    Reason: `#{reason_label}`
+
+    Symphony was unable to run the Codex auto-review against this PR.
+    No auto-merge attempted; operator review is required.
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony Auto-Merge Failed` Monday Update for
+  an item that passed all five gates but where `gh pr merge` itself
+  errored (e.g. branch protection conflict, network issue).
+
+  The item is moved to `Rework` separately by `AutoMerge.do_merge/1`; this
+  block tells the operator what `gh` reported.
+  """
+  @spec render_auto_merge_failure(session(), String.t()) :: String.t()
+  def render_auto_merge_failure(session, gh_output) do
+    stamp = stamp_line(session)
+    body = truncate_for_codex_review(to_string(gh_output))
+
+    """
+    #{@auto_merge_failure_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Auto-Merge Failed
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+
+    ```text
+    #{body}
+    ```
+
+    Symphony moved this item to `Rework`. Resolve the merge conflict or
+    branch-protection issue, then move the item back to `Human Review` to
+    re-attempt auto-merge.
+    """
+  end
+
+  defp truncate_for_codex_review(text) when is_binary(text) do
+    if byte_size(text) <= @codex_review_max_output_bytes do
+      String.trim_trailing(text)
+    else
+      head = binary_part(text, 0, @codex_review_max_output_bytes)
+      String.trim_trailing(head) <> "\n\n... (truncated)"
+    end
+  end
+
+  defp truncate_for_codex_review(_), do: ""
 
   @spec render_crash(session(), String.t()) :: String.t()
   def render_crash(session, reason) do

@@ -56,9 +56,30 @@ workspace:
 # is set and an item resolves to a key here, this entry's after_create runs
 # instead of the legacy hooks.after_create below. When the column is empty for
 # an item, the legacy hooks.after_create below is used as the default.
+#
+# Auto-merge fields (Spec 4 §2.8a) are OPT-IN per repo:
+#
+#   auto_merge_on_codex_pass: true      # default false
+#   auto_merge_max_lines: 500           # default 500; PRs >= this require human review
+#   auto_merge_pass_pattern: "..."      # default "NO BLOCKING ISSUES"; regex literal
+#
+# When all three of (a) auto_merge_on_codex_pass=true, (b) Codex review output
+# matches auto_merge_pass_pattern, (c) PR diff is < auto_merge_max_lines lines,
+# AND the PR base is main/master AND the operator hasn't flipped the item
+# during review, Symphony runs `gh pr merge --merge --auto`. The default for
+# every repo is FALSE (human approval required). HIPAA-touching repos MUST
+# stay opt-out unless the operator independently verifies the PR contents are
+# PHI-safe. The symphony repo itself MUST stay opt-out — its blast radius
+# (orchestrating other repos) is too high for unattended auto-merge.
 repos:
   symphony:
     clone_url: https://github.com/MyBcat/symphony.git
+    # Symphony auto-merge: hard-coded OFF. Spec 4 §2.8a constraint #5: the
+    # symphony repo MUST stay opt-out — a bad merge here has cross-repo blast
+    # radius (Symphony orchestrates real AI sessions writing real code into
+    # real repos). Operator merges manually after `/codex:rescue` per the
+    # convention in `.claude/CLAUDE.md`.
+    auto_merge_on_codex_pass: false
     # Symphony performs the clone itself per Spec 3 §2.2. after_create is
     # post-clone setup only and MUST NOT contain `git clone`. Tolerant of
     # missing gcc / kerl dependencies in container/VPS contexts, while still
