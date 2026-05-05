@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.Secrets.Resolver, as: SecretsResolver
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -22,6 +23,7 @@ defmodule SymphonyElixir.Workspace do
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
            :ok <- maybe_clone_repo(workspace, issue_context, created?, worker_host),
+           :ok <- maybe_resolve_secrets(workspace, issue_context, worker_host),
            :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
         {:ok, workspace}
       end
@@ -256,7 +258,8 @@ defmodule SymphonyElixir.Workspace do
             :ok
 
           {:ok, command} ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
+            wrapped = SecretsResolver.wrap_command(command)
+            run_hook(wrapped, workspace, issue_context, "after_create", worker_host)
 
           {:error, _reason} = err ->
             err
@@ -266,6 +269,84 @@ defmodule SymphonyElixir.Workspace do
         :ok
     end
   end
+
+  defp maybe_resolve_secrets(_workspace, _issue_context, worker_host) when is_binary(worker_host) do
+    # Remote workers don't currently receive .env.symphony — Symphony's local
+    # AWS Secrets Manager invocation runs on the orchestrator host. SSH-based
+    # secret transport is out of scope (per SYM-11923119480 §Out of scope).
+    :ok
+  end
+
+  defp maybe_resolve_secrets(workspace, issue_context, nil) do
+    repo_key = Map.get(issue_context, :issue_repo)
+
+    case Config.repo_or_default(repo_key) do
+      {:ok, {:repo, key, repo_entry}} ->
+        secrets = Map.get(repo_entry, :secrets) || Map.get(repo_entry, "secrets") || []
+
+        write_repo_env_file(workspace, key, secrets, issue_context)
+
+      {:ok, {:default, _}} ->
+        # Legacy single-repo mode — no per-repo secrets binding.
+        :ok
+
+      {:error, _reason} ->
+        # Repo resolution errors are caught later in
+        # maybe_run_after_create_hook with a clearer log; don't double-report.
+        :ok
+    end
+  end
+
+  defp write_repo_env_file(_workspace, _repo_key, [], _issue_context), do: :ok
+  defp write_repo_env_file(_workspace, _repo_key, nil, _issue_context), do: :ok
+
+  defp write_repo_env_file(workspace, repo_key, secrets, issue_context) when is_list(secrets) do
+    secret_exec_path = Config.secret_exec_path()
+
+    Logger.info(
+      "Symphony resolving #{length(secrets)} secret(s) for #{issue_log_context(issue_context)} repo=#{repo_key} env_names=#{Enum.join(SecretsResolver.declared_env_names(secrets), ",")}"
+    )
+
+    case SecretsResolver.write_env_file(secrets, workspace,
+           secret_exec_path: secret_exec_path,
+           repo_key: repo_key
+         ) do
+      :ok ->
+        :ok
+
+      {:error, {:secret_resolution_failed, ^repo_key, reason}} ->
+        Logger.error(
+          "Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}"
+        )
+
+        {:error, {:secret_resolution_failed, repo_key, redact_reason(reason)}}
+
+      {:error, reason} ->
+        Logger.error(
+          "Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}"
+        )
+
+        {:error, {:secret_resolution_failed, repo_key, redact_reason(reason)}}
+    end
+  end
+
+  # Defense-in-depth: collapse anything that could plausibly carry secret
+  # material in the error tuple. The wrapper `secret_exec.py` already redacts
+  # values in stdout, but we trim wrapper stderr to a fixed cap and drop
+  # secret-shaped substrings.
+  defp redact_reason({:secret_resolution_failed, status, output}) do
+    {:secret_resolution_failed, status, sanitize_error_output(output)}
+  end
+
+  defp redact_reason(reason), do: reason
+
+  defp sanitize_error_output(output) when is_binary(output) do
+    output
+    |> String.slice(0, 256)
+    |> SymphonyElixir.Secrets.Scrubber.scrub()
+  end
+
+  defp sanitize_error_output(other), do: inspect(other)
 
   defp resolve_after_create_command(issue_context) do
     repo_key = Map.get(issue_context, :issue_repo)

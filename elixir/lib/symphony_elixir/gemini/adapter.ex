@@ -25,7 +25,9 @@ defmodule SymphonyElixir.Gemini.Adapter do
         {:error, {:sandbox_floor_violation, :gemini, :config}}
 
       true ->
-        with {:ok, port} <- open_bash_port(cmd, workspace_path) do
+        wrapped_cmd = SymphonyElixir.Secrets.Resolver.wrap_command(cmd)
+
+        with {:ok, port} <- open_bash_port(wrapped_cmd, workspace_path) do
           {:ok,
            %{
              port: port,

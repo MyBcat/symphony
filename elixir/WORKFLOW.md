@@ -103,6 +103,14 @@ repos:
       - claude_sonnet
       - gemini_long_context
     default_branch: main
+    # Per-repo secrets (Spec 4 §2.4 / SYM-11923119480). Each entry is
+    # "<aws_secret_id>:<env_var>[:<json_field>]". Symphony resolves them via
+    # secret_exec.py at workspace bootstrap, writes to .env.symphony (mode
+    # 0600), and wraps after_create + adapter port spawn to source the file.
+    # Boot fails fast if any path is unresolvable. Uncomment after the secret
+    # is created in AWS Secrets Manager via `secret-store create`.
+    # secrets:
+    #   - "mybcat/integrations/api-keys/hubspot:HUBSPOT_TOKEN"
   carlos_low_vision:
     clone_url: https://github.com/MyBcat/carlos_low_vision.git
     # Pure-Python research/orchestration repo, no package manifest at root.

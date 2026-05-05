@@ -9,12 +9,14 @@ defmodule SymphonyElixir.CLI do
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
+  @type secrets_boot_check_result :: :ok | {:error, [tuple()]}
   @type deps :: %{
           file_regular?: (String.t() -> boolean()),
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          ensure_all_started: (-> ensure_started_result()),
+          secrets_boot_check: (-> secrets_boot_check_result())
         }
 
   @spec main([String.t()]) :: no_return()
@@ -58,16 +60,42 @@ defmodule SymphonyElixir.CLI do
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
+      # Per SYM-11923119480 AC#4 the CLI refuses to start when any declared
+      # secret path can't be resolved against AWS Secrets Manager. The check
+      # runs through deps so unit tests can stub it out.
+      case deps.secrets_boot_check.() do
+        :ok ->
+          case deps.ensure_all_started.() do
+            {:ok, _started_apps} ->
+              :ok
 
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+            {:error, reason} ->
+              {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+          end
+
+        {:error, missing} ->
+          {:error, format_secrets_boot_failure(expanded_path, missing)}
       end
     else
       {:error, "Workflow file not found: #{expanded_path}"}
     end
+  end
+
+  defp format_secrets_boot_failure(workflow_path, missing) do
+    paths =
+      missing
+      |> Enum.map(fn
+        {repo, ref, _reason} when is_binary(ref) ->
+          "  - repo=#{repo} secret=#{ref}"
+
+        {label, _ref, _reason} ->
+          "  - #{label}"
+      end)
+      |> Enum.join("\n")
+
+    "Refusing to start Symphony with workflow #{workflow_path}: per-repo secrets failed to resolve.\n" <>
+      paths <>
+      "\n\nFix: run `secret-store create <name>` for each missing path or rotate the AWS Secrets Manager value, then restart."
   end
 
   @spec usage_message() :: String.t()
@@ -82,7 +110,11 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
+      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      secrets_boot_check: fn ->
+        Application.put_env(:symphony_elixir, :secrets_boot_check, :enforce)
+        SymphonyElixir.Secrets.BootCheck.run()
+      end
     }
   end
 

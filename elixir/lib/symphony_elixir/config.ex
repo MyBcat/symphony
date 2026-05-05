@@ -55,6 +55,41 @@ defmodule SymphonyElixir.Config do
     settings!().repos || %{}
   end
 
+  @doc """
+  Returns the configured `secret_exec.py` path. Falls back to the resolver's
+  default when WORKFLOW.md does not set `secrets.secret_exec_path`.
+  """
+  @spec secret_exec_path() :: String.t()
+  def secret_exec_path do
+    case settings!().secrets do
+      %{secret_exec_path: path} when is_binary(path) and path != "" ->
+        path
+
+      _ ->
+        SymphonyElixir.Secrets.Resolver.default_secret_exec_path()
+    end
+  end
+
+  @doc """
+  Returns the per-repo secrets list as a `%{repo_key => [ref, ...]}` map.
+  Empty/missing lists are omitted so callers can treat the result as the
+  authoritative dispatch-time list.
+  """
+  @spec secrets_by_repo() :: %{String.t() => [String.t()]}
+  def secrets_by_repo do
+    settings!()
+    |> Map.get(:repos)
+    |> Kernel.||(%{})
+    |> Enum.flat_map(fn
+      {key, %{secrets: secrets}} when is_list(secrets) and secrets != [] ->
+        [{key, secrets}]
+
+      _ ->
+        []
+    end)
+    |> Enum.into(%{})
+  end
+
   @spec repo_policy() :: Schema.RepoPolicy.t()
   def repo_policy do
     settings!().repo_policy
@@ -286,11 +321,24 @@ defmodule SymphonyElixir.Config do
       true ->
         with :ok <- validate_clone_url(key, repo.clone_url, settings.repo_policy.allowed_clone_hosts),
              :ok <- validate_repo_hook(key, repo.after_create),
-             :ok <- validate_allowed_profiles(key, repo.allowed_profiles, settings.profiles) do
+             :ok <- validate_allowed_profiles(key, repo.allowed_profiles, settings.profiles),
+             :ok <- validate_repo_secrets(key, repo.secrets) do
           :ok
         end
     end
   end
+
+  defp validate_repo_secrets(_key, nil), do: :ok
+  defp validate_repo_secrets(_key, []), do: :ok
+
+  defp validate_repo_secrets(key, secrets) when is_list(secrets) do
+    case SymphonyElixir.Secrets.Resolver.parse_refs(secrets) do
+      {:ok, _specs} -> :ok
+      {:error, reason} -> {:error, {:invalid_repo_secrets, key, reason}}
+    end
+  end
+
+  defp validate_repo_secrets(key, _other), do: {:error, {:invalid_repo_secrets, key, :not_a_list}}
 
   defp validate_clone_url(key, clone_url, allowed_hosts) when is_binary(clone_url) do
     cond do

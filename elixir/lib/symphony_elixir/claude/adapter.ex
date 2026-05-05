@@ -36,7 +36,10 @@ defmodule SymphonyElixir.Claude.Adapter do
         {:error, {:sandbox_floor_violation, :claude, :config}}
 
       true ->
-        cmd = build_full_command(cmd, config)
+        cmd =
+          cmd
+          |> build_full_command(config)
+          |> SymphonyElixir.Secrets.Resolver.wrap_command()
 
         with {:ok, port} <- open_bash_port(cmd, workspace_path) do
           {:ok,

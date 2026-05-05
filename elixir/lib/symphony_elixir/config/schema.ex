@@ -317,7 +317,8 @@ defmodule SymphonyElixir.Config.Schema do
       :after_create,
       :before_remove,
       :allowed_profiles,
-      :default_branch
+      :default_branch,
+      :secrets
     ]
 
     @type t :: %__MODULE__{
@@ -326,8 +327,29 @@ defmodule SymphonyElixir.Config.Schema do
             after_create: String.t() | nil,
             before_remove: String.t() | nil,
             allowed_profiles: [String.t()] | nil,
-            default_branch: String.t() | nil
+            default_branch: String.t() | nil,
+            secrets: [String.t()] | nil
           }
+  end
+
+  defmodule Secrets do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Path to the secret_exec.py wrapper. When unset, the resolver falls
+      # back to /mnt/d_drive/repos/finances/scripts/secret_exec.py per
+      # SYM-11923119480 acceptance criterion §Constraints.
+      field(:secret_exec_path, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:secret_exec_path], empty_values: [])
+    end
   end
 
   defmodule Observability do
@@ -406,6 +428,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:cost_cap, CostCap, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:secrets, Secrets, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
     field(:repos, :map, default: %{})
   end
@@ -502,6 +525,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:cost_cap, with: &CostCap.changeset/2)
+    |> cast_embed(:secrets, with: &Secrets.changeset/2)
     |> parse_profiles()
     |> parse_repos()
   end
@@ -594,7 +618,8 @@ defmodule SymphonyElixir.Config.Schema do
       after_create: Map.get(cfg, "after_create"),
       before_remove: Map.get(cfg, "before_remove"),
       allowed_profiles: normalize_string_list(Map.get(cfg, "allowed_profiles")),
-      default_branch: Map.get(cfg, "default_branch")
+      default_branch: Map.get(cfg, "default_branch"),
+      secrets: normalize_string_list(Map.get(cfg, "secrets"))
     }
   end
 

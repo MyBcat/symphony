@@ -487,6 +487,93 @@ defmodule SymphonyElixir.ConfigSchemaTest do
       assert profile.cost_per_output_token_usd == 0.000075
     end
 
+    test "schema parses repos.<key>.secrets list and rejects malformed refs" do
+      ok_attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "hubspot-funnel-site" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "secrets" => [
+                "mybcat/integrations/hubspot:HUBSPOT_TOKEN",
+                "mybcat/json-secret:STRIPE_KEY:secret_key"
+              ]
+            }
+          }
+        })
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(ok_attrs)
+
+      assert settings.repos["hubspot-funnel-site"].secrets == [
+               "mybcat/integrations/hubspot:HUBSPOT_TOKEN",
+               "mybcat/json-secret:STRIPE_KEY:secret_key"
+             ]
+
+      assert :ok = SymphonyElixir.Config.Internal.validate_semantics_for_test(settings)
+
+      bad_attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "demo" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "secrets" => ["this-has-no-colon"]
+            }
+          }
+        })
+
+      {:ok, bad_settings} = SymphonyElixir.Config.Schema.parse(bad_attrs)
+
+      assert {:error, {:invalid_repo_secrets, "demo", _}} =
+               SymphonyElixir.Config.Internal.validate_semantics_for_test(bad_settings)
+
+      not_a_list_attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "demo" => %{
+              "clone_url" => "git@github.com:openai/symphony.git",
+              "secrets" => "scalar:NOT_A_LIST"
+            }
+          }
+        })
+
+      {:ok, not_a_list_settings} = SymphonyElixir.Config.Schema.parse(not_a_list_attrs)
+
+      assert {:error, {:invalid_repo_secrets, "demo", :not_a_list}} =
+               SymphonyElixir.Config.Internal.validate_semantics_for_test(not_a_list_settings)
+    end
+
+    test "schema parses secrets.secret_exec_path override" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "secrets" => %{"secret_exec_path" => "/tmp/secret_exec.py"}
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.secrets.secret_exec_path == "/tmp/secret_exec.py"
+    end
+
+    test "missing secrets section defaults secret_exec_path to nil" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        }
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert is_nil(settings.secrets.secret_exec_path)
+    end
+
     test "schema parses integer cost rates as floats" do
       attrs = %{
         "tracker" => %{
