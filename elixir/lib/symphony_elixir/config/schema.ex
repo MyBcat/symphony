@@ -64,6 +64,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:backoff_factor, :float, default: 2.0)
       field(:max_polling_interval_ms, :integer, default: 60_000)
       field(:failure_ttl_count, :integer, default: 5)
+      # Spec M-7 AC3: number of consecutive 5xx/timeout Tracker responses
+      # required before the orchestrator logs "outage entry" and pauses new
+      # dispatches. The orchestrator never terminates regardless; this only
+      # controls when the operator-facing alert fires.
+      field(:outage_threshold, :integer, default: 5)
       field(:active_states, {:array, :string}, default: ["Symphony Ready", "In Progress", "Rework"])
       field(:handoff_states, {:array, :string}, default: ["Human Review", "Merging"])
       field(:terminal_states, {:array, :string}, default: ["Done", "Cancelled"])
@@ -94,6 +99,7 @@ defmodule SymphonyElixir.Config.Schema do
           :backoff_factor,
           :max_polling_interval_ms,
           :failure_ttl_count,
+          :outage_threshold,
           :active_states,
           :handoff_states,
           :terminal_states
@@ -105,6 +111,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:backoff_factor, greater_than: 1.0)
       |> validate_number(:max_polling_interval_ms, greater_than: 0)
       |> validate_number(:failure_ttl_count, greater_than: 0)
+      |> validate_number(:outage_threshold, greater_than: 0)
     end
   end
 

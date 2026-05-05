@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Heartbeat, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Monday.PHIGate
   alias SymphonyElixir.Tracker.Issue
 
@@ -16,6 +16,12 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+
+  # Spec M-7 AC3: when N consecutive Tracker calls return 5xx/timeout, log a
+  # single "outage entry" line and stop hammering the operator with the same
+  # error per tick. Resume "outage exit" logging on the first successful call.
+  # Default mirrors the spec; configurable via tracker.outage_threshold.
+  @default_outage_threshold 5
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -36,7 +42,8 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_timer_ref,
       :tick_token,
       :heartbeat_ttl_ms,
-      :heartbeat_timer_ref,
+      :heartbeat_pid,
+      :outage_threshold,
       running: %{},
       running_by_profile: %{},
       completed: MapSet.new(),
@@ -44,7 +51,9 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       failure_counts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      outage_failure_count: 0,
+      outage_active?: false
     ]
 
     @type t :: %__MODULE__{}
@@ -122,6 +131,7 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
     heartbeat_ttl_ms = config.tracker.heartbeat_ttl_ms
+    outage_threshold = outage_threshold(config)
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -131,7 +141,8 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       heartbeat_ttl_ms: heartbeat_ttl_ms,
-      heartbeat_timer_ref: nil,
+      heartbeat_pid: nil,
+      outage_threshold: outage_threshold,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -141,7 +152,7 @@ defmodule SymphonyElixir.Orchestrator do
         case run_boot_phi_scan() do
           :ok ->
             Process.flag(:trap_exit, true)
-            state = schedule_heartbeat_refresh(state)
+            state = start_heartbeat_loop(state, now_ms)
             run_terminal_workspace_cleanup()
             state = schedule_tick(state, 0)
             {:ok, state}
@@ -159,6 +170,57 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Orchestrator unable to acquire tracker heartbeat lock: #{inspect(reason)}; refusing to start")
 
         {:stop, :heartbeat_unavailable}
+    end
+  end
+
+  # Spec M-7 AC1/AC4: after the orchestrator has acquired the lock at boot,
+  # spin up a Heartbeat GenServer to renew it every ttl_ms/3 and track
+  # degraded mode. We start it linked + anonymous (no registered name) so
+  # multiple orchestrators in the same VM (test suites) can have their own
+  # Heartbeat without colliding. The orchestrator stores the pid in state
+  # and queries `Heartbeat.degraded?/1` from the dispatch path. If the
+  # Heartbeat module name is overridden via `:heartbeat_module` (used in
+  # tests that exercise the orchestrator without the real renewal loop),
+  # we honour that override.
+  defp start_heartbeat_loop(%State{} = state, initial_success_at_ms) do
+    if heartbeat_loop_enabled?() do
+      heartbeat_module = heartbeat_module()
+
+      case heartbeat_module.start_link(
+             ttl_ms: state.heartbeat_ttl_ms,
+             initial_success_at_ms: initial_success_at_ms,
+             name: nil
+           ) do
+        {:ok, pid} ->
+          %{state | heartbeat_pid: pid}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Symphony heartbeat renewal loop failed to start (#{inspect(reason)}); orchestrator will run without heartbeat refresh until restart"
+          )
+
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp heartbeat_loop_enabled? do
+    Application.get_env(:symphony_elixir, :heartbeat_loop_enabled, true)
+  end
+
+  defp heartbeat_module do
+    Application.get_env(:symphony_elixir, :heartbeat_module, Heartbeat)
+  end
+
+  defp outage_threshold(config) do
+    case config.tracker do
+      %{outage_threshold: threshold} when is_integer(threshold) and threshold > 0 ->
+        threshold
+
+      _ ->
+        @default_outage_threshold
     end
   end
 
@@ -413,19 +475,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
-  def handle_info(:heartbeat_refresh, state) do
-    state =
-      case Tracker.acquire_heartbeat() do
-        :ok ->
-          state
+  # Spec M-7 AC1/AC4: heartbeat renewal moved to SymphonyElixir.Heartbeat
+  # GenServer (started in init/1). Forward stray :heartbeat_refresh messages
+  # from older orchestrator state to the new loop so an in-flight timer from a
+  # hot upgrade doesn't crash. Drop silently — the new Heartbeat schedules
+  # its own ticks.
+  def handle_info(:heartbeat_refresh, state), do: {:noreply, state}
 
-        {:error, reason} ->
-          Logger.warning("Orchestrator failed to refresh tracker heartbeat lock: #{inspect(reason)}; will retry on next interval")
+  # Spec M-7: when the linked Heartbeat process exits, log the reason. The
+  # link makes the orchestrator exit too unless the reason is :normal, which
+  # is the desired behavior — the supervisor restarts us with a fresh acquire.
+  def handle_info({:EXIT, pid, :normal}, %State{heartbeat_pid: pid} = state) do
+    {:noreply, %{state | heartbeat_pid: nil}}
+  end
 
-          state
-      end
-
-    {:noreply, schedule_heartbeat_refresh(state)}
+  def handle_info({:EXIT, pid, reason}, %State{heartbeat_pid: pid} = state) do
+    Logger.error("Symphony heartbeat loop exited unexpectedly: reason=#{inspect(reason)}")
+    {:stop, {:heartbeat_loop_exited, reason}, %{state | heartbeat_pid: nil}}
   end
 
   def handle_info(msg, state) do
@@ -436,13 +502,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, %{items: issues, phi_offenders: phi_offenders}} <-
-           Tracker.fetch_candidate_issues_with_phi_findings(),
-         :ok <- PHIGate.process_offenders(phi_offenders, []),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
+    case Config.validate!() do
+      :ok ->
+        run_dispatch_after_config_validated(state)
+
       {:error, :missing_monday_api_token} ->
         Logger.error("Monday API token missing in WORKFLOW.md")
         state
@@ -461,12 +524,10 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, :missing_tracker_kind} ->
         Logger.error("Tracker kind missing in WORKFLOW.md")
-
         state
 
       {:error, {:unsupported_tracker_kind, kind}} ->
         Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
         state
 
       {:error, {:invalid_workflow_config, message}} ->
@@ -486,13 +547,90 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
-        state
-
-      false ->
+        Logger.error("Invalid orchestrator config: #{inspect(reason)}")
         state
     end
   end
+
+  defp run_dispatch_after_config_validated(%State{} = state) do
+    case fetch_candidates_with_outage_tracking(state) do
+      {:ok, %{items: issues, phi_offenders: phi_offenders}, state} ->
+        with :ok <- PHIGate.process_offenders(phi_offenders, []),
+             :ok <- gate_dispatch_when_degraded(state),
+             true <- available_slots(state) > 0 do
+          choose_issues(issues, state)
+        else
+          # Spec M-7 AC4: heartbeat-renewal failure mode. Keep monitoring
+          # already-running agents but refuse to spin up new ones until the
+          # heartbeat loop confirms the lock is healthy again. Logging
+          # happens inside Heartbeat on the entry/exit transition so we
+          # don't spam every tick.
+          :degraded -> state
+          {:error, _reason} -> state
+          false -> state
+        end
+
+      {:error, reason, state} ->
+        # Spec M-7 AC3: a Tracker fetch error never tears the orchestrator
+        # down. Outage classification + entry/exit logging is handled inside
+        # `fetch_candidates_with_outage_tracking/1`; surface a single warning
+        # for non-outage errors so operators still see the underlying reason
+        # (and nothing for outage errors — the outage tracker already
+        # logged entry).
+        unless outage_classified_error?(reason) do
+          Logger.warning("Failed to fetch candidate issues from tracker: #{inspect(reason)}")
+        end
+
+        state
+    end
+  end
+
+  # Wraps the candidate-issues fetch in the outage tracker. The tracker's
+  # consecutive-5xx/timeout counter, "outage entry"/"outage exit" log lines,
+  # and last-known-good behavior all live here so the rest of the dispatch
+  # path doesn't have to know about it.
+  defp fetch_candidates_with_outage_tracking(%State{} = state) do
+    case Tracker.fetch_candidate_issues_with_phi_findings() do
+      {:ok, %{} = result} ->
+        {:ok, result, record_tracker_success(state)}
+
+      {:error, reason} ->
+        case classify_tracker_error(reason) do
+          :outage ->
+            {:error, reason, record_tracker_outage_failure(state, reason)}
+
+          :other ->
+            {:error, reason, record_tracker_success(state)}
+        end
+
+      other ->
+        # Non-{:ok, _} / non-{:error, _} responses are unexpected; surface
+        # via the same dispatch error path so we don't crash the loop.
+        {:error, {:unexpected_tracker_response, other}, state}
+    end
+  end
+
+  # Spec M-7 AC4: while the Heartbeat GenServer reports degraded, the
+  # orchestrator keeps monitoring already-running agents but refuses to
+  # dispatch new ones. Returns `:ok` when dispatch may proceed and
+  # `:degraded` when the dispatch path should short-circuit.
+  defp gate_dispatch_when_degraded(%State{} = state) do
+    if heartbeat_degraded?(state), do: :degraded, else: :ok
+  end
+
+  defp heartbeat_degraded?(%State{heartbeat_pid: pid}) when is_pid(pid) do
+    if heartbeat_loop_enabled?() do
+      try do
+        heartbeat_module().degraded?(pid)
+      catch
+        _kind, _reason -> false
+      end
+    else
+      false
+    end
+  end
+
+  defp heartbeat_degraded?(_state), do: false
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -503,6 +641,11 @@ defmodule SymphonyElixir.Orchestrator do
     else
       case Tracker.fetch_issue_states_by_ids(running_ids) do
         {:ok, issues} ->
+          # Spec M-7 AC3: keep last-known item set on running-state refresh
+          # failures. Reconciliation errors don't increment the outage
+          # counter — that's tied to the dispatch-level fetch in
+          # `fetch_candidates_with_outage_tracking/1` so the counter has a
+          # clean one-event-per-tick semantics.
           issues
           |> reconcile_running_issue_states(
             state,
@@ -513,9 +656,59 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
-
           state
       end
+    end
+  end
+
+  # Spec M-7 AC3: classify Tracker error reasons. 5xx HTTP responses and
+  # transport timeouts are "outage" errors that exercise the consecutive-N
+  # counter; everything else (4xx, GraphQL errors, missing config) is logged
+  # the usual way and resets the counter on the next 200.
+  defp classify_tracker_error(:timeout), do: :outage
+  defp classify_tracker_error({:http, status}) when is_integer(status) and status >= 500, do: :outage
+  defp classify_tracker_error({:transport, _reason}), do: :outage
+  defp classify_tracker_error(_other), do: :other
+
+  defp outage_classified_error?(reason), do: classify_tracker_error(reason) == :outage
+
+  defp record_tracker_success(%State{outage_active?: false} = state) do
+    %{state | outage_failure_count: 0}
+  end
+
+  defp record_tracker_success(%State{outage_active?: true} = state) do
+    Logger.warning(
+      "Symphony tracker: outage exit (Tracker.fetch returned 200 after #{state.outage_failure_count} consecutive 5xx/timeout failures); resuming normal polling"
+    )
+
+    %{state | outage_failure_count: 0, outage_active?: false}
+  end
+
+  defp record_tracker_outage_failure(%State{} = state, reason) do
+    threshold = state.outage_threshold || @default_outage_threshold
+    next_count = state.outage_failure_count + 1
+
+    cond do
+      not state.outage_active? and next_count >= threshold ->
+        Logger.error(
+          "Symphony tracker: outage entry (#{next_count} consecutive 5xx/timeout responses; latest reason=#{inspect(reason)}); continuing with last-known item set, no new dispatches until recovery"
+        )
+
+        %{state | outage_failure_count: next_count, outage_active?: true}
+
+      state.outage_active? ->
+        Logger.debug(
+          "Symphony tracker: still in outage (#{next_count} consecutive failures; latest reason=#{inspect(reason)})"
+        )
+
+        %{state | outage_failure_count: next_count}
+
+      true ->
+        Logger.warning(
+          "Symphony tracker: 5xx/timeout failure ##{next_count} (threshold=#{threshold}; latest reason=#{inspect(reason)})"
+        )
+
+        %{state | outage_failure_count: next_count}
     end
   end
 
@@ -548,6 +741,19 @@ defmodule SymphonyElixir.Orchestrator do
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
   end
+
+  @doc false
+  @spec record_tracker_success_for_test(State.t()) :: State.t()
+  def record_tracker_success_for_test(%State{} = state), do: record_tracker_success(state)
+
+  @doc false
+  @spec record_tracker_outage_failure_for_test(State.t(), term()) :: State.t()
+  def record_tracker_outage_failure_for_test(%State{} = state, reason),
+    do: record_tracker_outage_failure(state, reason)
+
+  @doc false
+  @spec classify_tracker_error_for_test(term()) :: :outage | :other
+  def classify_tracker_error_for_test(reason), do: classify_tracker_error(reason)
 
   @doc false
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
@@ -1676,19 +1882,6 @@ defmodule SymphonyElixir.Orchestrator do
     :timer.send_after(@poll_transition_render_delay_ms, self(), :run_poll_cycle)
     :ok
   end
-
-  defp schedule_heartbeat_refresh(%State{heartbeat_ttl_ms: ttl_ms} = state)
-       when is_integer(ttl_ms) and ttl_ms > 0 do
-    if is_reference(state.heartbeat_timer_ref) do
-      Process.cancel_timer(state.heartbeat_timer_ref)
-    end
-
-    delay_ms = max(div(ttl_ms, 2), 1)
-    timer_ref = Process.send_after(self(), :heartbeat_refresh, delay_ms)
-    %{state | heartbeat_timer_ref: timer_ref}
-  end
-
-  defp schedule_heartbeat_refresh(%State{} = state), do: state
 
   defp next_poll_in_ms(nil, _now_ms), do: nil
 

@@ -24,6 +24,11 @@ tracker:
   backoff_factor: 2.0
   max_polling_interval_ms: 60000
   failure_ttl_count: 5
+  # Spec M-7 AC3: how many consecutive 5xx/timeout Tracker responses before
+  # the orchestrator logs "outage entry" and pauses new dispatches. The
+  # orchestrator keeps running through the outage; this only controls the
+  # operator-facing alert threshold. Default 5.
+  outage_threshold: 5
   priority_column_id: "status_1_mkm9bt8j"
   description_column_id: null
   branch_column_id: null
