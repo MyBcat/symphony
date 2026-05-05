@@ -504,13 +504,20 @@ defmodule SymphonyElixir.Workspace do
   defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
     binary_output = IO.iodata_to_binary(output)
 
-    case byte_size(binary_output) <= max_bytes do
-      true ->
-        binary_output
+    truncated =
+      case byte_size(binary_output) <= max_bytes do
+        true ->
+          binary_output
 
-      false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
-    end
+        false ->
+          binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
+      end
+
+    # Defense-in-depth (SYM-11923119480 AC #5): hooks run with `.env.symphony`
+    # sourced, so user-authored after_create / before_run scripts could
+    # accidentally echo a secret value via `set -x` or a stray `echo
+    # $TOKEN`. Scrub before the line lands in the disk log.
+    SymphonyElixir.Secrets.Scrubber.scrub(truncated)
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
