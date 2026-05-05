@@ -74,6 +74,14 @@ repos:
       - claude_opus
       - claude_sonnet
     default_branch: main
+  carlos_low_vision:
+    clone_url: https://github.com/MyBcat/carlos_low_vision.git
+    # Pure-Python research/orchestration repo, no package manifest at root.
+    # No setup needed beyond the clone.
+    allowed_profiles:
+      - claude_opus
+      - claude_sonnet
+    default_branch: main
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
