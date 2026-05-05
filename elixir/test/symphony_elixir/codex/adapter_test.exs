@@ -1462,4 +1462,251 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       assert Adapter.passes_safety_floor?(config, floor)
     end
   end
+
+  describe "Codex untrusted-workspace handshake (SYM-11923259980)" do
+    # Reproduces the original symptom: the Codex CLI app-server emits a
+    # plain-text configWarning and a `remoteControl/status/changed`
+    # JSON notification BEFORE the initialize response. With the ProjectTrust
+    # auto-trust step, Codex would respond, but the adapter must also tolerate
+    # both startup notifications without blocking on them.
+    test "tolerates configWarning + remoteControl/status/changed before initialize response" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-codex-handshake-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        workspace = Path.join(workspace_root, "MT-2200")
+        codex_binary = Path.join(test_root, "fake-codex")
+        File.mkdir_p!(workspace)
+
+        File.write!(codex_binary, """
+        #!/bin/sh
+        # Emit plain-text configWarning and remoteControl notification BEFORE
+        # the JSON-RPC initialize response, mimicking Codex's behaviour for an
+        # untrusted workspace. The adapter must skip both and still complete
+        # the handshake.
+        printf '%s\\n' 'Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load. 1. /tmp/.codex'
+        printf '%s\\n' '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}'
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-2200"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-2200"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"method":"turn/completed"}'
+              exit 0
+              ;;
+            *)
+              exit 0
+              ;;
+          esac
+        done
+        """)
+
+        File.chmod!(codex_binary, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server",
+          codex_read_timeout_ms: 2_000
+        )
+
+        issue = %Issue{
+          id: "issue-untrusted-handshake",
+          identifier: "MT-2200",
+          title: "Tolerate untrusted-workspace startup noise",
+          description: "Adapter must not time out on configWarning + remoteControl messages",
+          state: "In Progress",
+          url: "https://example.org/issues/MT-2200",
+          labels: ["backend"]
+        }
+
+        {total_us, {result, log}} =
+          :timer.tc(fn ->
+            with_log(fn -> Adapter.run(workspace, "Tolerate untrusted-workspace noise", issue) end)
+          end)
+
+        # Should complete in well under 30s (acceptance criterion §1) and in
+        # well under the configured 2s read_timeout_ms (the noise is small
+        # and Codex responds immediately after).
+        assert total_us < 30_000_000
+
+        assert {:ok, _result} = result
+
+        # Operator visibility: configWarning gets a Logger.warning.
+        assert log =~ "Codex"
+        assert log =~ "until the project is trusted"
+
+        # Operator visibility: remoteControl/status/changed is logged at warn.
+        assert log =~ "Codex remoteControl reported status=disabled"
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "auto-adds the workspace to ~/.codex/config.toml on session start" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-codex-trust-write-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        workspace = Path.join(workspace_root, "MT-2201")
+        codex_binary = Path.join(test_root, "fake-codex")
+        File.mkdir_p!(workspace)
+
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+            2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-2201"}}}' ;;
+            3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-2201"}}}' ;;
+            4) printf '%s\\n' '{"method":"turn/completed"}'; exit 0 ;;
+            *) exit 0 ;;
+          esac
+        done
+        """)
+
+        File.chmod!(codex_binary, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server"
+        )
+
+        issue = %Issue{
+          id: "issue-trust-write",
+          identifier: "MT-2201",
+          title: "Workspace gets recorded as trusted",
+          description: "Codex.Adapter must call ProjectTrust.ensure_trusted",
+          state: "In Progress",
+          url: "https://example.org/issues/MT-2201",
+          labels: ["backend"]
+        }
+
+        assert {:ok, _result} = Adapter.run(workspace, "Trigger trust write", issue)
+
+        config_path = SymphonyElixir.Codex.ProjectTrust.config_path()
+        assert File.exists?(config_path)
+
+        contents = File.read!(config_path)
+        assert {:ok, canonical_path} = SymphonyElixir.PathSafety.canonicalize(workspace)
+        assert contents =~ ~s([projects."#{canonical_path}"])
+        assert contents =~ ~s(trust_level = "trusted")
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "does not write local trust when worker_host is set (remote sessions)" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-codex-trust-remote-#{System.unique_integer([:positive])}"
+        )
+
+      previous_path = System.get_env("PATH")
+      previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+      on_exit(fn ->
+        restore_env("PATH", previous_path)
+        restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      end)
+
+      try do
+        trace_file = Path.join(test_root, "ssh.trace")
+        fake_ssh = Path.join(test_root, "ssh")
+        remote_workspace = "/remote/workspaces/MT-REMOTE-TRUST"
+
+        File.mkdir_p!(test_root)
+        System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+        System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+        File.write!(fake_ssh, """
+        #!/bin/sh
+        trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+            2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote-trust"}}}' ;;
+            3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote-trust"}}}' ;;
+            4) printf '%s\\n' '{"method":"turn/completed"}'; exit 0 ;;
+            *) exit 0 ;;
+          esac
+        done
+        """)
+
+        File.chmod!(fake_ssh, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: "/remote/workspaces",
+          codex_command: "fake-remote-codex app-server"
+        )
+
+        issue = %Issue{
+          id: "issue-remote-trust",
+          identifier: "MT-REMOTE-TRUST",
+          title: "Remote sessions skip local trust",
+          description: "ProjectTrust must NOT write when worker_host is set",
+          state: "In Progress",
+          url: "https://example.org/issues/MT-REMOTE-TRUST",
+          labels: ["backend"]
+        }
+
+        # Trust file should not exist after the remote session runs.
+        config_path = SymphonyElixir.Codex.ProjectTrust.config_path()
+        if File.exists?(config_path), do: File.rm!(config_path)
+
+        assert {:ok, _result} =
+                 Adapter.run(
+                   remote_workspace,
+                   "Run remote worker without local trust write",
+                   issue,
+                   worker_host: "worker-trust-01:2200"
+                 )
+
+        refute File.exists?(config_path)
+      after
+        File.rm_rf(test_root)
+      end
+    end
+  end
+
+  defp with_log(fun) when is_function(fun, 0) do
+    parent = self()
+    ref = make_ref()
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        result = fun.()
+        send(parent, {ref, result})
+      end)
+
+    receive do
+      {^ref, result} -> {result, log}
+    after
+      0 -> {nil, log}
+    end
+  end
 end

@@ -269,6 +269,43 @@ docker compose run --rm symphony /workspace/WORKFLOW.md --port 4000 --i-understa
 
 ---
 
+## Codex workspace trust
+
+Codex CLI's `app-server` mode disables its JSON-RPC interface
+(`remoteControl`) for any workspace whose `.codex/` directory is not
+listed under `[projects]` in `~/.codex/config.toml`. Without that entry
+the Codex process logs a `configWarning` and never responds to
+`initialize`, so Symphony sees `:response_timeout` from the Codex
+adapter.
+
+Symphony's `SymphonyElixir.Codex.ProjectTrust.ensure_trusted/1` is
+invoked from `Codex.Adapter.start_session/2` and auto-writes a
+`[projects."<canonical-workspace>"]` block with
+`trust_level = "trusted"` for every per-issue workspace, so the
+operator does not normally need to maintain `~/.codex/config.toml` by
+hand.
+
+Only canonical paths strictly under the configured `workspace.root`
+are eligible (the same `validate_workspace_cwd/2` check that already
+guards `cwd` for `thread/start`). Arbitrary paths cannot be trusted by
+this mechanism — per the SYM-11923259980 acceptance criteria.
+
+Override the config-file location with the `SYMPHONY_CODEX_CONFIG_TOML`
+env var when running tests or pointing Codex at a non-default config
+directory.
+
+If you see `remoteControl/status/changed status=disabled` warnings
+persistently in the Symphony logs, check that:
+
+- `~/.codex/config.toml` exists and is writable by the Symphony process.
+- The workspace path under `workspace.root` matches the canonical path
+  Codex sees (symlinks resolved). The auto-trust uses the canonical form.
+- For SSH-backed remote workers, the trust file lives on the worker
+  host. Symphony does NOT update the remote config; ensure the remote
+  user's `~/.codex/config.toml` includes the remote workspace path.
+
+---
+
 ## Troubleshooting
 
 | Symptom                                                         | Likely cause                                                                                         |
@@ -279,6 +316,7 @@ docker compose run --rm symphony /workspace/WORKFLOW.md --port 4000 --i-understa
 | `Workflow file not found: /workspace/WORKFLOW.md`               | The compose file expects `elixir/WORKFLOW.md` to exist. Make sure you ran `git clone` from the repo root. |
 | Symphony exits immediately with the red acknowledgement banner  | You forgot the `--i-understand-that-this-will-be-running-without-the-usual-guardrails` flag.         |
 | Auth flow prompts in container but redirect URL fails           | Host networking is required so OAuth callbacks resolve. On macOS/Windows, prefer the native path.    |
+| Codex agents fail with `:response_timeout`                      | Workspace not trusted in `~/.codex/config.toml`. Symphony auto-trusts on session start; if the warning persists, check the file is writable and see the "Codex workspace trust" section above. |
 
 ---
 
