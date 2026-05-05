@@ -36,6 +36,8 @@ defmodule SymphonyElixir.Claude.Adapter do
         {:error, {:sandbox_floor_violation, :claude, :config}}
 
       true ->
+        cmd = build_full_command(cmd, config)
+
         with {:ok, port} <- open_bash_port(cmd, workspace_path) do
           {:ok,
            %{
@@ -49,8 +51,134 @@ defmodule SymphonyElixir.Claude.Adapter do
     end
   end
 
+  @doc false
+  @spec build_full_command(String.t(), map()) :: String.t()
+  def build_full_command(base_cmd, config) when is_binary(base_cmd) do
+    if claude_invocation?(base_cmd) do
+      [base_cmd]
+      |> append_flag("--model", get_field(config, :model))
+      |> append_flag("--permission-mode", get_field(config, :permission_mode))
+      |> append_allowed_tools(get_field(config, :allowed_tools))
+      |> Enum.join(" ")
+    else
+      base_cmd
+    end
+  end
+
+  defp claude_invocation?(cmd) when is_binary(cmd) do
+    cmd
+    |> shell_words()
+    |> invocation_executable()
+    |> claude_executable?()
+  end
+
+  defp shell_words(cmd) do
+    ~r/(?:[^\s'"]+|'[^']*'|"[^"]*")+/u
+    |> Regex.scan(cmd)
+    |> Enum.map(fn [word] -> strip_wrapping_quotes(word) end)
+  end
+
+  defp strip_wrapping_quotes(<<quote, rest::binary>>) when quote in [?\", ?'] do
+    if String.ends_with?(rest, <<quote>>) do
+      binary_part(rest, 0, byte_size(rest) - 1)
+    else
+      <<quote, rest::binary>>
+    end
+  end
+
+  defp strip_wrapping_quotes(word), do: word
+
+  defp invocation_executable([]), do: nil
+
+  defp invocation_executable([token | rest]) do
+    cond do
+      env_assignment?(token) ->
+        invocation_executable(rest)
+
+      env_executable?(token) ->
+        rest
+        |> drop_env_prefix()
+        |> invocation_executable()
+
+      true ->
+        token
+    end
+  end
+
+  defp env_assignment?(token) when is_binary(token) do
+    String.match?(token, ~r/^[A-Za-z_][A-Za-z0-9_]*=.*/)
+  end
+
+  defp env_executable?(token) when is_binary(token) do
+    token
+    |> Path.basename()
+    |> String.equivalent?("env")
+  end
+
+  defp drop_env_prefix([]), do: []
+  defp drop_env_prefix(["--" | rest]), do: rest
+  defp drop_env_prefix(["-u", _name | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["--unset", _name | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix([<<"--unset=", _::binary>> | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["-C", _dir | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix(["--chdir", _dir | rest]), do: drop_env_prefix(rest)
+  defp drop_env_prefix([<<"--chdir=", _::binary>> | rest]), do: drop_env_prefix(rest)
+
+  defp drop_env_prefix([option | rest]) when option in ["-i", "--ignore-environment"] do
+    drop_env_prefix(rest)
+  end
+
+  defp drop_env_prefix([token | rest]) do
+    if env_assignment?(token), do: drop_env_prefix(rest), else: [token | rest]
+  end
+
+  defp claude_executable?(nil), do: false
+
+  defp claude_executable?(token) do
+    # Symphony workers are Linux hosts; Windows-only names like claude.exe are
+    # intentionally out of scope.
+    token
+    |> Path.basename()
+    |> then(&(&1 in ["claude", "claude-code"]))
+  end
+
+  defp append_flag(parts, _flag, nil), do: parts
+  defp append_flag(parts, _flag, ""), do: parts
+
+  defp append_flag(parts, flag, value) when is_binary(value) do
+    parts ++ [flag, shell_quote(value)]
+  end
+
+  defp append_flag(parts, flag, value) when is_atom(value) do
+    append_flag(parts, flag, Atom.to_string(value))
+  end
+
+  defp append_allowed_tools(parts, nil), do: parts
+  defp append_allowed_tools(parts, []), do: parts
+
+  defp append_allowed_tools(parts, tools) when is_list(tools) do
+    # Claude accepts comma- or space-separated values; a single comma-separated
+    # shell word avoids the variadic flag swallowing later flags if we add any.
+    quoted = tools |> Enum.join(",") |> shell_quote()
+    parts ++ ["--allowed-tools", quoted]
+  end
+
+  defp shell_quote(value) when is_binary(value) do
+    if String.match?(value, ~r/^[A-Za-z0-9_\-\.,\/:=]+$/) do
+      value
+    else
+      "'" <> String.replace(value, "'", "'\\''") <> "'"
+    end
+  end
+
+  defp get_field(config, key) when is_atom(key) do
+    config[key] || config[Atom.to_string(key)]
+  end
+
   @impl SymphonyElixir.AgentRuntime
   def send_turn(%{port: port}, prompt, _opts) when is_port(port) do
+    # stream-json input is newline-delimited over a live stdin stream; AgentRunner
+    # consumes stdout until Claude emits a terminal turn event or exits.
     payload =
       Jason.encode!(%{
         "type" => "user",
