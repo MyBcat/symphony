@@ -30,7 +30,13 @@ defmodule SymphonyElixir.Monday.Item do
           | {:error, {:missing_column, String.t()} | {:phi_detected, [PHIDetector.finding()]}}
   def from_monday(raw, config) when is_map(raw) and is_map(config) do
     title = Map.get(raw, "name", "")
-    description = column_text(raw, config[:description_column_id])
+    description =
+      column_text(raw, config[:description_column_id])
+      |> ensure_blank()
+      |> case do
+        nil -> description_from_updates(raw)
+        text -> text
+      end
 
     with :clean <- PHIDetector.scan(title),
          :clean <- PHIDetector.scan(description),
@@ -155,4 +161,65 @@ defmodule SymphonyElixir.Monday.Item do
         if text == "", do: nil, else: text
     end
   end
+
+  defp ensure_blank(nil), do: nil
+
+  defp ensure_blank(text) when is_binary(text) do
+    case String.trim(text) do
+      "" -> nil
+      _ -> text
+    end
+  end
+
+  # Linear → Monday mapping: Linear has built-in issue.description; Monday
+  # items don't, so the operator-written task body lives in Monday Updates.
+  # Concatenate non-Symphony updates oldest-first as the rendered description.
+  # Symphony's own writebacks (## Symphony Workpad / ## Symphony Failures /
+  # ## Symphony Heartbeat / ## Symphony Completion) are filtered out.
+  @symphony_marker_prefixes [
+    "## Symphony Workpad",
+    "## Symphony Failures",
+    "## Symphony Heartbeat",
+    "## Symphony Completion"
+  ]
+
+  defp description_from_updates(raw) do
+    updates = Map.get(raw, "updates", [])
+
+    operator_bodies =
+      updates
+      |> Enum.sort_by(&Map.get(&1, "created_at", ""))
+      |> Enum.map(&Map.get(&1, "body", ""))
+      |> Enum.map(&strip_html/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&symphony_marker?/1)
+      |> Enum.reject(&(&1 == ""))
+
+    case operator_bodies do
+      [] -> nil
+      bodies -> Enum.join(bodies, "\n\n---\n\n")
+    end
+  end
+
+  defp symphony_marker?(text) when is_binary(text) do
+    Enum.any?(@symphony_marker_prefixes, &String.starts_with?(text, &1))
+  end
+
+  defp symphony_marker?(_), do: false
+
+  # Monday update bodies arrive as HTML; strip tags + decode common entities so
+  # the prompt body is plain text that the agent can read cleanly.
+  defp strip_html(html) when is_binary(html) do
+    html
+    |> String.replace(~r/<\/?(p|div|br)[^>]*>/i, "\n")
+    |> String.replace(~r/<[^>]+>/, "")
+    |> String.replace("&amp;", "&")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&#39;", "'")
+    |> String.replace(~r/\n{3,}/, "\n\n")
+  end
+
+  defp strip_html(_), do: ""
 end

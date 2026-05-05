@@ -31,6 +31,11 @@ defmodule SymphonyElixir.Monday.Adapter do
             id
             text
           }
+          updates(limit: 25) {
+            id
+            body
+            created_at
+          }
         }
       }
     }
@@ -48,6 +53,11 @@ defmodule SymphonyElixir.Monday.Adapter do
       column_values(ids: $columnIds) {
         id
         text
+      }
+      updates(limit: 25) {
+        id
+        body
+        created_at
       }
     }
   }
