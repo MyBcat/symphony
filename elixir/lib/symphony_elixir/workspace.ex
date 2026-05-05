@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
+           :ok <- maybe_clone_repo(workspace, issue_context, created?, worker_host),
            :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
         {:ok, workspace}
       end
@@ -205,6 +206,46 @@ defmodule SymphonyElixir.Workspace do
 
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
+  end
+
+  defp maybe_clone_repo(_workspace, _issue_context, false, _worker_host), do: :ok
+
+  defp maybe_clone_repo(workspace, issue_context, true, worker_host) do
+    repo_key = Map.get(issue_context, :issue_repo)
+
+    case Config.repo_or_default(repo_key) do
+      {:ok, {:repo, _key, repo_entry}} ->
+        clone_url = Map.get(repo_entry, :clone_url) || Map.get(repo_entry, "clone_url")
+        default_branch = Map.get(repo_entry, :default_branch) || Map.get(repo_entry, "default_branch")
+        run_clone(workspace, clone_url, default_branch, issue_context, worker_host)
+
+      {:ok, {:default, _}} ->
+        # Legacy single-repo mode — global hooks.after_create runs the clone itself.
+        :ok
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  defp run_clone(workspace, clone_url, default_branch, issue_context, worker_host)
+       when is_binary(clone_url) do
+    branch_arg = if is_binary(default_branch) and default_branch != "", do: " --branch #{default_branch}", else: ""
+
+    command = """
+    set -e
+    git clone --depth 1 --no-recurse-submodules#{branch_arg} #{clone_url} .
+    """
+
+    Logger.info(
+      "Symphony cloning repo for #{Map.get(issue_context, :issue_identifier)} from #{clone_url}#{branch_arg}"
+    )
+
+    run_hook(command, workspace, issue_context, "clone", worker_host)
+  end
+
+  defp run_clone(_workspace, _clone_url, _default_branch, issue_context, _worker_host) do
+    {:error, {:no_clone_url, Map.get(issue_context, :issue_identifier)}}
   end
 
   defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
