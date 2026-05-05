@@ -56,6 +56,30 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
     def delete_item(_id), do: :ok
   end
 
+  defmodule InspectableTracker do
+    def list_board_items(_, _), do: {:ok, []}
+    def create_item(_, name), do: {:ok, %{id: "999", name: name}}
+    def upsert_workpad(_, _), do: :ok
+    def update_issue_state(_, _), do: :ok
+
+    def fetch_issue_states_by_ids(["999"]) do
+      {:ok, [%{state: "Human Review", pr_url: "https://example.com/pr/1"}]}
+    end
+
+    def fetch_issue_states_by_ids(_), do: {:ok, []}
+
+    def delete_item(_), do: :ok
+  end
+
+  defmodule MissingItemTracker do
+    def list_board_items(_, _), do: {:ok, []}
+    def create_item(_, name), do: {:ok, %{id: "1", name: name}}
+    def upsert_workpad(_, _), do: :ok
+    def update_issue_state(_, _), do: :ok
+    def fetch_issue_states_by_ids(_), do: {:ok, []}
+    def delete_item(_), do: :ok
+  end
+
   describe "execute/2" do
     test "halts before any Monday call when board id matches the prod board id" do
       deps = stub_deps()
@@ -202,21 +226,6 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
     end
 
     test "build_harness_deps wires fetch_issue_state to the configured tracker module" do
-      defmodule InspectableTracker do
-        def list_board_items(_, _), do: {:ok, []}
-        def create_item(_, name), do: {:ok, %{id: "999", name: name}}
-        def upsert_workpad(_, _), do: :ok
-        def update_issue_state(_, _), do: :ok
-
-        def fetch_issue_states_by_ids(["999"]) do
-          {:ok, [%{state: "Human Review", pr_url: "https://example.com/pr/1"}]}
-        end
-
-        def fetch_issue_states_by_ids(_), do: {:ok, []}
-
-        def delete_item(_), do: :ok
-      end
-
       parent = self()
 
       deps =
@@ -252,15 +261,6 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
     end
 
     test "fetch_issue_state surfaces :item_not_found when the tracker returns no rows" do
-      defmodule MissingItemTracker do
-        def list_board_items(_, _), do: {:ok, []}
-        def create_item(_, name), do: {:ok, %{id: "1", name: name}}
-        def upsert_workpad(_, _), do: :ok
-        def update_issue_state(_, _), do: :ok
-        def fetch_issue_states_by_ids(_), do: {:ok, []}
-        def delete_item(_), do: :ok
-      end
-
       parent = self()
 
       deps =

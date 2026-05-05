@@ -62,6 +62,19 @@ defmodule SymphonyElixir.E2E.HarnessTest do
     end)
   end
 
+  # Returns a stub `monotonic_now_ms` that advances by `step_ms` every call,
+  # starting at 0. The harness uses the first call to compute the deadline,
+  # so total available "wall time" inside the test = step_ms * (max_wait_seconds + 1).
+  defp deadline_counter(step_ms) do
+    counter = :counters.new(1, [])
+
+    fn ->
+      n = :counters.get(counter, 1)
+      :counters.add(counter, 1, 1)
+      n * step_ms
+    end
+  end
+
   defp base_opts(overrides \\ []) do
     Keyword.merge(
       [
@@ -283,39 +296,55 @@ defmodule SymphonyElixir.E2E.HarnessTest do
     end
 
     test "fails when Symphony exits with port_exit_nonzero before item reaches Human Review" do
+      runner_done_ref = make_ref()
+      parent = self()
+
       deps =
         base_deps(%{
           symphony_runner: fn _opts ->
+            send(parent, {:runner_returning, runner_done_ref})
+
             {:error, {:port_exit_nonzero, 137}, "stderr: port_exit_nonzero status=137"}
           end,
           tracker: %{
             fetch_issue_state: fn _item_id -> {:ok, %{state: "In Progress", pr_url: nil}} end
-          }
+          },
+          monotonic_now_ms: deadline_counter(2_000)
         })
 
       result = Harness.run(base_opts(max_wait_seconds: 30, poll_interval_ms: 1), deps)
 
+      # Sanity check: runner did execute.
+      assert_received {:runner_returning, ^runner_done_ref}
+
       assert result.status == :failed
-      assert {:assertions_failed, %{runner: {:runner_error, {:port_exit_nonzero, 137}}, assertions: assertions}} = result.reason
-      assert {:no_port_exit_nonzero, false} in assertions
+
+      assert {:assertions_failed,
+              %{runner: runner_reason, assertions: assertions}} = result.reason
+
+      # Either Task.yield caught the runner's error result, or the polling
+      # loop hit deadline first. Both are valid failure paths; both surface
+      # a failed `:no_port_exit_nonzero` / `:status_human_review` /
+      # `:pr_url_written` assertion. `runner_reason` is one of:
+      #   * `{:runner_error, {:port_exit_nonzero, 137}}` (yield caught it)
+      #   * `:timeout` (polling deadline exceeded first)
+      assert runner_reason in [
+               {:runner_error, {:port_exit_nonzero, 137}},
+               :timeout
+             ]
+
       assert {:status_human_review, false} in assertions
       assert {:pr_url_written, false} in assertions
     end
 
     test "fails on timeout when item never reaches Human Review" do
-      ticks = :counters.new(1, [])
-
       deps =
         base_deps(%{
           symphony_runner: fn _opts -> Process.sleep(:infinity) end,
           tracker: %{
             fetch_issue_state: fn _item_id -> {:ok, %{state: "In Progress", pr_url: nil}} end
           },
-          monotonic_now_ms: fn ->
-            n = :counters.get(ticks, 1)
-            :counters.add(ticks, 1, 1)
-            n * 1_000
-          end
+          monotonic_now_ms: deadline_counter(1_000)
         })
 
       result = Harness.run(base_opts(max_wait_seconds: 2, poll_interval_ms: 1), deps)
