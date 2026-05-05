@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Tracker do
   @callback upsert_workpad(String.t(), String.t()) :: :ok | {:error, term()}
   @callback set_pr_url(String.t(), String.t()) :: :ok | {:error, term()}
   @callback post_failure_update(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback post_pr_refusal(String.t(), String.t()) :: :ok | {:error, term()}
   @callback acquire_heartbeat() :: :ok | {:error, term()}
   @callback release_heartbeat() :: :ok | {:error, term()}
   @callback validate_no_phi(map()) :: :ok | {:error, term()}
@@ -37,6 +38,9 @@ defmodule SymphonyElixir.Tracker do
 
   @spec post_failure_update(String.t(), String.t()) :: :ok | {:error, term()}
   def post_failure_update(issue_id, body), do: adapter().post_failure_update(issue_id, body)
+
+  @spec post_pr_refusal(String.t(), String.t()) :: :ok | {:error, term()}
+  def post_pr_refusal(issue_id, body), do: adapter().post_pr_refusal(issue_id, body)
 
   @spec acquire_heartbeat() :: :ok | {:error, term()}
   def acquire_heartbeat, do: adapter().acquire_heartbeat()

@@ -180,7 +180,8 @@ defmodule SymphonyElixir.Monday.Item do
     "## Symphony Workpad",
     "## Symphony Failures",
     "## Symphony Heartbeat",
-    "## Symphony Completion"
+    "## Symphony Completion",
+    "## Symphony PR Refusal"
   ]
 
   defp description_from_updates(raw) do

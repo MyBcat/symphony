@@ -524,6 +524,45 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert_received {:graphql, _query, %{"body" => body}}
       assert body =~ "## Symphony Failures"
     end
+
+    test "post_pr_refusal posts an update under the Symphony PR Refusal marker" do
+      assert :ok =
+               Adapter.post_pr_refusal(
+                 "9482736152",
+                 "## Symphony PR Refusal\n\nReason: branch_convention_violation\n"
+               )
+
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+      assert String.starts_with?(body, "## Symphony PR Refusal")
+      assert body =~ "branch_convention_violation"
+    end
+
+    test "post_pr_refusal prepends the marker when the body lacks it" do
+      assert :ok = Adapter.post_pr_refusal("9482736152", "Reason: force_push_detected")
+      assert_received {:graphql, _query, %{"body" => body}}
+      assert String.starts_with?(body, "## Symphony PR Refusal")
+      assert body =~ "force_push_detected"
+    end
+
+    test "post_pr_refusal redacts secrets and home paths before posting" do
+      raw_body = """
+      ## Symphony PR Refusal
+
+      Reason: branch_convention_violation
+      Token leak: GITHUB_TOKEN=ghp_abcdefghij1234567890
+      Home path leak: /home/ankit114/code/symphony-workspaces/SYM-1/work
+      """
+
+      assert :ok = Adapter.post_pr_refusal("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      refute body =~ "ghp_abcdefghij1234567890"
+      refute body =~ "/home/ankit114"
+      assert body =~ "[REDACTED-SECRET]"
+      assert body =~ "[REDACTED-HOME-PATH]"
+      assert String.starts_with?(body, "## Symphony PR Refusal")
+    end
   end
 
   describe "heartbeat" do

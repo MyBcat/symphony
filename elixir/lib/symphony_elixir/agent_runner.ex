@@ -13,6 +13,7 @@ defmodule SymphonyElixir.AgentRunner do
     Config,
     Monday.PRDetector,
     Monday.Workpad,
+    PRSafety,
     Profile,
     ProfileResolver,
     PromptBuilder,
@@ -663,6 +664,7 @@ defmodule SymphonyElixir.AgentRunner do
       %{
         session: session,
         pr_url_written?: false,
+        pr_refused?: false,
         session_started_emitted?: false
       }
     end)
@@ -843,15 +845,20 @@ defmodule SymphonyElixir.AgentRunner do
     issue_id = issue_id(issue)
 
     if is_binary(issue_id) do
-      {session, pr_url_written?} =
-        Agent.get(writer_pid, fn state -> {state.session, state.pr_url_written?} end)
+      {session, pr_url_written?, pr_refused?} =
+        Agent.get(writer_pid, fn state ->
+          {state.session, state.pr_url_written?, state.pr_refused?}
+        end)
 
       case read_summary(Map.get(session, :workspace_path)) do
         {:ok, summary_body} ->
           body = Workpad.render_completion(session, summary_body)
           _ = Tracker.upsert_workpad(issue_id, body)
 
-          if pr_url_written? do
+          # M-8 PR safety: if PRSafety refused the PR (branch convention or
+          # force-push violation), the item is already in `Cancelled`. Do not
+          # transition to Human Review and undo the refusal.
+          if pr_url_written? and not pr_refused? do
             _ = Tracker.update_issue_state(issue_id, "Human Review")
           end
 
@@ -877,32 +884,71 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_detect_pr_url(writer_pid, issue, message) do
     issue_id = issue_id(issue)
 
-    if is_binary(issue_id) do
+    if is_binary(issue_id) and is_pid(writer_pid) and Process.alive?(writer_pid) do
       already_written? = Agent.get(writer_pid, fn state -> state.pr_url_written? end)
 
       if !already_written? do
         case scan_message_for_pr(message) do
           {:ok, url} ->
-            updated? =
-              Agent.get_and_update(writer_pid, fn state ->
-                if state.pr_url_written? do
-                  {false, state}
-                else
-                  {true, %{state | pr_url_written?: true}}
-                end
-              end)
-
-            if updated? do
-              _ = Tracker.set_pr_url(issue_id, url)
-            end
-
-            :ok
+            handle_detected_pr_url(writer_pid, issue_id, url)
 
           :no_match ->
             :ok
         end
       end
     end
+
+    :ok
+  end
+
+  # M-8 PR safety: route a freshly detected PR URL through `PRSafety.evaluate_pr/2`
+  # and dispatch the resulting Monday writes (set_pr_url + Human Review on a
+  # clean first detection; refusal Workpad + Cancelled on branch / force-push
+  # violations; no-op on idempotent re-detection).
+  defp handle_detected_pr_url(writer_pid, issue_id, url) do
+    claimed? =
+      Agent.get_and_update(writer_pid, fn state ->
+        if state.pr_url_written? do
+          {false, state}
+        else
+          {true, %{state | pr_url_written?: true}}
+        end
+      end)
+
+    if claimed? do
+      case PRSafety.evaluate_pr(url, issue_id) do
+        {:ok, :transition} ->
+          _ = Tracker.set_pr_url(issue_id, url)
+          _ = Tracker.update_issue_state(issue_id, "Human Review")
+          :ok
+
+        {:ok, :idempotent_no_force_push} ->
+          # Already recorded for this item with the same URL; the prior run
+          # already wrote PR URL + Human Review. Don't duplicate writes.
+          :ok
+
+        {:error, refusal} ->
+          emit_pr_refusal(writer_pid, issue_id, refusal)
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp emit_pr_refusal(writer_pid, issue_id, refusal) do
+    session =
+      Agent.get_and_update(writer_pid, fn state ->
+        {state.session, %{state | pr_refused?: true}}
+      end)
+
+    label = PRSafety.reason_label(refusal)
+    body = Workpad.render_pr_refusal(session, label)
+
+    _ = Tracker.post_pr_refusal(issue_id, body)
+    _ = Tracker.update_issue_state(issue_id, "Cancelled")
+
+    Logger.warning("Symphony refused PR for issue_id=#{issue_id}: #{label}")
 
     :ok
   end

@@ -13,6 +13,7 @@ defmodule SymphonyElixir.TrackerTest do
     def upsert_workpad(_, _), do: :ok
     def set_pr_url(_, _), do: :ok
     def post_failure_update(_, _), do: :ok
+    def post_pr_refusal(_, _), do: :ok
     def acquire_heartbeat, do: :ok
     def release_heartbeat, do: :ok
     def validate_no_phi(_), do: :ok
@@ -34,6 +35,10 @@ defmodule SymphonyElixir.TrackerTest do
 
   test "delegates post_failure_update to adapter" do
     assert Tracker.post_failure_update("123", "reason") == :ok
+  end
+
+  test "delegates post_pr_refusal to adapter" do
+    assert Tracker.post_pr_refusal("123", "## Symphony PR Refusal\n\nReason: forced") == :ok
   end
 
   test "delegates acquire_heartbeat to adapter" do

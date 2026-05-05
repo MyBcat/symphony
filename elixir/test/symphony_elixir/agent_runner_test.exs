@@ -5,9 +5,42 @@ defmodule SymphonyElixir.AgentRunnerTest do
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Tracker.MemoryMonday
 
+  defmodule PRSafetyStubGH do
+    @moduledoc false
+    @behaviour SymphonyElixir.PRSafety.GH
+
+    @impl true
+    def pr_view_basic(url) do
+      case Process.get({__MODULE__, :basic, url}) do
+        nil -> {:error, :stub_not_configured}
+        response -> response
+      end
+    end
+
+    @impl true
+    def pr_view_commits(url) do
+      case Process.get({__MODULE__, :commits, url}) do
+        nil -> {:error, :stub_not_configured}
+        response -> response
+      end
+    end
+
+    def stub_basic(url, response), do: Process.put({__MODULE__, :basic, url}, response)
+    def stub_commits(url, response), do: Process.put({__MODULE__, :commits, url}, response)
+  end
+
   describe "Tracker writes triggered by event stream" do
     setup do
       Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      Application.put_env(:symphony_elixir, :pr_safety_gh_module, PRSafetyStubGH)
+
+      pr_state_path =
+        Path.join(
+          System.tmp_dir!(),
+          "agent-runner-pr-state-#{System.unique_integer([:positive])}.json"
+        )
+
+      Application.put_env(:symphony_elixir, :pr_safety_state_path, pr_state_path)
 
       case Process.whereis(MemoryMonday) do
         nil -> {:ok, _} = MemoryMonday.start_link([])
@@ -18,6 +51,9 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       on_exit(fn ->
         Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+        Application.delete_env(:symphony_elixir, :pr_safety_gh_module)
+        Application.delete_env(:symphony_elixir, :pr_safety_state_path)
+        File.rm(pr_state_path)
 
         if pid = Process.whereis(MemoryMonday) do
           Process.exit(pid, :normal)
@@ -46,7 +82,13 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       on_exit(fn -> AgentRunner.stop_session_writer(writer_pid) end)
 
-      %{issue: issue, workspace: workspace, writer_pid: writer_pid, session: session}
+      %{
+        issue: issue,
+        workspace: workspace,
+        writer_pid: writer_pid,
+        session: session,
+        pr_state_path: pr_state_path
+      }
     end
 
     test "on session start, writes status `In Progress` and creates workpad",
@@ -103,13 +145,24 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected exactly one In Progress status write; got #{status_writes} in events=#{inspect(events)}"
     end
 
-    test "on PR URL appearing in stream, calls Tracker.set_pr_url",
+    test "on PR URL appearing in stream with valid branch, writes PR URL and transitions to Human Review",
          %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/42"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
       message = %{
         event: :notification,
-        payload: %{"text" => "Created https://github.com/openai/symphony/pull/42 for review"},
-        raw:
-          ~s({"method":"item/agent_message","params":{"text":"Opened PR https://github.com/openai/symphony/pull/42"}}),
+        payload: %{"text" => "Created #{url} for review"},
+        raw: ~s({"method":"item/agent_message","params":{"text":"Opened PR #{url}"}}),
         timestamp: DateTime.utc_now()
       }
 
@@ -118,17 +171,35 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:pr_write, "issue-runner-1", "https://github.com/openai/symphony/pull/42"} -> true
+               {:pr_write, "issue-runner-1", ^url} -> true
                _ -> false
              end),
              "expected pr_write with PR URL; got events=#{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:status_write, "issue-runner-1", "Human Review"} -> true
+               _ -> false
+             end),
+             "expected status_write Human Review on PR detection; got events=#{inspect(events)}"
     end
 
     test "duplicate PR URL in stream does not trigger duplicate writes",
          %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/42"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
       message = %{
         event: :notification,
-        raw: "Opened https://github.com/openai/symphony/pull/42",
+        raw: "Opened #{url}",
         timestamp: DateTime.utc_now()
       }
 
@@ -146,6 +217,154 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       assert pr_writes == 1,
              "expected exactly one pr_write; got #{pr_writes} in events=#{inspect(events)}"
+
+      status_writes =
+        Enum.count(events, fn
+          {:status_write, "issue-runner-1", "Human Review"} -> true
+          _ -> false
+        end)
+
+      assert status_writes == 1,
+             "expected exactly one Human Review status write; got #{status_writes} in events=#{inspect(events)}"
+    end
+
+    test "on PR URL with invalid branch, refuses with branch_convention_violation and transitions to Cancelled",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/55"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "feature/random-branch",
+           url: url,
+           head_sha: "deadbeef"
+         }}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      events = MemoryMonday.events()
+
+      refute Enum.any?(events, fn
+               {:pr_write, "issue-runner-1", _url} -> true
+               _ -> false
+             end),
+             "should NOT write PR URL on branch convention violation; got #{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:pr_refusal_write, "issue-runner-1", body} ->
+                 String.contains?(body, "## Symphony PR Refusal") and
+                   String.contains?(body, "branch_convention_violation") and
+                   String.contains?(body, "feature/random-branch") and
+                   String.contains?(body, "symphony/SYM-issue-runner-1/attempt-N")
+
+               _ ->
+                 false
+             end),
+             "expected pr_refusal_write with branch_convention_violation reason; got #{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected status_write Cancelled on branch refusal; got events=#{inspect(events)}"
+    end
+
+    test "on PR URL with rebased history (force-push), refuses with force_push_detected",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/77"
+
+      # Pre-populate state with a SHA that will not appear in the new commits.
+      :ok =
+        SymphonyElixir.PRSafety.PRState.record("issue-runner-1", %{
+          url: url,
+          sha: "originalsha"
+        })
+
+      PRSafetyStubGH.stub_commits(url,
+        {:ok,
+         [
+           %{sha: "rebased1"},
+           %{sha: "rebased2"}
+         ]}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:pr_refusal_write, "issue-runner-1", body} ->
+                 String.contains?(body, "## Symphony PR Refusal") and
+                   String.contains?(body, "force_push_detected")
+
+               _ ->
+                 false
+             end),
+             "expected pr_refusal_write with force_push_detected reason; got #{inspect(events)}"
+
+      assert Enum.any?(events, fn
+               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected status_write Cancelled on force-push refusal; got events=#{inspect(events)}"
+    end
+
+    test "on PR URL re-detection where prior SHA is still in history (descendant), does NOT refuse",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/88"
+
+      # Pre-populate state to simulate a prior agent run that already
+      # recorded the PR.
+      :ok =
+        SymphonyElixir.PRSafety.PRState.record("issue-runner-1", %{
+          url: url,
+          sha: "originalsha"
+        })
+
+      PRSafetyStubGH.stub_commits(url,
+        {:ok,
+         [
+           %{sha: "originalsha"},
+           %{sha: "appended1"},
+           %{sha: "appended2"}
+         ]}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      events = MemoryMonday.events()
+
+      refute Enum.any?(events, fn
+               {:pr_refusal_write, _, _} -> true
+               _ -> false
+             end),
+             "should NOT refuse when prior SHA is still in commit chain; got #{inspect(events)}"
+
+      refute Enum.any?(events, fn
+               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "should NOT cancel on descendant SHA append; got #{inspect(events)}"
     end
 
     test "on completion event with _symphony_summary.md present, writes workpad with completion render and status :Human Review",
@@ -155,9 +374,21 @@ defmodule SymphonyElixir.AgentRunnerTest do
       File.write!(summary_path, summary_body)
 
       # First emit a PR URL so that completion bumps status to "Human Review".
+      url = "https://github.com/openai/symphony/pull/99"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
       pr_message = %{
         event: :notification,
-        raw: "Opened https://github.com/openai/symphony/pull/99",
+        raw: "Opened #{url}",
         timestamp: DateTime.utc_now()
       }
 

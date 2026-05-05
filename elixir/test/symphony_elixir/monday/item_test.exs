@@ -107,6 +107,47 @@ defmodule SymphonyElixir.Monday.ItemTest do
       assert item.profile == nil
     end
 
+    test "filters Symphony PR Refusal updates out of the synthesized description" do
+      raw = %{
+        "id" => "11923258050",
+        "name" => "PR safety task",
+        "url" => "https://example.org",
+        "created_at" => "2026-05-01T10:00:00Z",
+        "updated_at" => "2026-05-01T10:00:00Z",
+        "column_values" => [
+          %{"id" => "symphony_status_xyz", "text" => "Symphony Ready"}
+        ],
+        "updates" => [
+          %{
+            "id" => "u1",
+            "body" => "Operator note: please implement",
+            "created_at" => "2026-05-01T10:00:00Z"
+          },
+          %{
+            "id" => "u2",
+            "body" =>
+              "## Symphony PR Refusal\n\nReason: branch_convention_violation\n",
+            "created_at" => "2026-05-01T11:00:00Z"
+          }
+        ]
+      }
+
+      config = %{
+        identifier_prefix: "SYM",
+        symphony_status_column_id: "symphony_status_xyz",
+        priority_column_id: nil,
+        description_column_id: nil,
+        branch_column_id: nil,
+        labels_column_id: nil,
+        profile_column_id: nil
+      }
+
+      assert {:ok, item} = Item.from_monday(raw, config)
+      assert item.description == "Operator note: please implement"
+      refute item.description =~ "Symphony PR Refusal"
+      refute item.description =~ "branch_convention_violation"
+    end
+
     test "profile is trimmed and nil when whitespace-only" do
       raw =
         put_in(@raw_item["column_values"], [

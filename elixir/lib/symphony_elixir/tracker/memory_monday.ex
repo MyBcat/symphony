@@ -42,6 +42,12 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
   end
 
   @impl true
+  def post_pr_refusal(item_id, body) do
+    push_event({:pr_refusal_write, item_id, body})
+    :ok
+  end
+
+  @impl true
   def acquire_heartbeat do
     case get_state(:heartbeat, :unlocked) do
       :unlocked -> put_state(:heartbeat, :locked)
