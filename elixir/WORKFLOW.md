@@ -51,8 +51,10 @@ repos:
         cd elixir && mise trust && mise exec -- mix deps.get
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   client-portal:
     clone_url: https://github.com/MyBcat/client-portal.git
@@ -61,8 +63,10 @@ repos:
         npm ci
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   hubspot-funnel-site:
     clone_url: https://github.com/MyBcat/hubspot-funnel-site.git
@@ -71,16 +75,20 @@ repos:
         npm ci
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   carlos_low_vision:
     clone_url: https://github.com/MyBcat/carlos_low_vision.git
     # Pure-Python research/orchestration repo, no package manifest at root.
     # No setup needed beyond the clone.
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
 hooks:
   after_create: |
@@ -120,7 +128,7 @@ profiles:
     gemini:
       command: "gemini --model gemini-2.5-pro --output-format stream-json --sandbox"
 agent:
-  default_profile: claude_opus
+  default_profile: codex_gpt55_xhigh
   sandbox_safety_floor:
     codex:
       thread_sandbox: workspace-write
