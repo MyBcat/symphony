@@ -45,14 +45,37 @@ repos:
   symphony:
     clone_url: https://github.com/MyBcat/symphony.git
     # Symphony performs the clone itself per Spec 3 §2.2. after_create is
-    # post-clone setup only and MUST NOT contain `git clone`.
+    # post-clone setup only and MUST NOT contain `git clone`. Tolerant of
+    # missing gcc / kerl dependencies in container/VPS contexts, while still
+    # surfacing unrelated mix deps.get failures.
     after_create: |
-      if command -v mise >/dev/null 2>&1; then
-        cd elixir && mise trust && mise exec -- mix deps.get
+      if ! command -v mise >/dev/null 2>&1; then
+        echo "after_create(symphony): mise absent; skipping mix deps.get"
+      elif ! command -v gcc >/dev/null 2>&1; then
+        echo "after_create(symphony): gcc absent; skipping mix deps.get"
+      else
+        deps_log="${TMPDIR:-/tmp}/symphony-deps.$$"
+        if (cd elixir && mise trust && mise exec -- mix deps.get) >"$deps_log" 2>&1; then
+          cat "$deps_log"
+          rm -f "$deps_log"
+        else
+          deps_status=$?
+          cat "$deps_log"
+          if grep -Eiq "(gcc|kerl|C compiler|compiler.*not found|build-essential|make: .*not found|cc: .*not found)" "$deps_log"; then
+            echo "after_create(symphony): tolerated gcc/compiler setup failure from mix deps.get"
+            rm -f "$deps_log"
+            true
+          else
+            rm -f "$deps_log"
+            exit "$deps_status"
+          fi
+        fi
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   client-portal:
     clone_url: https://github.com/MyBcat/client-portal.git
@@ -61,8 +84,10 @@ repos:
         npm ci
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   hubspot-funnel-site:
     clone_url: https://github.com/MyBcat/hubspot-funnel-site.git
@@ -71,16 +96,20 @@ repos:
         npm ci
       fi
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
   carlos_low_vision:
     clone_url: https://github.com/MyBcat/carlos_low_vision.git
     # Pure-Python research/orchestration repo, no package manifest at root.
     # No setup needed beyond the clone.
     allowed_profiles:
+      - codex_gpt55_xhigh
       - claude_opus
       - claude_sonnet
+      - gemini_long_context
     default_branch: main
 hooks:
   after_create: |
@@ -120,7 +149,7 @@ profiles:
     gemini:
       command: "gemini --model gemini-2.5-pro --output-format stream-json --sandbox"
 agent:
-  default_profile: claude_opus
+  default_profile: codex_gpt55_xhigh
   sandbox_safety_floor:
     codex:
       thread_sandbox: workspace-write
