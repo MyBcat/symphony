@@ -28,6 +28,8 @@ defmodule SymphonyElixir.Tracker do
   @callback post_failure_update(String.t(), String.t()) :: :ok | {:error, term()}
   @callback post_pr_refusal(String.t(), String.t()) :: :ok | {:error, term()}
   @callback post_phi_refusal(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback post_codex_review(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback post_auto_merge_failure(String.t(), String.t()) :: :ok | {:error, term()}
   @callback acquire_heartbeat() :: :ok | {:error, term()}
   @callback release_heartbeat() :: :ok | {:error, term()}
   @callback validate_no_phi(map()) :: :ok | {:error, term()}
@@ -75,6 +77,12 @@ defmodule SymphonyElixir.Tracker do
 
   @spec post_phi_refusal(String.t(), String.t()) :: :ok | {:error, term()}
   def post_phi_refusal(issue_id, body), do: adapter().post_phi_refusal(issue_id, body)
+
+  @spec post_codex_review(String.t(), String.t()) :: :ok | {:error, term()}
+  def post_codex_review(issue_id, body), do: adapter().post_codex_review(issue_id, body)
+
+  @spec post_auto_merge_failure(String.t(), String.t()) :: :ok | {:error, term()}
+  def post_auto_merge_failure(issue_id, body), do: adapter().post_auto_merge_failure(issue_id, body)
 
   @spec acquire_heartbeat() :: :ok | {:error, term()}
   def acquire_heartbeat, do: adapter().acquire_heartbeat()

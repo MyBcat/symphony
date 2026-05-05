@@ -31,10 +31,63 @@ defmodule SymphonyElixir.AgentRunnerTest do
       do: Process.put({__MODULE__, :head_contains, url, sha}, response)
   end
 
+  defmodule FailingPrUrlTracker do
+    @moduledoc """
+    Stub Tracker for the CodeRabbit-flagged guard test: returns
+    `{:error, :monday_outage}` on `set_pr_url/2` so we can verify that
+    AutoMerge is NOT spawned when the Monday write fails.
+    """
+    @behaviour SymphonyElixir.Tracker
+
+    @impl true
+    def fetch_candidate_issues, do: {:ok, []}
+    @impl true
+    def fetch_candidate_issues_with_phi_findings,
+      do: {:ok, %{items: [], phi_offenders: []}}
+    @impl true
+    def fetch_issues_by_states(_), do: {:ok, []}
+    @impl true
+    def fetch_issue_states_by_ids(_), do: {:ok, []}
+    @impl true
+    def update_issue_state(_, _), do: :ok
+    @impl true
+    def upsert_workpad(_, _), do: :ok
+    @impl true
+    def set_pr_url(_, _), do: {:error, :monday_outage}
+    @impl true
+    def post_failure_update(_, _), do: :ok
+    @impl true
+    def post_pr_refusal(_, _), do: :ok
+    @impl true
+    def post_phi_refusal(_, _), do: :ok
+    @impl true
+    def post_codex_review(_, _), do: :ok
+    @impl true
+    def post_auto_merge_failure(_, _), do: :ok
+    @impl true
+    def acquire_heartbeat, do: :ok
+    @impl true
+    def release_heartbeat, do: :ok
+    @impl true
+    def validate_no_phi(_), do: :ok
+  end
+
   describe "Tracker writes triggered by event stream" do
     setup do
       Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
       Application.put_env(:symphony_elixir, :pr_safety_gh_module, PRSafetyStubGH)
+
+      # Spec 4 §2.8a: prevent the real AutoMerge pipeline from spawning during
+      # existing PR-detection tests. Tests that want to assert AutoMerge was
+      # invoked install their own capture fn via `:auto_merge_runner`.
+      test_pid = self()
+
+      auto_merge_runner = fn ctx ->
+        send(test_pid, {:auto_merge_invoked, ctx})
+        :ok
+      end
+
+      Application.put_env(:symphony_elixir, :auto_merge_runner, auto_merge_runner)
 
       pr_state_path =
         Path.join(
@@ -55,6 +108,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
         Application.delete_env(:symphony_elixir, :tracker_adapter_override)
         Application.delete_env(:symphony_elixir, :pr_safety_gh_module)
         Application.delete_env(:symphony_elixir, :pr_safety_state_path)
+        Application.delete_env(:symphony_elixir, :auto_merge_runner)
         File.rm(pr_state_path)
 
         if pid = Process.whereis(MemoryMonday) do
@@ -183,6 +237,102 @@ defmodule SymphonyElixir.AgentRunnerTest do
                _ -> false
              end),
              "expected status_write Human Review on PR detection; got events=#{inspect(events)}"
+    end
+
+    test "on PR URL with valid branch, AutoMerge.evaluate_human_review is invoked once with the right ctx (Spec 4 §2.8a)",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/142"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      assert_receive {:auto_merge_invoked, ctx}, 500
+      assert ctx.item_id == "11923258050"
+      assert ctx.pr_url == url
+      assert is_map(ctx.session)
+      # Repo column unset for this test issue → repo_key is nil. AutoMerge
+      # gate 1 (repo opt-in) handles a missing repo_key by holding.
+      assert ctx[:repo_key] in [nil, ""]
+
+      # Idempotency: second observation should not re-invoke AutoMerge.
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+      refute_receive {:auto_merge_invoked, _}, 100
+    end
+
+    test "AutoMerge does NOT spawn when Tracker.set_pr_url fails (CodeRabbit guard)",
+         %{issue: issue, writer_pid: writer_pid} do
+      # Override the Tracker adapter to return :error on set_pr_url. The
+      # spawn_auto_merge call would otherwise fire-and-forget — but
+      # auto-merging an item Monday hasn't recorded as Human Review is
+      # exactly the noise the guard prevents.
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, FailingPrUrlTracker)
+
+      try do
+        url = "https://github.com/openai/symphony/pull/999"
+
+        PRSafetyStubGH.stub_basic(url,
+          {:ok,
+           %{
+             base_branch: "main",
+             head_branch: "symphony/SYM-11923258050/attempt-1",
+             url: url,
+             head_sha: "abc1234"
+           }}
+        )
+
+        message = %{
+          event: :notification,
+          raw: "Opened #{url}",
+          timestamp: DateTime.utc_now()
+        }
+
+        :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+        # Tracker write returned an error → AutoMerge MUST NOT have been spawned.
+        refute_receive {:auto_merge_invoked, _}, 100
+      after
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
+      end
+    end
+
+    test "PR refusal path does NOT invoke AutoMerge.evaluate_human_review (Spec 4 §2.8a)",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/156"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "feature/wrong-branch",
+           url: url,
+           head_sha: "deadbeef"
+         }}
+      )
+
+      message = %{
+        event: :notification,
+        raw: "Opened #{url}",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, message)
+
+      refute_receive {:auto_merge_invoked, _}, 100
     end
 
     test "duplicate PR URL in stream does not trigger duplicate writes",

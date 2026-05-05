@@ -70,6 +70,18 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
   end
 
   @impl true
+  def post_codex_review(item_id, body) do
+    push_event({:codex_review_write, item_id, body})
+    :ok
+  end
+
+  @impl true
+  def post_auto_merge_failure(item_id, body) do
+    push_event({:auto_merge_failure_write, item_id, body})
+    :ok
+  end
+
+  @impl true
   def acquire_heartbeat do
     case get_state(:heartbeat, :unlocked) do
       :unlocked -> put_state(:heartbeat, :locked)

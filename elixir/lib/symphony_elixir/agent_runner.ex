@@ -10,6 +10,7 @@ defmodule SymphonyElixir.AgentRunner do
   require Logger
 
   alias SymphonyElixir.{
+    AutoMerge,
     Config,
     CostMeter,
     Monday.PRDetector,
@@ -1085,8 +1086,22 @@ defmodule SymphonyElixir.AgentRunner do
     if claimed? do
       case PRSafety.evaluate_pr(url, issue_id) do
         {:ok, :transition} ->
-          _ = Tracker.set_pr_url(issue_id, url)
-          _ = Tracker.update_issue_state(issue_id, "Human Review")
+          # Spec 4 §2.8a: only spawn the auto-Codex-review pipeline AFTER
+          # the Monday writes succeed. If `set_pr_url/2` or
+          # `update_issue_state/2` fails, the item is still in its prior
+          # state — running Codex review would post Workpad noise for an
+          # item operators see as "still In Progress", and the gate-5
+          # check (still in Human Review) would then incorrectly hold.
+          with :ok <- Tracker.set_pr_url(issue_id, url),
+               :ok <- Tracker.update_issue_state(issue_id, "Human Review") do
+            spawn_auto_merge(writer_pid, issue_id, url)
+          else
+            {:error, reason} ->
+              Logger.warning(
+                "AutoMerge: skipping spawn because Tracker write failed; item still in prior state issue_id=#{issue_id} reason=#{inspect(reason)}"
+              )
+          end
+
           :ok
 
         {:ok, :idempotent_no_force_push} ->
@@ -1101,6 +1116,84 @@ defmodule SymphonyElixir.AgentRunner do
     else
       :ok
     end
+  end
+
+  # Spec 4 §2.8a: spawn the auto-merge pipeline. Lookup happens in this
+  # process (the writer pid) since the Agent state is local; the actual
+  # AutoMerge.evaluate_human_review/1 call runs in a detached Task so it
+  # doesn't block the writer for the duration of the Codex CLI invocation.
+  defp spawn_auto_merge(writer_pid, issue_id, pr_url) do
+    cond do
+      not auto_merge_enabled?() ->
+        :ok
+
+      not is_pid(writer_pid) or not Process.alive?(writer_pid) ->
+        Logger.debug(
+          "AutoMerge: skipping spawn; writer_pid=#{inspect(writer_pid)} is not alive"
+        )
+
+        :ok
+
+      true ->
+        do_spawn_auto_merge(writer_pid, issue_id, pr_url)
+    end
+  end
+
+  defp do_spawn_auto_merge(writer_pid, issue_id, pr_url) do
+    session = Agent.get(writer_pid, fn state -> state.session end)
+    repo_key = Map.get(session, :repo)
+    workspace_path = Map.get(session, :workspace_path)
+
+    ctx = %{
+      item_id: issue_id,
+      pr_url: pr_url,
+      session: session,
+      repo_key: repo_key,
+      workspace_path: workspace_path
+    }
+
+    runner = auto_merge_runner()
+    _ = runner.(ctx)
+    :ok
+  end
+
+  # Tests inject `:auto_merge_runner` via Application env to capture the ctx
+  # without spinning up the real AutoMerge pipeline. Production uses the
+  # default which runs `AutoMerge.evaluate_human_review/1` in a detached
+  # Task under the existing TaskSupervisor.
+  defp auto_merge_runner do
+    case Application.get_env(:symphony_elixir, :auto_merge_runner) do
+      fun when is_function(fun, 1) -> fun
+      _ -> &default_auto_merge_runner/1
+    end
+  end
+
+  defp default_auto_merge_runner(ctx) do
+    Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+      try do
+        AutoMerge.evaluate_human_review(ctx)
+      catch
+        kind, reason ->
+          Logger.warning(
+            "AutoMerge: evaluate_human_review crashed item_id=#{ctx.item_id} kind=#{inspect(kind)} reason=#{inspect(reason)}"
+          )
+      end
+    end)
+    |> case do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "AutoMerge: failed to spawn evaluate_human_review item_id=#{ctx.item_id} reason=#{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp auto_merge_enabled? do
+    Application.get_env(:symphony_elixir, :auto_merge_enabled?, true)
   end
 
   defp emit_pr_refusal(writer_pid, issue_id, refusal) do

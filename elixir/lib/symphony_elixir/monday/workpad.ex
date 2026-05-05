@@ -8,6 +8,9 @@ defmodule SymphonyElixir.Monday.Workpad do
   @marker "## Symphony Workpad"
   @pr_refusal_marker "## Symphony PR Refusal"
   @phi_refusal_marker "## Symphony PHI Refusal"
+  @codex_review_marker "## Symphony Codex Review"
+  @auto_merge_failure_marker "## Symphony Auto-Merge Failed"
+  @codex_review_max_output_bytes 6 * 1024
 
   @type session :: %{
           required(:identifier) => String.t(),
@@ -119,6 +122,152 @@ defmodule SymphonyElixir.Monday.Workpad do
     here. Edit the item to remove the PHI, then re-enroll by setting the
     Symphony Status back to an active state.
     """
+  end
+
+  @doc """
+  Render the body of a `## Symphony Codex Review` Monday Update for an
+  agent PR that just transitioned to Human Review (Spec 4 §2.8a).
+
+  `codex_output` is the full stdout/stderr capture from `codex exec`. It
+  is truncated to `#{@codex_review_max_output_bytes}` bytes so a long
+  Codex response never blows past Monday's update size cap; the
+  `Monday.Adapter.post_codex_review/2` write also re-applies its own
+  global cap.
+
+  Operators read this block to confirm the auto-merge gate decision.
+  """
+  @spec render_codex_review(session(), String.t() | nil) :: String.t()
+  def render_codex_review(session, codex_output) do
+    stamp = stamp_line(session)
+    body = truncate_for_codex_review(to_string(codex_output))
+
+    """
+    #{@codex_review_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Codex Review
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+
+    ```text
+    #{body}
+    ```
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony Codex Review` block for a failure
+  case (e.g. Codex CLI errored, network unavailable). The body explains
+  why the auto-merge gate could not run and instructs the operator to
+  resolve manually.
+  """
+  @spec render_codex_review_failure(session(), String.t()) :: String.t()
+  def render_codex_review_failure(session, reason_label) do
+    stamp = stamp_line(session)
+
+    """
+    #{@codex_review_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Codex Review Unavailable
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+    Reason: `#{reason_label}`
+
+    Symphony was unable to run the Codex auto-review against this PR.
+    No auto-merge attempted; operator review is required.
+    """
+  end
+
+  @doc """
+  Render the body of a `## Symphony Auto-Merge Failed` Monday Update for
+  an item that passed all five gates but where `gh pr merge` itself
+  errored (e.g. branch protection conflict, network issue).
+
+  The item is moved to `Rework` separately by `AutoMerge.do_merge/1`; this
+  block tells the operator what `gh` reported.
+  """
+  @spec render_auto_merge_failure(session(), String.t()) :: String.t()
+  def render_auto_merge_failure(session, gh_output) do
+    stamp = stamp_line(session)
+    body = truncate_for_codex_review(to_string(gh_output))
+
+    """
+    #{@auto_merge_failure_marker}
+
+    ```text
+    #{stamp}
+    ```
+
+    ### Auto-Merge Failed
+
+    Profile: `#{Map.get(session, :profile_name, "unknown")}`
+
+    ```text
+    #{body}
+    ```
+
+    Symphony moved this item to `Rework`. Resolve the merge conflict or
+    branch-protection issue, then move the item back to `Human Review` to
+    re-attempt auto-merge.
+    """
+  end
+
+  defp truncate_for_codex_review(text) when is_binary(text) do
+    text
+    |> truncate_to_codex_review_cap()
+    |> defang_code_fences()
+  end
+
+  defp truncate_for_codex_review(_), do: ""
+
+  defp truncate_to_codex_review_cap(text) when is_binary(text) do
+    if byte_size(text) <= @codex_review_max_output_bytes do
+      String.trim_trailing(text)
+    else
+      head =
+        text
+        |> binary_part(0, @codex_review_max_output_bytes)
+        |> backtrack_to_valid_utf8()
+
+      String.trim_trailing(head) <> "\n\n... (truncated)"
+    end
+  end
+
+  # `binary_part/3` slices at the byte cap and may land mid-codepoint,
+  # producing an invalid UTF-8 binary that breaks Monday rendering and
+  # any downstream String.* operation. Walk back at most 3 bytes (the
+  # max length of a UTF-8 trailing-byte sequence) until we land on a
+  # valid prefix.
+  defp backtrack_to_valid_utf8(prefix) when is_binary(prefix) do
+    Enum.reduce_while(0..3, prefix, fn drop, acc ->
+      candidate =
+        case drop do
+          0 -> acc
+          n -> binary_part(acc, 0, byte_size(acc) - n)
+        end
+
+      if String.valid?(candidate), do: {:halt, candidate}, else: {:cont, acc}
+    end)
+  end
+
+  # Codex output is wrapped in a triple-backtick fenced block so Monday
+  # renders it as preformatted text. If the output itself contains a
+  # ```` ``` ```` sequence (very common — Codex quotes diffs), the fence
+  # closes early and the rest of the body becomes raw Markdown. That's
+  # both a UX bug and a defense-in-depth concern: any token-shaped or
+  # PHI-shaped string in the orphaned tail would render with full
+  # Markdown semantics. Replace `` ``` `` with `` `` `​`` (zero-width
+  # joiner between the second and third backtick) so the visual is
+  # preserved but Monday can't tokenize the sequence as a fence.
+  defp defang_code_fences(text) when is_binary(text) do
+    String.replace(text, "```", "``​`")
   end
 
   @spec render_crash(session(), String.t()) :: String.t()

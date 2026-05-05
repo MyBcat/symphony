@@ -777,6 +777,72 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       assert body =~ "[REDACTED-PHI]"
       assert String.starts_with?(body, "## Symphony PHI Refusal")
     end
+
+    test "post_codex_review posts an update under the Symphony Codex Review marker (Spec 4 §2.8a)" do
+      assert :ok =
+               Adapter.post_codex_review(
+                 "9482736152",
+                 "## Symphony Codex Review\n\nReviewed PR. NO BLOCKING ISSUES\n"
+               )
+
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "NO BLOCKING ISSUES"
+    end
+
+    test "post_codex_review prepends the marker when the body lacks it (Spec 4 §2.8a)" do
+      assert :ok =
+               Adapter.post_codex_review(
+                 "9482736152",
+                 "Reviewed PR. BLOCKING ISSUES FOUND"
+               )
+
+      assert_received {:graphql, _query, %{"body" => body}}
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "BLOCKING ISSUES FOUND"
+    end
+
+    test "post_codex_review scrubs secrets in Codex output (Spec 4 §2.8a)" do
+      raw_body = """
+      ## Symphony Codex Review
+
+      Reviewed PR. NO BLOCKING ISSUES
+      Token leak: GITHUB_TOKEN=ghp_abcdefghij1234567890
+      """
+
+      assert :ok = Adapter.post_codex_review("9482736152", raw_body)
+      assert_received {:graphql, _query, %{"body" => body}}
+
+      refute body =~ "ghp_abcdefghij1234567890"
+      assert body =~ "[REDACTED-SECRET]"
+      assert String.starts_with?(body, "## Symphony Codex Review")
+    end
+
+    test "post_auto_merge_failure posts an update under the Symphony Auto-Merge Failed marker (Spec 4 §2.8a)" do
+      assert :ok =
+               Adapter.post_auto_merge_failure(
+                 "9482736152",
+                 "## Symphony Auto-Merge Failed\n\ngh pr merge exited 1\n"
+               )
+
+      assert_received {:graphql, query, %{"itemId" => 9_482_736_152, "body" => body}}
+      assert query =~ "create_update"
+      assert String.starts_with?(body, "## Symphony Auto-Merge Failed")
+      assert body =~ "gh pr merge exited 1"
+    end
+
+    test "post_auto_merge_failure prepends the marker when the body lacks it (Spec 4 §2.8a)" do
+      assert :ok =
+               Adapter.post_auto_merge_failure(
+                 "9482736152",
+                 "branch protection requires reviews"
+               )
+
+      assert_received {:graphql, _query, %{"body" => body}}
+      assert String.starts_with?(body, "## Symphony Auto-Merge Failed")
+      assert body =~ "branch protection"
+    end
   end
 
   describe "heartbeat" do

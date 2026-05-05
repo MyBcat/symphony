@@ -574,6 +574,76 @@ defmodule SymphonyElixir.ConfigSchemaTest do
       assert is_nil(settings.secrets.secret_exec_path)
     end
 
+    test "schema parses repos.<key>.auto_merge_* fields with safe defaults (Spec 4 §2.8a)" do
+      defaulted_attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "https://github.com/MyBcat/symphony.git"
+            }
+          }
+        })
+
+      assert {:ok, defaulted_settings} =
+               SymphonyElixir.Config.Schema.parse(defaulted_attrs)
+
+      entry = defaulted_settings.repos["symphony"]
+      assert entry.auto_merge_on_codex_pass == false
+      assert entry.auto_merge_max_lines == 500
+      assert entry.auto_merge_pass_pattern == "NO BLOCKING ISSUES"
+    end
+
+    test "schema honors explicit repos.<key>.auto_merge_* opt-in (Spec 4 §2.8a)" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "https://github.com/MyBcat/symphony.git",
+              "auto_merge_on_codex_pass" => true,
+              "auto_merge_max_lines" => 250,
+              "auto_merge_pass_pattern" => "(?i)LGTM"
+            }
+          }
+        })
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+
+      entry = settings.repos["symphony"]
+      assert entry.auto_merge_on_codex_pass == true
+      assert entry.auto_merge_max_lines == 250
+      assert entry.auto_merge_pass_pattern == "(?i)LGTM"
+    end
+
+    test "schema rejects non-boolean auto_merge_on_codex_pass by treating it as false (Spec 4 §2.8a)" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "https://github.com/MyBcat/symphony.git",
+              "auto_merge_on_codex_pass" => "yes please"
+            }
+          }
+        })
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.repos["symphony"].auto_merge_on_codex_pass == false
+    end
+
+    test "schema rejects non-positive auto_merge_max_lines by reverting to default (Spec 4 §2.8a)" do
+      attrs =
+        base_repo_attrs(%{
+          "repos" => %{
+            "symphony" => %{
+              "clone_url" => "https://github.com/MyBcat/symphony.git",
+              "auto_merge_max_lines" => -50
+            }
+          }
+        })
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.repos["symphony"].auto_merge_max_lines == 500
+    end
+
     test "schema parses integer cost rates as floats" do
       attrs = %{
         "tracker" => %{

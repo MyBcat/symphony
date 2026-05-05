@@ -136,6 +136,154 @@ defmodule SymphonyElixir.Monday.WorkpadTest do
     end
   end
 
+  describe "render_codex_review/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Codex Review marker with full output" do
+      session = %{
+        identifier: "SYM-11923096520",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_gpt55_xhigh"
+      }
+
+      body =
+        Workpad.render_codex_review(session, """
+        Reviewed PR 42. Notes:
+        1. Tests look good.
+        2. No regressions detected.
+
+        NO BLOCKING ISSUES
+        """)
+
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "Codex Review"
+      assert body =~ "codex_gpt55_xhigh"
+      assert body =~ "NO BLOCKING ISSUES"
+      assert body =~ "Reviewed PR 42."
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "truncates long Codex output with sentinel" do
+      session = %{identifier: "SYM-1", profile_name: "codex_gpt55_xhigh"}
+      long_output = String.duplicate("a", 8 * 1024)
+
+      body = Workpad.render_codex_review(session, long_output)
+
+      assert body =~ "## Symphony Codex Review"
+      assert body =~ "... (truncated)"
+    end
+
+    test "truncates safely on a multi-byte UTF-8 boundary (CodeRabbit nitpick)" do
+      # Construct an input where the 6 KiB byte cap lands mid-codepoint.
+      # The cap is 6144 bytes; 4-byte emojis aligned at 6144 bytes would
+      # not exercise the backtrack path. Prepend an odd-byte ASCII run so
+      # the cap falls inside the second-to-last emoji's encoding.
+      long_output = "abc" <> String.duplicate("🙂", 2_000)
+
+      body =
+        Workpad.render_codex_review(%{profile_name: "x"}, long_output)
+
+      assert String.valid?(body), "rendered body must be valid UTF-8"
+      assert body =~ "... (truncated)"
+    end
+
+    test "handles nil output gracefully" do
+      body = Workpad.render_codex_review(%{identifier: "SYM-1", profile_name: "x"}, nil)
+
+      assert body =~ "## Symphony Codex Review"
+      # No crash; output rendered as empty string.
+    end
+
+    test "defangs Codex output that contains triple-backtick fence sequences (Spec 4 §2.8a B-1)" do
+      session = %{
+        identifier: "SYM-1",
+        profile_name: "x",
+        host: "h",
+        workspace_path: "/w",
+        short_sha: "s"
+      }
+
+      malicious_output = """
+      Reviewed PR. Quoted snippet:
+      ```elixir
+      defmodule Sneaky do end
+      ```
+
+      Now I'll bypass the fence and embed a token-shaped string:
+      GITHUB_TOKEN=ghp_realtoken1234567890abcdef
+      NO BLOCKING ISSUES
+      """
+
+      body = Workpad.render_codex_review(session, malicious_output)
+
+      # The render template wraps both the stamp and the Codex output in
+      # `\`\`\`text` fenced blocks. Two outer wrappers × (open + close) =
+      # 4 raw triple-backtick occurrences. The malicious Codex output's
+      # ``\`\`\`elixir`` and trailing ``\`\`\`` MUST have been defanged
+      # (replaced with zero-width-joiner so they no longer parse as
+      # fences) — otherwise the count would be > 4.
+      occurrences =
+        body
+        |> String.split("```")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences == 4,
+             "expected exactly 4 raw backtick fence occurrences (2 outer wrappers); got #{occurrences} in body=#{body}"
+
+      # The Codex output's prose content is still preserved (textually)
+      # so operators can still read what Codex said.
+      assert body =~ "Reviewed PR. Quoted snippet:"
+      assert body =~ "NO BLOCKING ISSUES"
+      assert body =~ "defmodule Sneaky"
+    end
+  end
+
+  describe "render_codex_review_failure/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Codex Review marker with failure reason" do
+      session = %{identifier: "SYM-1", profile_name: "codex_gpt55_xhigh"}
+      body = Workpad.render_codex_review_failure(session, "codex_not_found")
+
+      assert String.starts_with?(body, "## Symphony Codex Review")
+      assert body =~ "Codex Review Unavailable"
+      assert body =~ "codex_not_found"
+      assert body =~ "operator review is required"
+    end
+  end
+
+  describe "render_auto_merge_failure/2 (Spec 4 §2.8a)" do
+    test "renders Symphony Auto-Merge Failed marker with gh stderr" do
+      session = %{
+        identifier: "SYM-11923096520",
+        host: "devbox-01",
+        workspace_path: "/tmp/work",
+        short_sha: "abc1234",
+        profile_name: "codex_gpt55_xhigh"
+      }
+
+      body =
+        Workpad.render_auto_merge_failure(
+          session,
+          "gh pr merge exited 1\n\nbranch protection requires reviews"
+        )
+
+      assert String.starts_with?(body, "## Symphony Auto-Merge Failed")
+      assert body =~ "Auto-Merge Failed"
+      assert body =~ "gh pr merge exited 1"
+      assert body =~ "branch protection requires reviews"
+      assert body =~ "Rework"
+      assert body =~ "devbox-01:/tmp/work@abc1234"
+    end
+
+    test "truncates long stderr with sentinel" do
+      long_output = String.duplicate("err\n", 4_000)
+      body = Workpad.render_auto_merge_failure(%{profile_name: "x"}, long_output)
+
+      assert body =~ "## Symphony Auto-Merge Failed"
+      assert body =~ "... (truncated)"
+    end
+  end
+
   describe "render_pr_refusal/2" do
     test "renders the Symphony PR Refusal marker as the body header" do
       session = %{
