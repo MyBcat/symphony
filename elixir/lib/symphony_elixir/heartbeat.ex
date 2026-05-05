@@ -69,6 +69,13 @@ defmodule SymphonyElixir.Heartbeat do
     end
   end
 
+  # GenServer.call timeout used by the read-only accessors. Kept short so
+  # the orchestrator's poll loop never stalls behind an in-flight refresh
+  # tick (Tracker.acquire_heartbeat could take several seconds against a
+  # slow Monday API). On timeout, `degraded?/1` returns `false` — see the
+  # caller-side try/catch in Orchestrator.heartbeat_degraded?/1.
+  @accessor_timeout_ms 1_000
+
   @doc """
   Returns `true` when the local heartbeat loop has failed to renew for longer
   than the configured TTL. Returns `false` when no Heartbeat process is
@@ -80,7 +87,7 @@ defmodule SymphonyElixir.Heartbeat do
   def degraded?(server \\ __MODULE__) do
     case resolve_server(server) do
       nil -> false
-      pid -> GenServer.call(pid, :degraded?)
+      pid -> GenServer.call(pid, :degraded?, @accessor_timeout_ms)
     end
   end
 
@@ -98,7 +105,7 @@ defmodule SymphonyElixir.Heartbeat do
   def snapshot(server \\ __MODULE__) do
     case resolve_server(server) do
       nil -> nil
-      pid -> GenServer.call(pid, :snapshot)
+      pid -> GenServer.call(pid, :snapshot, @accessor_timeout_ms)
     end
   end
 
