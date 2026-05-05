@@ -100,6 +100,18 @@ Out of scope: cloud deployment, multi-board support (Spec 5), terminal/web UI fo
 - **The system** enforces a branch naming convention via the prompt template: `symphony/SYM-<id>/<profile>/attempt-<n>`. Symphony validates the branch name on the PR URL it detects; rejects with `{:error, {:bad_pr_branch, expected_pattern}}` if the agent opened a PR from a different branch.
 - **The system** never force-pushes. The orchestrator does not run `git push`; the agent does. If the agent pushes, the agent is responsible for non-force operation. Symphony validates after-the-fact via `gh api` and posts a Monday alert if a force-push was detected.
 - **When** a retry attempt finds an open PR for the same `SYM-<id>` (same item, prior attempt left a PR hanging), **the system** does NOT open a duplicate. Behavior: post a Monday Workpad warning and move the item to `Human Review` (operator merges or closes the prior PR before Symphony retries).
+- **When** the agent opens a PR successfully, **the system** auto-transitions the item from `In Progress` to `Human Review` (no operator action required; closes today's retry-loop bug).
+
+### 2.8a Auto-Codex-review with conditional auto-merge
+- **When** an item transitions to `Human Review` because of a PR detection, **the system** invokes a Codex review pass on that PR via the `codex review` CLI (per the merge gate's existing pattern). Codex's findings are posted to the Monday Workpad as `## Symphony Codex Review`.
+- **When** Codex's review concludes "no blocking issues found" AND the resolved repo entry has `auto_merge_on_codex_pass: true` AND the operator has not flipped the status away from `Human Review`, **the system** transitions the status to `Merging` and runs `gh pr merge --merge --auto` against the PR. The merge is recorded to disk_log + Monday Workpad.
+- **When** Codex's review flags blocking issues OR the repo's `auto_merge_on_codex_pass` is unset/false (the default), **the system** leaves the item in `Human Review` for operator review. No auto-merge.
+- **The system** does NOT bypass the merge gate on the Codex review failure path: if Codex's review fails to run (network error, CLI auth error), Symphony posts a Workpad alert and stays in `Human Review`. Auto-merge requires a successful Codex pass, not just the absence of explicit blockers.
+- **The system** treats `auto_merge_on_codex_pass` as opt-in per repo. Default is OFF for ALL repos including new ones. HIPAA-touching repos MUST NOT set this to true unless the operator has independently verified the PR contents are PHI-safe.
+- **The system** never auto-merges PRs that affect more than `repos.<key>.auto_merge_max_lines: <int>` lines (default: unset = no cap, but operator-recommended 500). Larger PRs require human review regardless of Codex pass.
+- **The system** never auto-merges to a branch other than `main` / `master`. PRs targeting release branches, hotfix branches, etc. always require human review.
+
+### 2.9 Live e2e test harness
 
 ### 2.9 Live e2e test harness
 - **The system** ships a `mix symphony.e2e_smoke` task that:
@@ -119,7 +131,7 @@ Out of scope: cloud deployment, multi-board support (Spec 5), terminal/web UI fo
 - The system MUST NOT cross-normalize tokens between runtimes (preserves Spec 2 DL-007).
 - The system MUST NOT emit external telemetry (no Prometheus/CloudWatch/Slack-status) in v1 — all observability is local.
 - The system MUST NOT auto-rotate secrets from AWS Secrets Manager — operator handles rotation manually.
-- The system MUST NOT auto-merge PRs that agents open. Human review remains the gate.
+- The system MUST NOT auto-merge PRs that agents open by default. Auto-merge is opt-in per repo via `repos.<key>.auto_merge_on_codex_pass: true` AND requires a clean Codex review pass (§2.8a). HIPAA-touching repos MUST NOT enable this flag.
 - The system MUST NOT track per-item cost in the WORKFLOW.md schema — caps are profile-level + global. Per-item caps are extension territory.
 - The system MUST NOT rely on external consensus (etcd, DynamoDB locks). Heartbeat-on-Monday is the leader-election mechanism.
 - The system MUST NOT bind the dashboard to 0.0.0.0. Local-only is non-negotiable for HIPAA.
@@ -367,7 +379,8 @@ Operator-side: none. All Spec 4 features are configured via WORKFLOW.md edits + 
 | 5 | PHI gate hardening (refuse-default + override flag) | `feat(elixir): Spec 4 step 5 — PHI gate hardening` | 0.5 |
 | 6 | Phoenix LiveView dashboard | `feat(elixir): Spec 4 step 6 — LiveView dashboard` | 1.5 |
 | 7 | Heartbeat resilience (Leadership module + standby loop) | `feat(elixir): Spec 4 step 7 — heartbeat resilience` | 1 |
-| 8 | PR safety (BranchPolicy + RetryGate) | `feat(elixir): Spec 4 step 8 — PR safety` | 1 |
+| 8 | PR safety (BranchPolicy + RetryGate + auto-transition Symphony Ready→Human Review on PR open) | `feat(elixir): Spec 4 step 8 — PR safety` | 1 |
+| 8a | Auto-Codex-review on agent PR + conditional auto-merge (opt-in per repo) | `feat(elixir): Spec 4 step 8a — auto-codex-review + conditional auto-merge` | 1 |
 | 9 | Live e2e smoke harness | `feat(elixir): Spec 4 step 9 — e2e smoke harness` | 0.5 |
 
 Total: ~8 sessions of focused work, sequenced per the dependency graph (cost + observability before secrets; secrets before dashboard reveals env-resolution status; dashboard depends on Cost.snapshot).
