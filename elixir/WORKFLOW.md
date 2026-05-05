@@ -44,8 +44,9 @@ workspace:
 repos:
   symphony:
     clone_url: https://github.com/MyBcat/symphony.git
+    # Symphony performs the clone itself per Spec 3 §2.2. after_create is
+    # post-clone setup only and MUST NOT contain `git clone`.
     after_create: |
-      git clone --depth 1 https://github.com/MyBcat/symphony .
       if command -v mise >/dev/null 2>&1; then
         cd elixir && mise trust && mise exec -- mix deps.get
       fi
@@ -56,7 +57,6 @@ repos:
   client-portal:
     clone_url: https://github.com/MyBcat/client-portal.git
     after_create: |
-      git clone --depth 1 https://github.com/MyBcat/client-portal.git .
       if [ -f package.json ]; then
         npm ci
       fi
@@ -67,7 +67,6 @@ repos:
   hubspot-funnel-site:
     clone_url: https://github.com/MyBcat/hubspot-funnel-site.git
     after_create: |
-      git clone --depth 1 https://github.com/MyBcat/hubspot-funnel-site.git .
       if [ -f package.json ]; then
         npm ci
       fi
