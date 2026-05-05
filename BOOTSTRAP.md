@@ -153,8 +153,8 @@ Two paths are supported. Pick one.
 
 **Path A — runtime wrapping with `secret_exec.py` (recommended for MyBCAT
 machines, HIPAA-aware).** Secrets are pulled from AWS Secrets Manager and
-injected as env vars for the lifetime of the child process. Nothing is
-written to disk.
+injected as env vars for the lifetime of the launcher child process. The
+launcher wrapper does not write them to disk.
 
 ```bash
 /mnt/d_drive/repos/finances/scripts/secret_exec.py --secret-env MONDAY_API_TOKEN=mybcat/integrations/api-keys/monday:api_token -- ./elixir/bin/symphony ./elixir/WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
@@ -163,6 +163,21 @@ written to disk.
 `--secret-env ENV=SECRET_ID[:FIELD]` maps an env var to a secret in AWS
 Secrets Manager, optionally selecting a JSON field. Repeat the flag for each
 additional secret. See `secret_exec.py --help` for full usage.
+
+For per-repo agent credentials, declare `repos.<key>.secrets` in
+`elixir/WORKFLOW.md` using the same `SECRET_ID:ENV_VAR[:FIELD]` shape:
+
+```yaml
+repos:
+  hubspot-funnel-site:
+    secrets:
+      - "mybcat/integrations/api-keys/hubspot:HUBSPOT_TOKEN"
+```
+
+At startup, Symphony refuses to boot if any declared secret path is
+unresolvable. For each local workspace, Symphony resolves the repo's secrets
+through `secret_exec.py`, writes `workspace/.env.symphony` with mode `0600`,
+and sources that file for both `after_create` and the coding-agent CLI process.
 
 For Docker:
 

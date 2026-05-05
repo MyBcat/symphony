@@ -28,6 +28,10 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn ->
         send(parent, :started)
         {:ok, [:symphony_elixir]}
+      end,
+      secrets_boot_check: fn ->
+        send(parent, :secrets_checked)
+        :ok
       end
     }
 
@@ -41,6 +45,45 @@ defmodule SymphonyElixir.CLITest do
     refute_received :logs_root_set
     refute_received :port_set
     refute_received :started
+    refute_received :secrets_checked
+  end
+
+  test "returns secret resolution failure message when boot check fails" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn ->
+        {:error, [{"hubspot-funnel", "mybcat/missing:HUBSPOT_TOKEN", :not_found}]}
+      end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    assert message =~ "Refusing to start Symphony"
+    assert message =~ "hubspot-funnel"
+    assert message =~ "mybcat/missing:HUBSPOT_TOKEN"
+    refute message =~ "secret-value"
+  end
+
+  test "skips ensure_all_started when secrets boot check refuses" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn ->
+        send(parent, :started_should_not_run)
+        {:ok, [:symphony_elixir]}
+      end,
+      secrets_boot_check: fn -> {:error, [{"r", "a:B", :nope}]} end
+    }
+
+    assert {:error, _message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    refute_received :started_should_not_run
   end
 
   test "defaults to WORKFLOW.md when workflow path is missing" do
@@ -49,7 +92,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag], deps)
@@ -71,7 +115,8 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
@@ -90,7 +135,8 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
@@ -104,7 +150,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -117,7 +164,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:error, :boom} end
+      ensure_all_started: fn -> {:error, :boom} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -131,7 +179,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      secrets_boot_check: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)

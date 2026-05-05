@@ -502,6 +502,8 @@ defmodule SymphonyElixir.Codex.Adapter do
     if is_nil(executable) do
       {:error, :bash_not_found}
     else
+      wrapped_command = SymphonyElixir.Secrets.Resolver.wrap_command(command)
+
       port =
         Port.open(
           {:spawn_executable, String.to_charlist(executable)},
@@ -509,7 +511,7 @@ defmodule SymphonyElixir.Codex.Adapter do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(command)],
+            args: [~c"-lc", String.to_charlist(wrapped_command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -520,6 +522,8 @@ defmodule SymphonyElixir.Codex.Adapter do
   end
 
   defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
+    # Remote workers don't currently receive .env.symphony — secrets resolved
+    # locally are not transported via SSH (per SYM-11923119480 §Out of scope).
     remote_command = remote_launch_command(workspace, command)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
@@ -1324,6 +1328,7 @@ defmodule SymphonyElixir.Codex.Adapter do
       |> to_string()
       |> String.trim()
       |> String.slice(0, @max_stream_log_bytes)
+      |> SymphonyElixir.Secrets.Scrubber.scrub()
 
     if text != "" do
       cond do

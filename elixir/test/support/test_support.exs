@@ -166,6 +166,7 @@ defmodule SymphonyElixir.TestSupport do
           server_port: nil,
           server_host: nil,
           cost_cap_daily_usd: nil,
+          secrets_secret_exec_path: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -218,6 +219,7 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     cost_cap_daily_usd = Keyword.get(config, :cost_cap_daily_usd)
+    secrets_secret_exec_path = Keyword.get(config, :secrets_secret_exec_path)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -274,6 +276,7 @@ defmodule SymphonyElixir.TestSupport do
         ),
         server_yaml(server_port, server_host),
         cost_cap_yaml(cost_cap_daily_usd),
+        secrets_yaml(secrets_secret_exec_path),
         "---",
         prompt
       ]
@@ -368,6 +371,12 @@ defmodule SymphonyElixir.TestSupport do
 
   defp cost_cap_yaml(daily_usd) do
     "cost_cap:\n  daily_usd: #{yaml_value(daily_usd)}"
+  end
+
+  defp secrets_yaml(nil), do: nil
+
+  defp secrets_yaml(secret_exec_path) do
+    "secrets:\n  secret_exec_path: #{yaml_value(secret_exec_path)}"
   end
 
   defp hook_entry(_name, nil), do: nil
@@ -490,7 +499,8 @@ defmodule SymphonyElixir.TestSupport do
         repo_yaml_field(
           "default_branch",
           Map.get(repo_map, :default_branch) || Map.get(repo_map, "default_branch")
-        )
+        ),
+        repo_yaml_field("secrets", Map.get(repo_map, :secrets) || Map.get(repo_map, "secrets"))
       ]
       |> Enum.reject(&is_nil/1)
 

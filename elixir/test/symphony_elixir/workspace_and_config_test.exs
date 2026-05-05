@@ -210,6 +210,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace scrubs secret-shaped strings out of hook failure logs" do
+    # Defense-in-depth (SYM-11923119480 AC #5): a user-authored after_create
+    # that runs `set -x` or `echo $TOKEN` would otherwise leak the value
+    # through `Workspace hook failed ... output=` warnings. Scrubber must
+    # catch the AWS / GitHub / Stripe / Bearer / Anthropic shapes before
+    # the warning lands on disk.
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-scrub-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      fake_aws_key = "AKIA" <> String.duplicate("Z", 16)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo using #{fake_aws_key} && exit 19"
+      )
+
+      log =
+        capture_log([level: :warning], fn ->
+          assert {:error, {:workspace_hook_failed, "after_create", 19, output}} =
+                   Workspace.create_for_issue("MT-SCRUB")
+
+          assert output =~ "[REDACTED]"
+          refute output =~ fake_aws_key
+        end)
+
+      assert log =~ "Workspace hook failed"
+      assert log =~ "[REDACTED]"
+      refute log =~ fake_aws_key
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace surfaces after_create hook timeouts" do
     workspace_root =
       Path.join(
