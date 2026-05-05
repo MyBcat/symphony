@@ -25,9 +25,18 @@ defmodule SymphonyElixir.HttpServer do
 
         # Localhost binding is hard-coded per HIPAA constraint — agent stderr must
         # never be exposed externally via the dashboard.
-        if Keyword.get(opts, :host) in ["0.0.0.0", "[::]", "::"] do
+        config_host =
+          try do
+            Config.settings!().server.host
+          rescue
+            _ -> nil
+          end
+
+        effective_host = Keyword.get(opts, :host) || config_host
+
+        if effective_host in ["0.0.0.0", "[::]", "::"] do
           raise RuntimeError,
-                "Symphony dashboard MUST NOT bind to 0.0.0.0 (HIPAA — agent stderr can leak via dashboard if exposed). " <>
+                "Symphony dashboard MUST NOT bind to #{effective_host} (HIPAA — agent stderr can leak via dashboard if exposed). " <>
                   "Localhost binding is non-negotiable."
         end
 
@@ -66,28 +75,6 @@ defmodule SymphonyElixir.HttpServer do
   catch
     :exit, _reason -> nil
   end
-
-  defp parse_host({_, _, _, _} = ip), do: {:ok, ip}
-  defp parse_host({_, _, _, _, _, _, _, _} = ip), do: {:ok, ip}
-
-  defp parse_host(host) when is_binary(host) do
-    charhost = String.to_charlist(host)
-
-    case :inet.parse_address(charhost) do
-      {:ok, ip} ->
-        {:ok, ip}
-
-      {:error, _reason} ->
-        case :inet.getaddr(charhost, :inet) do
-          {:ok, ip} -> {:ok, ip}
-          {:error, _reason} -> :inet.getaddr(charhost, :inet6)
-        end
-    end
-  end
-
-  defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"
-  defp normalize_host(host) when is_binary(host), do: host
-  defp normalize_host(host), do: to_string(host)
 
   defp secret_key_base do
     Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)
