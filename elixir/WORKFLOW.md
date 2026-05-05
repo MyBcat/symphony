@@ -214,6 +214,16 @@ agent:
       forbid_yolo: true
   max_concurrent_agents: 10
   max_turns: 20
+# E2E nightly harness (Spec M-9 / SYM-11923096576). All keys are optional;
+# env vars SYMPHONY_E2E_BOARD_ID and SYMPHONY_E2E_MONDAY_TOKEN take precedence
+# at runtime and must be set as GitHub Actions secrets before the nightly-e2e
+# workflow will run. Uncomment and populate once the sandbox board is created.
+#
+#   e2e:
+#     test_board_id: <sandbox-board-id>  # MUST NOT equal 8173460438
+#     timeout_s: 600                     # max seconds Symphony runs per smoke (default 600)
+#     max_nonsynth_items: 5              # refuse if > N non-[E2E] items exist on sandbox board
+#     alert_webhook: ""                  # optional Slack/webhook URL posted on nightly failure
 codex:
   # Codex CLI (app-server mode) gates its JSON-RPC `remoteControl` interface
   # behind project trust. Workspaces under `workspace.root` whose `.codex/`
