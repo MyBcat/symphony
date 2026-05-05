@@ -100,6 +100,25 @@ defmodule SymphonyElixir.PRSafety.PRStateTest do
       assert {:ok, %{sha: "bbb"}} = PRState.lookup("11923258060")
     end
 
+    test "serializes concurrent writes so records are not lost" do
+      tasks =
+        for item_id <- ["11923258050", "11923258051", "11923258052", "11923258053"] do
+          Task.async(fn ->
+            PRState.record(item_id, %{
+              url: "https://github.com/MyBcat/symphony/pull/#{item_id}",
+              sha: "sha-#{item_id}"
+            })
+          end)
+        end
+
+      assert Enum.all?(Task.await_many(tasks, 10_000), &(&1 == :ok))
+
+      assert {:ok, %{sha: "sha-11923258050"}} = PRState.lookup("11923258050")
+      assert {:ok, %{sha: "sha-11923258051"}} = PRState.lookup("11923258051")
+      assert {:ok, %{sha: "sha-11923258052"}} = PRState.lookup("11923258052")
+      assert {:ok, %{sha: "sha-11923258053"}} = PRState.lookup("11923258053")
+    end
+
     test "rejects invalid records" do
       assert {:error, :invalid_record} = PRState.record("11923258050", %{url: nil, sha: "x"})
       assert {:error, :invalid_record} = PRState.record("", %{url: "u", sha: "x"})
@@ -115,6 +134,11 @@ defmodule SymphonyElixir.PRSafety.PRStateTest do
     test "returns :error when the JSON top-level is not a map", %{state_path: state_path} do
       File.write!(state_path, "[\"not\", \"a\", \"map\"]")
       assert {:error, :invalid_state_file} = PRState.lookup("11923258050")
+    end
+
+    test "normalizes malformed per-item records instead of crashing", %{state_path: state_path} do
+      File.write!(state_path, ~s({"11923258050":"not a record"}))
+      assert {:ok, %{url: "", sha: ""}} = PRState.lookup("11923258050")
     end
   end
 

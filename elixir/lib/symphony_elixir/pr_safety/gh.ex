@@ -22,15 +22,8 @@ defmodule SymphonyElixir.PRSafety.GH do
           head_sha: String.t()
         }
 
-  @typedoc """
-  Result of a `gh pr view --json commits` call. Each commit includes its
-  full SHA under `:sha`. The default impl maps the gh JSON `oid` field to
-  `:sha` so callers don't have to know about gh's naming conventions.
-  """
-  @type pr_commits :: [%{sha: String.t()}]
-
   @callback pr_view_basic(String.t()) :: {:ok, pr_basic()} | {:error, term()}
-  @callback pr_view_commits(String.t()) :: {:ok, pr_commits()} | {:error, term()}
+  @callback pr_head_contains_sha(String.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
 
   @doc """
   Resolve the configured GH module — either the default `System.cmd/3` impl
@@ -44,6 +37,6 @@ defmodule SymphonyElixir.PRSafety.GH do
   @spec pr_view_basic(String.t()) :: {:ok, pr_basic()} | {:error, term()}
   def pr_view_basic(url), do: module().pr_view_basic(url)
 
-  @spec pr_view_commits(String.t()) :: {:ok, pr_commits()} | {:error, term()}
-  def pr_view_commits(url), do: module().pr_view_commits(url)
+  @spec pr_head_contains_sha(String.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
+  def pr_head_contains_sha(url, sha), do: module().pr_head_contains_sha(url, sha)
 end

@@ -13,9 +13,9 @@ defmodule SymphonyElixir.PRSafety do
       `{:ok, :transition}` so the caller sets PR URL + transitions to
       `Human Review`. On invalid: return `{:error, {:branch_convention_violation, head, expected}}`.
     * If a record exists for the item AND the URL matches, run the
-      force-push check via `gh pr view --json commits`: refuse with
+      force-push check via a GitHub compare ancestry query: refuse with
       `{:error, :force_push_detected}` when the recorded SHA is no longer
-      among the PR's commits (history rewritten). Otherwise return
+      in the current head's history (history rewritten). Otherwise return
       `{:ok, :idempotent_no_force_push}` so the caller treats it as a
       no-op (no second write).
     * If a record exists with a different URL, treat as a fresh first
@@ -121,25 +121,12 @@ defmodule SymphonyElixir.PRSafety do
   end
 
   defp check_force_push(url, prior_sha) do
-    case GH.pr_view_commits(url) do
-      {:ok, commits} ->
-        if descendant?(commits, prior_sha) do
-          {:ok, :idempotent_no_force_push}
-        else
-          {:error, :force_push_detected}
-        end
+    case GH.pr_head_contains_sha(url, prior_sha) do
+      {:ok, true} -> {:ok, :idempotent_no_force_push}
+      {:ok, false} -> {:error, :force_push_detected}
 
       {:error, reason} ->
         {:error, {:gh_unavailable, reason}}
     end
   end
-
-  defp descendant?(commits, prior_sha) when is_list(commits) and is_binary(prior_sha) do
-    Enum.any?(commits, fn
-      %{sha: sha} when is_binary(sha) -> sha == prior_sha
-      _ -> false
-    end)
-  end
-
-  defp descendant?(_commits, _prior_sha), do: false
 end

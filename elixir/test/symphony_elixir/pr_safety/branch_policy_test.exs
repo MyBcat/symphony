@@ -28,6 +28,13 @@ defmodule SymphonyElixir.PRSafety.BranchPolicyTest do
                BranchPolicy.validate("symphony/SYM-11923258050/attempt-42", "11923258050")
     end
 
+    test "rejects non-numeric item ids even when the branch text matches them" do
+      assert {:error, {:branch_convention_violation, "symphony/SYM-foo/attempt-1", expected}} =
+               BranchPolicy.validate("symphony/SYM-foo/attempt-1", "foo")
+
+      assert expected == "symphony/SYM-foo/attempt-N"
+    end
+
     test "rejects branches that target a different SYM id" do
       assert {:error, {:branch_convention_violation, "symphony/SYM-9999/attempt-1", expected}} =
                BranchPolicy.validate("symphony/SYM-9999/attempt-1", "11923258050")
@@ -46,6 +53,22 @@ defmodule SymphonyElixir.PRSafety.BranchPolicyTest do
     test "rejects branches with non-numeric attempt suffix" do
       assert {:error, {:branch_convention_violation, _, _}} =
                BranchPolicy.validate("symphony/SYM-11923258050/attempt-x", "11923258050")
+    end
+
+    test "rejects attempt zero and leading-zero attempt suffixes" do
+      assert {:error, {:branch_convention_violation, _, _}} =
+               BranchPolicy.validate("symphony/SYM-11923258050/attempt-0", "11923258050")
+
+      assert {:error, {:branch_convention_violation, _, _}} =
+               BranchPolicy.validate("symphony/SYM-11923258050/attempt-01", "11923258050")
+    end
+
+    test "rejects trailing branch suffixes after the attempt number" do
+      assert {:error, {:branch_convention_violation, _, _}} =
+               BranchPolicy.validate(
+                 "symphony/SYM-11923258050/attempt-99/extra-suffix",
+                 "11923258050"
+               )
     end
 
     test "rejects branches outside the symphony/ prefix" do

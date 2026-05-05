@@ -14,6 +14,7 @@ defmodule SymphonyElixir.PRSafety.BranchPolicy do
   """
 
   @attempt_suffix_pattern "attempt-N"
+  @numeric_id ~r/^\d+$/
 
   @doc """
   Render the human-readable expected pattern for a given item id. Used in
@@ -39,10 +40,15 @@ defmodule SymphonyElixir.PRSafety.BranchPolicy do
   def validate(head, item_id)
       when is_binary(head) and is_binary(item_id) and item_id != "" do
     expected = expected_pattern(item_id)
-    regex = compile_pattern(item_id)
 
-    if Regex.match?(regex, head) do
-      :ok
+    if Regex.match?(@numeric_id, item_id) do
+      regex = compile_pattern(item_id)
+
+      if Regex.match?(regex, head) do
+        :ok
+      else
+        {:error, {:branch_convention_violation, head, expected}}
+      end
     else
       {:error, {:branch_convention_violation, head, expected}}
     end
@@ -56,7 +62,7 @@ defmodule SymphonyElixir.PRSafety.BranchPolicy do
 
   defp compile_pattern(item_id) do
     escaped_id = Regex.escape(item_id)
-    {:ok, regex} = Regex.compile("^symphony/SYM-#{escaped_id}/attempt-\\d+$")
+    {:ok, regex} = Regex.compile("^symphony/SYM-#{escaped_id}/attempt-[1-9]\\d*$")
     regex
   end
 end

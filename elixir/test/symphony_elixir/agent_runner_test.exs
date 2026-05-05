@@ -18,15 +18,17 @@ defmodule SymphonyElixir.AgentRunnerTest do
     end
 
     @impl true
-    def pr_view_commits(url) do
-      case Process.get({__MODULE__, :commits, url}) do
+    def pr_head_contains_sha(url, sha) do
+      case Process.get({__MODULE__, :head_contains, url, sha}) do
         nil -> {:error, :stub_not_configured}
         response -> response
       end
     end
 
     def stub_basic(url, response), do: Process.put({__MODULE__, :basic, url}, response)
-    def stub_commits(url, response), do: Process.put({__MODULE__, :commits, url}, response)
+
+    def stub_head_contains(url, sha, response),
+      do: Process.put({__MODULE__, :head_contains, url, sha}, response)
   end
 
   describe "Tracker writes triggered by event stream" do
@@ -61,7 +63,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       end)
 
       issue = %Issue{
-        id: "issue-runner-1",
+        id: "11923258050",
         identifier: "SYM-1",
         title: "Tracker write trigger test",
         description: "no PHI",
@@ -106,13 +108,13 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "In Progress"} -> true
+               {:status_write, "11923258050", "In Progress"} -> true
                _ -> false
              end),
              "expected status write In Progress; got events=#{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:workpad_write, "issue-runner-1", body} ->
+               {:workpad_write, "11923258050", body} ->
                  String.contains?(body, "Symphony Workpad") and
                    String.contains?(body, "Started by Symphony")
 
@@ -137,7 +139,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       status_writes =
         Enum.count(events, fn
-          {:status_write, "issue-runner-1", "In Progress"} -> true
+          {:status_write, "11923258050", "In Progress"} -> true
           _ -> false
         end)
 
@@ -153,7 +155,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
         {:ok,
          %{
            base_branch: "main",
-           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
            url: url,
            head_sha: "abc1234"
          }}
@@ -171,13 +173,13 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:pr_write, "issue-runner-1", ^url} -> true
+               {:pr_write, "11923258050", ^url} -> true
                _ -> false
              end),
              "expected pr_write with PR URL; got events=#{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Human Review"} -> true
+               {:status_write, "11923258050", "Human Review"} -> true
                _ -> false
              end),
              "expected status_write Human Review on PR detection; got events=#{inspect(events)}"
@@ -191,7 +193,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
         {:ok,
          %{
            base_branch: "main",
-           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
            url: url,
            head_sha: "abc1234"
          }}
@@ -211,7 +213,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       pr_writes =
         Enum.count(events, fn
-          {:pr_write, "issue-runner-1", _url} -> true
+          {:pr_write, "11923258050", _url} -> true
           _ -> false
         end)
 
@@ -220,12 +222,50 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       status_writes =
         Enum.count(events, fn
-          {:status_write, "issue-runner-1", "Human Review"} -> true
+          {:status_write, "11923258050", "Human Review"} -> true
           _ -> false
         end)
 
       assert status_writes == 1,
              "expected exactly one Human Review status write; got #{status_writes} in events=#{inspect(events)}"
+    end
+
+    test "PR URL split across stream messages is detected",
+         %{issue: issue, writer_pid: writer_pid} do
+      url = "https://github.com/openai/symphony/pull/4242"
+
+      PRSafetyStubGH.stub_basic(url,
+        {:ok,
+         %{
+           base_branch: "main",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
+           url: url,
+           head_sha: "abc1234"
+         }}
+      )
+
+      first_chunk = %{
+        event: :notification,
+        raw: "Opened https://github.com/openai/symph",
+        timestamp: DateTime.utc_now()
+      }
+
+      second_chunk = %{
+        event: :notification,
+        raw: "ony/pull/4242",
+        timestamp: DateTime.utc_now()
+      }
+
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, first_chunk)
+      :ok = AgentRunner.observe_codex_message(writer_pid, issue, second_chunk)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:pr_write, "11923258050", ^url} -> true
+               _ -> false
+             end),
+             "expected pr_write for split PR URL; got events=#{inspect(events)}"
     end
 
     test "on PR URL with invalid branch, refuses with branch_convention_violation and transitions to Cancelled",
@@ -253,17 +293,17 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       refute Enum.any?(events, fn
-               {:pr_write, "issue-runner-1", _url} -> true
+               {:pr_write, "11923258050", _url} -> true
                _ -> false
              end),
              "should NOT write PR URL on branch convention violation; got #{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:pr_refusal_write, "issue-runner-1", body} ->
+               {:pr_refusal_write, "11923258050", body} ->
                  String.contains?(body, "## Symphony PR Refusal") and
                    String.contains?(body, "branch_convention_violation") and
                    String.contains?(body, "feature/random-branch") and
-                   String.contains?(body, "symphony/SYM-issue-runner-1/attempt-N")
+                   String.contains?(body, "symphony/SYM-11923258050/attempt-N")
 
                _ ->
                  false
@@ -271,7 +311,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected pr_refusal_write with branch_convention_violation reason; got #{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               {:status_write, "11923258050", "Cancelled"} -> true
                _ -> false
              end),
              "expected status_write Cancelled on branch refusal; got events=#{inspect(events)}"
@@ -281,20 +321,14 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/77"
 
-      # Pre-populate state with a SHA that will not appear in the new commits.
+      # Pre-populate state with a SHA that will no longer be in head history.
       :ok =
-        SymphonyElixir.PRSafety.PRState.record("issue-runner-1", %{
+        SymphonyElixir.PRSafety.PRState.record("11923258050", %{
           url: url,
           sha: "originalsha"
         })
 
-      PRSafetyStubGH.stub_commits(url,
-        {:ok,
-         [
-           %{sha: "rebased1"},
-           %{sha: "rebased2"}
-         ]}
-      )
+      PRSafetyStubGH.stub_head_contains(url, "originalsha", {:ok, false})
 
       message = %{
         event: :notification,
@@ -307,7 +341,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:pr_refusal_write, "issue-runner-1", body} ->
+               {:pr_refusal_write, "11923258050", body} ->
                  String.contains?(body, "## Symphony PR Refusal") and
                    String.contains?(body, "force_push_detected")
 
@@ -317,7 +351,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected pr_refusal_write with force_push_detected reason; got #{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               {:status_write, "11923258050", "Cancelled"} -> true
                _ -> false
              end),
              "expected status_write Cancelled on force-push refusal; got events=#{inspect(events)}"
@@ -330,19 +364,12 @@ defmodule SymphonyElixir.AgentRunnerTest do
       # Pre-populate state to simulate a prior agent run that already
       # recorded the PR.
       :ok =
-        SymphonyElixir.PRSafety.PRState.record("issue-runner-1", %{
+        SymphonyElixir.PRSafety.PRState.record("11923258050", %{
           url: url,
           sha: "originalsha"
         })
 
-      PRSafetyStubGH.stub_commits(url,
-        {:ok,
-         [
-           %{sha: "originalsha"},
-           %{sha: "appended1"},
-           %{sha: "appended2"}
-         ]}
-      )
+      PRSafetyStubGH.stub_head_contains(url, "originalsha", {:ok, true})
 
       message = %{
         event: :notification,
@@ -361,7 +388,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "should NOT refuse when prior SHA is still in commit chain; got #{inspect(events)}"
 
       refute Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               {:status_write, "11923258050", "Cancelled"} -> true
                _ -> false
              end),
              "should NOT cancel on descendant SHA append; got #{inspect(events)}"
@@ -380,7 +407,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
         {:ok,
          %{
            base_branch: "main",
-           head_branch: "symphony/SYM-issue-runner-1/attempt-1",
+           head_branch: "symphony/SYM-11923258050/attempt-1",
            url: url,
            head_sha: "abc1234"
          }}
@@ -407,7 +434,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:workpad_write, "issue-runner-1", body} ->
+               {:workpad_write, "11923258050", body} ->
                  String.contains?(body, "Symphony Workpad") and
                    String.contains?(body, "Fixed the bug.") and
                    String.contains?(body, "ran make all")
@@ -418,7 +445,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected workpad write with completion render embedding summary; got events=#{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Human Review"} -> true
+               {:status_write, "11923258050", "Human Review"} -> true
                _ -> false
              end),
              "expected status write Human Review; got events=#{inspect(events)}"
@@ -439,7 +466,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       refute Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Human Review"} -> true
+               {:status_write, "11923258050", "Human Review"} -> true
                _ -> false
              end),
              "expected NO status write to Human Review when summary missing; got events=#{inspect(events)}"
@@ -463,7 +490,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:workpad_write, "issue-runner-1", body} ->
+               {:workpad_write, "11923258050", body} ->
                  String.contains?(body, "Symphony Workpad")
 
                _ ->
@@ -472,7 +499,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected workpad write on completion; got events=#{inspect(events)}"
 
       refute Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Human Review"} -> true
+               {:status_write, "11923258050", "Human Review"} -> true
                _ -> false
              end),
              "expected NO Human Review status write without PR URL"
@@ -496,7 +523,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       workpad_body =
         Enum.find_value(events, fn
-          {:workpad_write, "issue-runner-1", body} -> body
+          {:workpad_write, "11923258050", body} -> body
           _ -> nil
         end)
 
@@ -513,7 +540,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:workpad_write, "issue-runner-1", body} ->
+               {:workpad_write, "11923258050", body} ->
                  String.contains?(body, "Symphony Workpad") and
                    String.contains?(body, "Crashed") and
                    String.contains?(body, "port_exit")
@@ -524,7 +551,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected workpad write with crash render; got events=#{inspect(events)}"
 
       assert Enum.any?(events, fn
-               {:status_write, "issue-runner-1", "Cancelled"} -> true
+               {:status_write, "11923258050", "Cancelled"} -> true
                _ -> false
              end),
              "expected status write Cancelled on crash; got events=#{inspect(events)}"
@@ -623,7 +650,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       events = MemoryMonday.events()
 
       assert Enum.any?(events, fn
-               {:failure_write, "issue-runner-1", body} ->
+               {:failure_write, "11923258050", body} ->
                  String.contains?(body, "reason=max_turns_exceeded") and
                    String.contains?(body, "max_turns reached")
 

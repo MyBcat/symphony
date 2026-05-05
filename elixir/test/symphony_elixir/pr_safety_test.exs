@@ -23,10 +23,10 @@ defmodule SymphonyElixir.PRSafetyTest do
     end
 
     @impl true
-    def pr_view_commits(url) do
-      case Process.get({StubGH, :pr_view_commits, url}) do
+    def pr_head_contains_sha(url, sha) do
+      case Process.get({StubGH, :pr_head_contains_sha, url, sha}) do
         nil ->
-          case Process.get({StubGH, :pr_view_commits_default}) do
+          case Process.get({StubGH, :pr_head_contains_sha_default}) do
             nil -> {:error, :stub_not_configured}
             response -> response
           end
@@ -39,8 +39,8 @@ defmodule SymphonyElixir.PRSafetyTest do
     def stub_pr_view_basic(url, response),
       do: Process.put({__MODULE__, :pr_view_basic, url}, response)
 
-    def stub_pr_view_commits(url, response),
-      do: Process.put({__MODULE__, :pr_view_commits, url}, response)
+    def stub_pr_head_contains_sha(url, sha, response),
+      do: Process.put({__MODULE__, :pr_head_contains_sha, url, sha}, response)
 
     def stub_pr_view_basic_default(response),
       do: Process.put({__MODULE__, :pr_view_basic_default}, response)
@@ -111,35 +111,22 @@ defmodule SymphonyElixir.PRSafetyTest do
   end
 
   describe "evaluate_pr/2 — re-detection (idempotency + force-push)" do
-    test "returns idempotent_no_force_push when prior SHA is still in commits" do
+    test "returns idempotent_no_force_push when prior SHA is still in head history" do
       url = "https://github.com/MyBcat/symphony/pull/200"
 
       :ok = PRState.record("11923258050", %{url: url, sha: "abc1234"})
 
-      StubGH.stub_pr_view_commits(url,
-        {:ok,
-         [
-           %{sha: "abc1234"},
-           %{sha: "def5678"},
-           %{sha: "ff00aabb"}
-         ]}
-      )
+      StubGH.stub_pr_head_contains_sha(url, "abc1234", {:ok, true})
 
       assert {:ok, :idempotent_no_force_push} = PRSafety.evaluate_pr(url, "11923258050")
     end
 
-    test "returns force_push_detected when prior SHA is missing from commits" do
+    test "returns force_push_detected when prior SHA is missing from head history" do
       url = "https://github.com/MyBcat/symphony/pull/201"
 
       :ok = PRState.record("11923258050", %{url: url, sha: "abc1234"})
 
-      StubGH.stub_pr_view_commits(url,
-        {:ok,
-         [
-           %{sha: "rebased1"},
-           %{sha: "rebased2"}
-         ]}
-      )
+      StubGH.stub_pr_head_contains_sha(url, "abc1234", {:ok, false})
 
       assert {:error, :force_push_detected} = PRSafety.evaluate_pr(url, "11923258050")
     end
@@ -164,11 +151,11 @@ defmodule SymphonyElixir.PRSafetyTest do
       assert {:ok, %{url: ^new_url, sha: "newshahere"}} = PRState.lookup("11923258050")
     end
 
-    test "returns :gh_unavailable when commits fetch fails" do
+    test "returns :gh_unavailable when ancestry check fails" do
       url = "https://github.com/MyBcat/symphony/pull/202"
 
       :ok = PRState.record("11923258050", %{url: url, sha: "abc1234"})
-      StubGH.stub_pr_view_commits(url, {:error, :network})
+      StubGH.stub_pr_head_contains_sha(url, "abc1234", {:error, :network})
 
       assert {:error, {:gh_unavailable, :network}} = PRSafety.evaluate_pr(url, "11923258050")
     end

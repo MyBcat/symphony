@@ -25,6 +25,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   @summary_filename "_symphony_summary.md"
   @summary_max_bytes 32_768
+  @pr_scan_buffer_max_chars 2_048
   @default_profile_name "codex_default"
 
   @adapter_for_kind %{
@@ -665,6 +666,7 @@ defmodule SymphonyElixir.AgentRunner do
         session: session,
         pr_url_written?: false,
         pr_refused?: false,
+        pr_scan_buffer: "",
         session_started_emitted?: false
       }
     end)
@@ -885,15 +887,18 @@ defmodule SymphonyElixir.AgentRunner do
     issue_id = issue_id(issue)
 
     if is_binary(issue_id) and is_pid(writer_pid) and Process.alive?(writer_pid) do
-      already_written? = Agent.get(writer_pid, fn state -> state.pr_url_written? end)
+      {already_written?, scan_buffer} =
+        Agent.get(writer_pid, fn state ->
+          {state.pr_url_written?, Map.get(state, :pr_scan_buffer, "")}
+        end)
 
       if !already_written? do
-        case scan_message_for_pr(message) do
+        case scan_message_for_pr(message, scan_buffer) do
           {:ok, url} ->
             handle_detected_pr_url(writer_pid, issue_id, url)
 
-          :no_match ->
-            :ok
+          {:no_match, next_buffer} ->
+            Agent.update(writer_pid, fn state -> %{state | pr_scan_buffer: next_buffer} end)
         end
       end
     end
@@ -953,25 +958,34 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp scan_message_for_pr(message) when is_map(message) do
-    [Map.get(message, :raw), Map.get(message, :payload)]
-    |> Enum.reduce_while(:no_match, fn candidate, acc ->
-      case scan_value_for_pr(candidate) do
-        {:ok, _url} = hit -> {:halt, hit}
-        :no_match -> {:cont, acc}
-      end
-    end)
+  defp scan_message_for_pr(message, prior_buffer) when is_map(message) do
+    current =
+      [Map.get(message, :raw), Map.get(message, :payload)]
+      |> Enum.map(&scan_text_for_value/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n")
+
+    buffer = trim_pr_scan_buffer(to_string(prior_buffer) <> current)
+
+    case PRDetector.scan(buffer) do
+      {:ok, _url} = hit -> hit
+      :no_match -> {:no_match, buffer}
+    end
   end
 
-  defp scan_message_for_pr(_), do: :no_match
+  defp scan_message_for_pr(_, prior_buffer), do: {:no_match, to_string(prior_buffer)}
 
-  defp scan_value_for_pr(value) when is_binary(value), do: PRDetector.scan(value)
+  defp scan_text_for_value(value) when is_binary(value), do: value
 
-  defp scan_value_for_pr(value) when is_map(value) or is_list(value) do
-    PRDetector.scan(safe_inspect(value))
+  defp scan_text_for_value(value) when is_map(value) or is_list(value) do
+    safe_inspect(value)
   end
 
-  defp scan_value_for_pr(_), do: :no_match
+  defp scan_text_for_value(_), do: ""
+
+  defp trim_pr_scan_buffer(buffer) do
+    String.slice(buffer, -@pr_scan_buffer_max_chars, @pr_scan_buffer_max_chars) || buffer
+  end
 
   defp safe_inspect(value) do
     try do
