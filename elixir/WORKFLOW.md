@@ -45,11 +45,16 @@ repos:
   symphony:
     clone_url: https://github.com/MyBcat/symphony.git
     # Symphony performs the clone itself per Spec 3 §2.2. after_create is
-    # post-clone setup only and MUST NOT contain `git clone`.
+    # post-clone setup only and MUST NOT contain `git clone`. Tolerant
+    # of missing gcc / kerl dependencies in container/VPS contexts —
+    # mix deps.get is best-effort and never blocks dispatch.
     after_create: |
-      if command -v mise >/dev/null 2>&1; then
-        cd elixir && mise trust && mise exec -- mix deps.get
+      if command -v mise >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
+        (cd elixir && mise trust && mise exec -- mix deps.get) || true
+      else
+        echo "after_create(symphony): mise or gcc absent; skipping mix deps.get"
       fi
+      true
     allowed_profiles:
       - codex_gpt55_xhigh
       - claude_opus
