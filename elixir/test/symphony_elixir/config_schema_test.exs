@@ -425,4 +425,92 @@ defmodule SymphonyElixir.ConfigSchemaTest do
   end
 
   defp deep_merge(_left, right), do: right
+
+  describe "cost_cap (M-3 / SYM-11923119477)" do
+    test "schema parses cost_cap.daily_usd" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "cost_cap" => %{"daily_usd" => 50}
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert settings.cost_cap.daily_usd == 50.0
+    end
+
+    test "missing cost_cap defaults daily_usd to nil (no cap configured)" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        }
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      assert is_nil(settings.cost_cap.daily_usd)
+    end
+
+    test "schema parses per-profile cost_per_input_token_usd / cost_per_output_token_usd" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "profiles" => %{
+          "claude_opus" => %{
+            "kind" => "claude",
+            "max_concurrent" => 2,
+            "cost_per_input_token_usd" => 0.000015,
+            "cost_per_output_token_usd" => 0.000075,
+            "claude" => %{"command" => "claude", "permission_mode" => "acceptEdits"}
+          }
+        }
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      profile = settings.profiles["claude_opus"]
+      assert profile.cost_per_input_token_usd == 0.000015
+      assert profile.cost_per_output_token_usd == 0.000075
+    end
+
+    test "schema parses integer cost rates as floats" do
+      attrs = %{
+        "tracker" => %{
+          "kind" => "monday",
+          "api_token" => "x",
+          "board_id" => 1,
+          "symphony_status_column_id" => "y",
+          "profile_column_id" => "p",
+          "heartbeat_item_id" => 999
+        },
+        "profiles" => %{
+          "claude_opus" => %{
+            "kind" => "claude",
+            "cost_per_input_token_usd" => 0,
+            "cost_per_output_token_usd" => 0,
+            "claude" => %{"command" => "claude"}
+          }
+        }
+      }
+
+      assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(attrs)
+      profile = settings.profiles["claude_opus"]
+      assert profile.cost_per_input_token_usd == 0.0
+      assert profile.cost_per_output_token_usd == 0.0
+    end
+  end
 end

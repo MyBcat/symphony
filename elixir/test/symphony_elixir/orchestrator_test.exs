@@ -219,6 +219,79 @@ defmodule SymphonyElixir.OrchestratorTest do
       refute MapSet.member?(final_state.claimed, issue_id),
              "expected claim to be released after stranded TTL"
     end
+
+    test "cost cap shutdown keeps Ready item claimed and schedules failure-style backoff without stranded TTL accounting" do
+      orchestrator_name = Module.concat(__MODULE__, :CostCapBackoffOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue_id = "issue-cost-cap-backoff-1"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "SYM-COST-BACKOFF",
+        title: "Cost cap backoff",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-COST-BACKOFF",
+        assigned_to_worker: true
+      }
+
+      worker =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      ref = Process.monitor(worker)
+      before_ms = System.monotonic_time(:millisecond)
+
+      :sys.replace_state(pid, fn state ->
+        running_entry = %{
+          pid: worker,
+          ref: ref,
+          issue: issue,
+          identifier: issue.identifier,
+          profile_name: "claude_opus",
+          worker_host: nil,
+          workspace_path: "/tmp/work",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 0
+        }
+
+        %{
+          state
+          | running: Map.put(state.running, issue_id, running_entry),
+            claimed: MapSet.put(state.claimed, issue_id)
+        }
+      end)
+
+      send(pid, {:DOWN, ref, :process, worker, {:shutdown, :cost_cap_exceeded}})
+      Process.sleep(50)
+
+      state = :sys.get_state(pid)
+
+      assert %{attempt: 1, error: "cost cap exceeded", due_at_ms: due_at_ms} =
+               Map.get(state.retry_attempts, issue_id)
+
+      assert due_at_ms - before_ms >= 10_000
+      assert MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.failure_counts, issue_id)
+
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:status_write, ^issue_id, "Cancelled"} -> true
+               _ -> false
+             end)
+
+      Process.demonitor(ref, [:flush])
+      send(worker, :stop)
+    end
   end
 
   describe "per-profile concurrency caps" do

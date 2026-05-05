@@ -939,6 +939,59 @@ defmodule SymphonyElixir.AgentRunnerTest do
                        %{"claude" => %{input: 10, output: 5, total: 15}}}
     end
 
+    test "cost-cap refusal posts workpad, skips adapter dispatch, and exits with backoff reason" do
+      install_recording_adapter(:claude)
+      configure_profiles_workflow(:claude, "claude_test", %{}, cost_cap_daily_usd: 0.0001)
+
+      state_path =
+        Path.join(
+          System.tmp_dir!(),
+          "agent-runner-cost-cap-#{System.unique_integer([:positive])}.json"
+        )
+
+      Application.put_env(:symphony_elixir, :cost_meter_state_path, state_path)
+      start_supervised!(SymphonyElixir.CostMeter)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :cost_meter_state_path)
+        File.rm(state_path)
+      end)
+
+      issue = %Issue{
+        id: "issue-cost-cap-1",
+        identifier: "SYM-COST",
+        title: "Cost cap refusal",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-COST",
+        profile: "claude_test",
+        assigned_to_worker: true
+      }
+
+      assert catch_exit(AgentRunner.run(issue, self(), max_turns: 1)) ==
+               {:shutdown, :cost_cap_exceeded}
+
+      refute_received {:start_session, _pid, _workspace, _config}
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:workpad_write, "issue-cost-cap-1", body} ->
+                 String.contains?(body, "## Symphony Cost Cap") and
+                   String.contains?(body, "Symphony Ready")
+
+               _ ->
+                 false
+             end),
+             "expected Cost Cap workpad write; got events=#{inspect(events)}"
+
+      refute Enum.any?(events, fn
+               {:status_write, "issue-cost-cap-1", "Cancelled"} -> true
+               _ -> false
+             end),
+             "cost cap refusal must not cancel the item; got events=#{inspect(events)}"
+    end
+
     test "stalled stream heartbeat does not fail a long-silent turn" do
       install_recording_adapter(:claude)
       configure_profiles_workflow(:claude, "claude_test", %{_emit_stalled_first: true})
@@ -1300,7 +1353,12 @@ defmodule SymphonyElixir.AgentRunnerTest do
       })
     end
 
-    defp configure_profiles_workflow(kind, profile_name, config_overrides \\ %{}) do
+    defp configure_profiles_workflow(
+           kind,
+           profile_name,
+           config_overrides \\ %{},
+           workflow_overrides \\ []
+         ) do
       workspace_root =
         Path.join(System.tmp_dir!(), "agent-dispatch-test-#{System.unique_integer([:positive])}")
 
@@ -1321,18 +1379,26 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       profile_entry = %{}
       profile_entry = Map.put(profile_entry, :kind, profile_kind_str)
+      profile_entry = Map.put(profile_entry, :cost_per_input_token_usd, 0.000001)
+      profile_entry = Map.put(profile_entry, :cost_per_output_token_usd, 0.000002)
       profile_entry = Map.put(profile_entry, profile_kind_str, nested_config)
 
       profiles = %{profile_name => profile_entry}
 
       sandbox_safety_floor = sandbox_safety_floor_for(kind)
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        agent_default_profile: profile_name,
-        agent_sandbox_safety_floor: sandbox_safety_floor,
-        profiles: profiles
-      )
+      workflow_overrides =
+        Keyword.merge(
+          [
+            workspace_root: workspace_root,
+            agent_default_profile: profile_name,
+            agent_sandbox_safety_floor: sandbox_safety_floor,
+            profiles: profiles
+          ],
+          workflow_overrides
+        )
+
+      write_workflow_file!(Workflow.workflow_file_path(), workflow_overrides)
 
       :ok
     end
