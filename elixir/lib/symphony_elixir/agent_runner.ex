@@ -888,8 +888,10 @@ defmodule SymphonyElixir.AgentRunner do
   def observe_codex_message(_writer_pid, _issue, _message), do: :ok
 
   @doc """
-  Render and write the crash workpad + status when the agent run errored or
-  raised. Used both by the inline crash trap and tests.
+  Mark the issue Cancelled when the agent run errored or raised.
+
+  Failure details must already have been sent via `emit_failure_update_via_writer/4`;
+  the orchestrator owns the consolidated retry-cap update.
   """
   @spec finalize_crash(pid(), map(), term()) :: :ok
   def finalize_crash(writer_pid, issue, _reason) when is_pid(writer_pid) do
