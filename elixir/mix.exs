@@ -23,7 +23,6 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Claude.Adapter,
           SymphonyElixir.Codex.Adapter,
           SymphonyElixir.Gemini.Adapter,
-          SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,

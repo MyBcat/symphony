@@ -313,7 +313,16 @@ profiles:
     cost_per_input_token_usd: 0.000010
     cost_per_output_token_usd: 0.000030
     codex:
-      command: "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=xhigh app-server"
+      # Codex CLI 0.128 dropped the JSON-RPC `app-server` stdio protocol
+      # Symphony used to drive sessions and replaced it with a unix-socket
+      # daemon. `codex exec --json` is the supported one-shot agent
+      # invocation; the adapter spawns one per turn and consumes the JSONL
+      # event stream (`thread.started`, `turn.started`, `turn.completed`,
+      # `item.*`, `error`). `--skip-git-repo-check` keeps codex happy when
+      # the workspace was just cloned and is empty. Sandbox + approval are
+      # passed via `-c` config overrides because they are not first-class
+      # `codex exec` flags.
+      command: "codex exec --json --skip-git-repo-check -c 'model=\"gpt-5.5\"' -c model_reasoning_effort=xhigh -c 'sandbox_mode=\"workspace-write\"' -c 'approval_policy=\"never\"'"
       approval_policy: never
       thread_sandbox: workspace-write
   gemini_long_context:
@@ -348,24 +357,17 @@ agent:
 #     max_nonsynth_items: 5              # refuse if > N non-[E2E] items exist on sandbox board
 #     alert_webhook: ""                  # optional Slack/webhook URL posted on nightly failure
 codex:
-  # Codex CLI (app-server mode) gates its JSON-RPC `remoteControl` interface
-  # behind project trust. Workspaces under `workspace.root` whose `.codex/`
-  # directory is not listed in `~/.codex/config.toml`'s `[projects]` table
-  # cause Codex to emit a `configWarning` plus
-  # `remoteControl/status/changed status=disabled` and never respond to
-  # `initialize`, manifesting as `:response_timeout` in the adapter.
-  #
-  # Symphony's `Codex.Adapter.start_session/2` calls
-  # `SymphonyElixir.Codex.ProjectTrust.ensure_trusted/1` before launching
-  # the Codex process, which writes a `[projects."<canonical-workspace>"]`
-  # block with `trust_level = "trusted"` to `~/.codex/config.toml`. The path
-  # is overridable via the `SYMPHONY_CODEX_CONFIG_TOML` env var (used by the
-  # test suite to redirect writes away from the operator's real config).
-  # Only paths that pass `validate_workspace_cwd/2` (i.e. canonical paths
-  # strictly under `workspace.root`) are auto-trusted; the SYM-11923259980
-  # constraint "Do NOT auto-trust arbitrary paths" is enforced by the
-  # validation upstream.
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  # Legacy default invocation used when a profile does not define its own
+  # `codex.command`. Codex CLI 0.128 replaced the JSON-RPC `app-server` stdio
+  # protocol with a unix-socket daemon; Symphony now drives Codex via
+  # `codex exec --json`, a one-shot per-turn agent run that emits a JSONL
+  # event stream (`thread.started`, `turn.started`, `turn.completed`,
+  # `item.*`, `error`). The adapter spawns one process per `send_turn/3`
+  # call and parses the stream. `--skip-git-repo-check` keeps codex happy
+  # when the workspace was just cloned and is empty. Sandbox and approval
+  # ride `-c` config overrides because `codex exec` does not expose them as
+  # first-class flags.
+  command: codex exec --json --skip-git-repo-check -c shell_environment_policy.inherit=all -c 'model="gpt-5.5"' -c model_reasoning_effort=xhigh -c 'sandbox_mode="workspace-write"' -c 'approval_policy="never"'
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:

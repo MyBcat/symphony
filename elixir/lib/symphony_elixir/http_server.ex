@@ -86,8 +86,12 @@ defmodule SymphonyElixir.HttpServer do
 
   defp assert_loopback!(ip, host) do
     cond do
-      ip == {127, 0, 0, 1} -> :ok
-      ip == {0, 0, 0, 0, 0, 0, 0, 1} -> :ok
+      ip == {127, 0, 0, 1} ->
+        :ok
+
+      ip == {0, 0, 0, 0, 0, 0, 0, 1} ->
+        :ok
+
       true ->
         raise "M-2 dashboard refusing to bind: #{inspect(host)} resolves to #{:inet.ntoa(ip)}, " <>
                 "but only loopback (127.0.0.1, ::1, localhost) is allowed. PHI in /failures " <>

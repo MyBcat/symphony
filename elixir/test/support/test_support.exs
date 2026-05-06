@@ -40,14 +40,6 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
 
-        # Redirect Codex.ProjectTrust writes to a per-test temp file so the
-        # adapter's auto-trust step never touches the developer's real
-        # ~/.codex/config.toml. Tests that need to inspect the trust file
-        # can read the configured path back via ProjectTrust.config_path/0.
-        codex_trust_path = Path.join(workflow_root, "codex_config.toml")
-        previous_codex_trust_path = System.get_env("SYMPHONY_CODEX_CONFIG_TOML")
-        System.put_env("SYMPHONY_CODEX_CONFIG_TOML", codex_trust_path)
-
         if Process.whereis(SymphonyElixir.WorkflowStore),
           do: SymphonyElixir.WorkflowStore.force_reload()
 
@@ -58,12 +50,6 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
-
-          if is_binary(previous_codex_trust_path) do
-            System.put_env("SYMPHONY_CODEX_CONFIG_TOML", previous_codex_trust_path)
-          else
-            System.delete_env("SYMPHONY_CODEX_CONFIG_TOML")
-          end
 
           File.rm_rf(workflow_root)
         end)
@@ -146,7 +132,7 @@ defmodule SymphonyElixir.TestSupport do
           profiles: nil,
           repo_policy_allowed_clone_hosts: nil,
           repos: nil,
-          codex_command: "codex app-server",
+          codex_command: "codex exec --json",
           codex_approval_policy: %{
             reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
           },
