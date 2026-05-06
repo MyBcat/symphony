@@ -100,7 +100,7 @@ defmodule SymphonyElixir.Secrets.ScrubberTest do
 
     test "ignores non-string literals" do
       line = "ok"
-      assert Scrubber.scrub(line, [nil, :atom, 12345]) == line
+      assert Scrubber.scrub(line, [nil, :atom, 12_345]) == line
     end
   end
 
