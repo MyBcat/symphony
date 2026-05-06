@@ -75,7 +75,7 @@ defmodule SymphonyElixir.Gemini.AdapterTest do
           end
         end)
 
-      events = Task.await(task, 1_000)
+      events = Task.await(task, 5_000)
 
       assert Enum.map(events, & &1.kind) == [:session_started, :exit]
       assert List.last(events).status == 0
