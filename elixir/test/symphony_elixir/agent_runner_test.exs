@@ -1178,7 +1178,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert_received {:stop_session, _session}
     end
 
-    test "profile resolution errors return before adapter dispatch without cancelling issue" do
+    test "profile resolution errors send an :agent_failure event without cancelling the issue" do
       install_recording_adapter(:claude)
       configure_profiles_workflow(:claude, "claude_test")
 
@@ -1204,16 +1204,18 @@ defmodule SymphonyElixir.AgentRunnerTest do
                _ -> false
              end)
 
-      # SYM-11923123790 AC1: profile resolution failures must post a Monday
-      # failure update so the operator sees the denial without grepping logs.
-      assert Enum.any?(MemoryMonday.events(), fn
-               {:failure_write, "issue-profile-error-1", body} ->
-                 String.contains?(body, "reason=profile_resolution_failed")
+      # SYM-11942134820 (M-4a): profile resolution failures forward a structured
+      # `:agent_failure` event to the recipient pid (the orchestrator in
+      # production). The orchestrator consolidates these into ONE Monday Update
+      # at retry-cap exhaustion instead of one Update per attempt.
+      assert_receive {:agent_failure, "issue-profile-error-1", entry}, 200
+      assert entry.reason_atom == :profile_resolution_failed
 
-               _ ->
-                 false
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, _, _} -> true
+               _ -> false
              end),
-             "expected failure_write for profile_resolution_failed; got events=#{inspect(MemoryMonday.events())}"
+             "expected zero per-attempt failure_write events under M-4a; got events=#{inspect(MemoryMonday.events())}"
     end
 
     test "repo allowed_profiles blocks disallowed profile before adapter dispatch" do
@@ -1278,7 +1280,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected failure_write for profile_not_allowed_on_repo; got events=#{inspect(MemoryMonday.events())}"
     end
 
-    test "max_turns_exceeded posts a Monday failure update with reason=max_turns_exceeded" do
+    test "max_turns_exceeded sends an :agent_failure event with reason=max_turns_exceeded" do
       install_recording_adapter(:claude)
       configure_profiles_workflow(:claude, "claude_test")
 
@@ -1300,16 +1302,17 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       AgentRunner.run(issue, self(), max_turns: 1, issue_state_fetcher: fetcher)
 
-      events = MemoryMonday.events()
+      # SYM-11942134820 (M-4a): per-attempt failures are forwarded to the
+      # recipient pid as a structured event; the orchestrator drains these into
+      # ONE consolidated Monday Update at retry-cap exhaustion.
+      assert_receive {:agent_failure, "issue-max-turns-1", entry}, 200
+      assert entry.reason_atom == :max_turns_exceeded
 
-      assert Enum.any?(events, fn
-               {:failure_write, "issue-max-turns-1", body} ->
-                 String.contains?(body, "reason=max_turns_exceeded")
-
-               _ ->
-                 false
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, _, _} -> true
+               _ -> false
              end),
-             "expected failure_write reason=max_turns_exceeded; got events=#{inspect(events)}"
+             "expected zero per-attempt failure_write events under M-4a; got events=#{inspect(MemoryMonday.events())}"
     end
 
     test "Codex AgentRuntime map config controls launched command and session policies" do
@@ -1404,7 +1407,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       end
     end
 
-    test "exception raised by an adapter posts a failure update with reason=exception_in_adapter" do
+    test "exception raised by an adapter sends an :agent_failure event with reason=exception_in_adapter" do
       Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
         claude: SymphonyElixir.AgentRunnerTest.RaisingAdapter
       })
@@ -1427,27 +1430,29 @@ defmodule SymphonyElixir.AgentRunnerTest do
         AgentRunner.run(issue, self(), max_turns: 1)
       end
 
+      # SYM-11942134820 (M-4a): adapter exceptions forward a structured
+      # `:agent_failure` to the recipient pid; the orchestrator consolidates.
+      assert_receive {:agent_failure, "issue-raise-1", entry}, 200
+      assert entry.reason_atom == :exception_in_adapter
+      assert is_binary(entry.message) and String.contains?(entry.message, "boom in start_session")
+
       events = MemoryMonday.events()
 
-      assert Enum.any?(events, fn
-               {:failure_write, "issue-raise-1", body} ->
-                 String.contains?(body, "reason=exception_in_adapter") and
-                   String.contains?(body, "boom in start_session")
-
-               _ ->
-                 false
+      refute Enum.any?(events, fn
+               {:failure_write, _, _} -> true
+               _ -> false
              end),
-             "expected failure_write reason=exception_in_adapter; got events=#{inspect(events)}"
+             "expected zero per-attempt failure_write events under M-4a; got events=#{inspect(events)}"
 
       # Crash workpad still renders + status flips to Cancelled (existing
-      # behaviour preserved alongside the new failure update).
+      # behaviour preserved alongside the new failure event).
       assert Enum.any?(events, fn
                {:status_write, "issue-raise-1", "Cancelled"} -> true
                _ -> false
              end)
     end
 
-    test "{:error, reason} from an adapter posts a failure update tagged with the reason atom" do
+    test "{:error, reason} from an adapter sends an :agent_failure event tagged with the reason atom" do
       Application.put_env(:symphony_elixir, :agent_runtime_adapter_overrides, %{
         claude: SymphonyElixir.AgentRunnerTest.PortExitAdapter
       })
@@ -1470,17 +1475,18 @@ defmodule SymphonyElixir.AgentRunnerTest do
         AgentRunner.run(issue, self(), max_turns: 1)
       end
 
-      events = MemoryMonday.events()
+      # SYM-11942134820 (M-4a): adapter `{:error, reason}` returns forward a
+      # structured `:agent_failure` to the recipient pid; the orchestrator
+      # consolidates these into one Update at retry-cap exhaustion.
+      assert_receive {:agent_failure, "issue-portexit-1", entry}, 200
+      assert entry.reason_atom == :port_exit_nonzero
+      assert is_binary(entry.message) and String.contains?(entry.message, "agent run failed")
 
-      assert Enum.any?(events, fn
-               {:failure_write, "issue-portexit-1", body} ->
-                 String.contains?(body, "reason=port_exit_nonzero") and
-                   String.contains?(body, "agent run failed")
-
-               _ ->
-                 false
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, _, _} -> true
+               _ -> false
              end),
-             "expected failure_write reason=port_exit_nonzero; got events=#{inspect(events)}"
+             "expected zero per-attempt failure_write events under M-4a; got events=#{inspect(MemoryMonday.events())}"
     end
 
     defp install_recording_adapter(kind) do
