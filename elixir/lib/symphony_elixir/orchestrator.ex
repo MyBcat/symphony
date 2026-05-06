@@ -1451,12 +1451,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp append_nonblank(parts, _line, ""), do: parts
   defp append_nonblank(parts, _line, nil), do: parts
+
   defp append_nonblank(parts, line, value) when is_binary(value) and value != "" do
     parts ++ [line]
   end
 
   defp append_stderr_tail(parts, ""), do: parts
   defp append_stderr_tail(parts, nil), do: parts
+
   defp append_stderr_tail(parts, tail) when is_binary(tail) do
     indented =
       tail

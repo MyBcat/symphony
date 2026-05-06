@@ -831,9 +831,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       on_exit(fn -> AgentRunner.stop_session_writer(writer_pid) end)
 
       :ok =
-        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded,
-          message: "max_turns reached"
-        )
+        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded, message: "max_turns reached")
 
       assert_receive {:agent_failure, "11923258050", entry}, 200
       assert entry.reason_atom == :max_turns_exceeded
@@ -846,9 +844,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       Agent.stop(dead_pid)
 
       :ok =
-        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter,
-          message: "should not be posted"
-        )
+        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter, message: "should not be posted")
 
       refute_receive {:agent_failure, _, _}, 50
     end
