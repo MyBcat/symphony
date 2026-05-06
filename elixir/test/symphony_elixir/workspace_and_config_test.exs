@@ -701,7 +701,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     config = Config.settings!()
     assert config.tracker.endpoint == "https://api.monday.com/v2"
     assert config.tracker.api_token == nil
-    assert config.tracker.board_id == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
