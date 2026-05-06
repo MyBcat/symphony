@@ -114,7 +114,8 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
       on_exit(fn ->
         File.rm(manifest_path)
 
-        if previous, do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
+        if previous,
+          do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
           else: System.delete_env("SYMPHONY_FAKE_SECRETS_PATH")
       end)
 
@@ -255,7 +256,8 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
       on_exit(fn ->
         File.rm(manifest_path)
 
-        if previous, do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
+        if previous,
+          do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
           else: System.delete_env("SYMPHONY_FAKE_SECRETS_PATH")
       end)
 

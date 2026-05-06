@@ -122,8 +122,11 @@ defmodule SymphonyElixir.PRSafety do
 
   defp check_force_push(url, prior_sha) do
     case GH.pr_head_contains_sha(url, prior_sha) do
-      {:ok, true} -> {:ok, :idempotent_no_force_push}
-      {:ok, false} -> {:error, :force_push_detected}
+      {:ok, true} ->
+        {:ok, :idempotent_no_force_push}
+
+      {:ok, false} ->
+        {:error, :force_push_detected}
 
       {:error, reason} ->
         {:error, {:gh_unavailable, reason}}

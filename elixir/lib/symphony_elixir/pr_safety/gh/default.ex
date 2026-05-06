@@ -110,5 +110,4 @@ defmodule SymphonyElixir.PRSafety.GH.Default do
     e in ErlangError ->
       {:error, {:gh_unavailable, Exception.message(e)}}
   end
-
 end
