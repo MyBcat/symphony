@@ -90,12 +90,15 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "happy path turn lifecycle" do
     test "emits :session_started + :turn_completed and captures token usage" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-1"}'
-        printf '%s\\n' '{"type":"turn.started"}'
-        printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":42,"cached_input_tokens":4,"output_tokens":17,"reasoning_output_tokens":3}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-1"}'
+          printf '%s\\n' '{"type":"turn.started"}'
+          printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":42,"cached_input_tokens":4,"output_tokens":17,"reasoning_output_tokens":3}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -134,13 +137,16 @@ defmodule SymphonyElixir.Codex.AdapterTest do
 
     test "writes the prompt to a workspace temp file and pipes it into codex stdin" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        # The adapter pipes the prompt over stdin; capture it.
-        prompt=$(cat)
-        printf 'PROMPT:%s\\n' "$prompt" >> "$trace_file"
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-prompt"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          # The adapter pipes the prompt over stdin; capture it.
+          prompt=$(cat)
+          printf 'PROMPT:%s\\n' "$prompt" >> "$trace_file"
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-prompt"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -163,11 +169,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "token telemetry" do
     test "runtime_native_tokens/1 returns Codex-native shape after a turn" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-tok"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":10,"reasoning_output_tokens":5}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-tok"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":10,"reasoning_output_tokens":5}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -198,11 +207,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       # in `AgentRunner.observe_token_usage_for_cost_meter/2` keeps reading
       # non-zero. Regression guard for the exact bug the spec called out.
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-agent-runner"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":11}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-agent-runner"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":11}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -222,8 +234,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                    on_message: on_message
                  )
 
-        assert_received {:codex_message,
-                         %{event: :turn_completed, usage: %{"input_tokens" => 7, "output_tokens" => 11}}}
+        assert_received {:codex_message, %{event: :turn_completed, usage: %{"input_tokens" => 7, "output_tokens" => 11}}}
       end)
     end
   end
@@ -231,11 +242,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "error paths" do
     test "turn.failed propagates the error message and emits :turn_failed" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-fail"}'
-        printf '%s\\n' '{"type":"turn.failed","error":{"message":"context window exceeded"}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-fail"}'
+          printf '%s\\n' '{"type":"turn.failed","error":{"message":"context window exceeded"}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -256,17 +270,19 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                  )
 
         assert_received {:codex_message, %{event: :session_started}}
-        assert_received {:codex_message,
-                         %{event: :turn_failed, details: %{"message" => "context window exceeded"}}}
+        assert_received {:codex_message, %{event: :turn_failed, details: %{"message" => "context window exceeded"}}}
       end)
     end
 
     test "top-level error event is treated as a fatal turn failure" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"error","message":"upstream auth failure"}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"error","message":"upstream auth failure"}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -286,19 +302,21 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                    on_message: on_message
                  )
 
-        assert_received {:codex_message,
-                         %{event: :turn_failed, details: %{"message" => "upstream auth failure"}}}
+        assert_received {:codex_message, %{event: :turn_failed, details: %{"message" => "upstream auth failure"}}}
       end)
     end
 
     test "exit-without-turn-completed is surfaced as :turn_failed" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-early-exit"}'
-        # Exit cleanly WITHOUT emitting turn.completed.
-        exit 0
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-early-exit"}'
+          # Exit cleanly WITHOUT emitting turn.completed.
+          exit 0
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -328,13 +346,16 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       with_fake_codex(fn ctx ->
         bearer = String.duplicate("Z", 24)
 
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' 'warning: codex initializing slowly' >&2
-        printf '%s\\n' 'Authorization: Bearer #{bearer}' >&2
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-noise"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' 'warning: codex initializing slowly' >&2
+          printf '%s\\n' 'Authorization: Bearer #{bearer}' >&2
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-noise"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -368,12 +389,15 @@ defmodule SymphonyElixir.Codex.AdapterTest do
 
     test "JSON-like protocol lines that fail to decode emit :malformed without aborting the turn" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-malformed"}'
-        printf '%s\\n' '{"type":"turn.completed"'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-malformed"}'
+          printf '%s\\n' '{"type":"turn.completed"'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -406,12 +430,15 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       # large `item.completed` payloads (with multi-KB command output)
       # would land as malformed events.
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        padding=$(printf '%*s' 1100000 '' | tr ' ' a)
-        printf '{"type":"thread.started","thread_id":"thread-partial","padding":"%s"}\\n' "$padding"
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          padding=$(printf '%*s' 1100000 '' | tr ' ' a)
+          printf '{"type":"thread.started","thread_id":"thread-partial","padding":"%s"}\\n' "$padding"
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -440,13 +467,16 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "item events" do
     test "command_execution items emit :tool_call_started + :tool_call_completed" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-cmd"}'
-        printf '%s\\n' '{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}'
-        printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"a\\nb\\n","exit_code":0,"status":"completed"}}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-cmd"}'
+          printf '%s\\n' '{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}'
+          printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"a\\nb\\n","exit_code":0,"status":"completed"}}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -473,12 +503,15 @@ defmodule SymphonyElixir.Codex.AdapterTest do
 
     test "command_execution failure emits :tool_call_failed" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-cmd-fail"}'
-        printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"false","aggregated_output":"","exit_code":1,"status":"failed"}}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-cmd-fail"}'
+          printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"false","aggregated_output":"","exit_code":1,"status":"failed"}}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -504,12 +537,15 @@ defmodule SymphonyElixir.Codex.AdapterTest do
 
     test "agent_message item is forwarded as :notification" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-msg"}'
-        printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"all done"}}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-msg"}'
+          printf '%s\\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"all done"}}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -529,8 +565,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                    on_message: on_message
                  )
 
-        assert_received {:codex_message,
-                         %{event: :notification, item: %{"type" => "agent_message", "text" => "all done"}}}
+        assert_received {:codex_message, %{event: :notification, item: %{"type" => "agent_message", "text" => "all done"}}}
       end)
     end
   end
@@ -538,11 +573,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "stream_events/1 + AgentRuntime contract" do
     test "captures emitted events into a per-session buffer drained by stream_events/1" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-stream"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-stream"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 
@@ -571,11 +609,14 @@ defmodule SymphonyElixir.Codex.AdapterTest do
   describe "command resolution" do
     test "profile-config command overrides legacy codex.command" do
       with_fake_codex(fn ctx ->
-        File.write!(ctx.codex_binary, jsonl_fake_script(ctx, """
-        prompt=$(cat)
-        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-profile"}'
-        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
-        """))
+        File.write!(
+          ctx.codex_binary,
+          jsonl_fake_script(ctx, """
+          prompt=$(cat)
+          printf '%s\\n' '{"type":"thread.started","thread_id":"thread-profile"}'
+          printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+          """)
+        )
 
         File.chmod!(ctx.codex_binary, 0o755)
 

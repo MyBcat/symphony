@@ -526,9 +526,7 @@ defmodule SymphonyElixir.Codex.Adapter do
   defp ensure_session_started_emitted(%{session_emitted?: false, thread_id: thread_id} = state) do
     session_id = state.session_id || thread_id || generate_synthetic_session_id()
 
-    Logger.info(
-      "Codex session started for #{issue_context(state.issue)} session_id=#{session_id}"
-    )
+    Logger.info("Codex session started for #{issue_context(state.issue)} session_id=#{session_id}")
 
     emit(
       state.on_message,
@@ -682,12 +680,10 @@ defmodule SymphonyElixir.Codex.Adapter do
           {:ok, canonical_workspace}
 
         String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error,
-           {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
+          {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
         true ->
-          {:error,
-           {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
+          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
       end
     else
       {:error, {:path_canonicalize_failed, path, reason}} ->

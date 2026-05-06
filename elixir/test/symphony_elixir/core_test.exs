@@ -1450,6 +1450,7 @@ defmodule SymphonyElixir.CoreTest do
       refute String.contains?(argv_line, "app-server")
       refute Enum.any?(lines, &String.contains?(&1, "--yolo"))
       assert cwd_line = Enum.find(lines, fn line -> String.starts_with?(line, "CWD:") end)
+
       assert String.ends_with?(cwd_line, Path.basename(workspace)) ||
                String.ends_with?(cwd_line, Path.basename(canonical_workspace))
 
@@ -1500,8 +1501,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command:
-          "#{codex_binary} exec --json -c 'model=\"gpt-5.5\"' -c model_reasoning_effort=xhigh"
+        codex_command: "#{codex_binary} exec --json -c 'model=\"gpt-5.5\"' -c model_reasoning_effort=xhigh"
       )
 
       issue = %Issue{
@@ -1575,8 +1575,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command:
-          "#{codex_binary} exec --json -c 'approval_policy=\"never\"' -c 'sandbox_mode=\"workspace-write\"'"
+        codex_command: "#{codex_binary} exec --json -c 'approval_policy=\"never\"' -c 'sandbox_mode=\"workspace-write\"'"
       )
 
       issue = %Issue{
