@@ -13,6 +13,7 @@ defmodule SymphonyElixir.AgentRunner do
     AutoMerge,
     Config,
     CostMeter,
+    Finalizer,
     Monday.PRDetector,
     Monday.Workpad,
     Profile,
@@ -439,24 +440,34 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Dispatching agent run for #{issue_context(issue)} profile=#{profile.name} kind=#{profile.kind}")
 
         with {:ok, session} <- adapter.start_session(workspace, session_config) do
-          try do
-            do_run_agent_turns(
-              adapter,
-              profile,
-              session,
-              workspace,
-              issue,
-              codex_update_recipient,
-              opts,
-              issue_state_fetcher,
-              1,
-              max_turns,
-              writer_pid
-            )
-          after
-            record_native_tokens(adapter, session, profile, codex_update_recipient, issue)
-            adapter.stop_session(session)
-          end
+          result =
+            try do
+              do_run_agent_turns(
+                adapter,
+                profile,
+                session,
+                workspace,
+                issue,
+                codex_update_recipient,
+                opts,
+                issue_state_fetcher,
+                1,
+                max_turns,
+                writer_pid
+              )
+            after
+              record_native_tokens(adapter, session, profile, codex_update_recipient, issue)
+              adapter.stop_session(session)
+            end
+
+          # M-0c-D: after the codex agent run lands, run Symphony's
+          # finalizer to push + open the PR ourselves. Codex's sandbox +
+          # DNS path cannot be relied on (canary SYM-11684552415 ran 28
+          # sessions without ever pushing). We do this from the host
+          # Symphony process with the operator's `gh auth`.
+          _ = maybe_run_finalizer(profile, workspace, issue, result, codex_update_recipient)
+
+          result
         end
 
       {:error, _} = err ->
@@ -1336,4 +1347,110 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp trim_to_short_sha(""), do: "no-sha"
   defp trim_to_short_sha(sha) when is_binary(sha), do: sha
+
+  # M-0c-D: post-run shipping finalizer for codex profiles. Runs only when
+  # the agent run reached a natural conclusion (`:ok`) — never on errors,
+  # never on the crash path. Skipped for non-codex profiles; Claude/Gemini
+  # ship via their own adapter contracts. Result is logged and forwarded
+  # as a structured event to the orchestrator (codex_update_recipient).
+  defp maybe_run_finalizer(%Profile{kind: :codex}, workspace, issue, :ok, recipient) do
+    if terminal_issue_now?(issue_id(issue)) do
+      Logger.info("Symphony finalizer skipped for #{issue_context(issue)} (issue is terminal)")
+      :skipped
+    else
+      input = %{
+        workspace: workspace,
+        issue_id: issue_id(issue),
+        issue_identifier: issue_identifier(issue),
+        issue_title: issue_title(issue),
+        issue_description: issue_description(issue),
+        profile_kind: :codex,
+        profile_name: profile_name_for(issue),
+        base_branch: nil
+      }
+
+      result = Finalizer.finalize(input)
+
+      Logger.info("Symphony finalizer result for #{issue_context(issue)} -> #{inspect(result)}")
+
+      notify_finalizer_result(recipient, issue_id(issue), result)
+      result
+    end
+  end
+
+  defp maybe_run_finalizer(%Profile{kind: :codex}, _workspace, issue, {:error, reason}, _recipient) do
+    Logger.info("Symphony finalizer skipped for #{issue_context(issue)} (agent run errored: #{inspect(reason)})")
+    :skipped
+  end
+
+  defp maybe_run_finalizer(%Profile{kind: kind}, _workspace, _issue, _result, _recipient)
+       when kind in [:claude, :gemini] do
+    :skipped
+  end
+
+  defp maybe_run_finalizer(_profile, _workspace, _issue, _result, _recipient), do: :skipped
+
+  defp issue_title(%Issue{title: title}), do: title
+  defp issue_title(%{title: title}), do: title
+  defp issue_title(_), do: nil
+
+  defp issue_description(%Issue{description: description}), do: description
+  defp issue_description(%{description: description}), do: description
+  defp issue_description(_), do: nil
+
+  defp profile_name_for(%Issue{profile: name}) when is_binary(name) and name != "", do: name
+  defp profile_name_for(%{profile: name}) when is_binary(name) and name != "", do: name
+  defp profile_name_for(_), do: "(unknown profile)"
+
+  defp notify_finalizer_result(nil, _issue_id, _result), do: :ok
+
+  defp notify_finalizer_result(recipient, issue_id, result) when is_pid(recipient) do
+    if Process.alive?(recipient) do
+      send(recipient, {:finalizer_result, issue_id, result})
+    end
+
+    :ok
+  end
+
+  defp notify_finalizer_result(_, _, _), do: :ok
+
+  # Codex review block: skip finalizer when the issue has been moved to a
+  # terminal state (e.g., the operator flipped the Monday item to Cancelled
+  # mid-run). M-0c-D spec DL-004 requires this — without the guard, the
+  # finalizer would push + open a PR for an item the operator already
+  # cancelled.
+  defp terminal_issue_now?(issue_id) when is_binary(issue_id) and issue_id != "" do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, states} ->
+        states
+        |> Enum.find_value(false, fn
+          %Issue{id: ^issue_id, state: state_name} when is_binary(state_name) ->
+            terminal_state_name?(state_name)
+
+          %{id: ^issue_id, state: state_name} when is_binary(state_name) ->
+            terminal_state_name?(state_name)
+
+          _ ->
+            false
+        end)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp terminal_issue_now?(_), do: false
+
+  defp terminal_state_name?(state_name) when is_binary(state_name) do
+    normalized = normalize_issue_state(state_name)
+
+    Config.settings!().tracker.terminal_states
+    |> Enum.any?(fn state -> normalize_issue_state(state) == normalized end)
+  end
+
+  defp terminal_state_name?(_), do: false
 end
