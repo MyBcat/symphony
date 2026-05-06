@@ -690,7 +690,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert String.contains?(workpad_body, "(truncated)")
     end
 
-    test "on abnormal exit, writes workpad crash render and update_issue_state :Cancelled",
+    test "on abnormal exit, transitions to Cancelled WITHOUT writing a per-crash workpad (M-4b)",
          %{issue: issue, writer_pid: writer_pid} do
       reason = {:port_exit, 137}
 
@@ -698,16 +698,16 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       events = MemoryMonday.events()
 
-      assert Enum.any?(events, fn
-               {:workpad_write, "11923258050", body} ->
-                 String.contains?(body, "Symphony Workpad") and
-                   String.contains?(body, "Crashed") and
-                   String.contains?(body, "port_exit")
-
-               _ ->
-                 false
+      # M-4b: per-crash Workpad write removed. Failure history is captured via
+      # emit_failure_update_via_writer/4 (called BEFORE finalize_crash by
+      # every call site), and the orchestrator emits ONE consolidated
+      # `## Symphony Run Summary` Workpad on retry-cap hit (per M-4a). All
+      # finalize_crash/3 still owns is the Cancelled status transition.
+      refute Enum.any?(events, fn
+               {:workpad_write, "11923258050", _body} -> true
+               _ -> false
              end),
-             "expected workpad write with crash render; got events=#{inspect(events)}"
+             "expected NO workpad write from finalize_crash; got events=#{inspect(events)}"
 
       assert Enum.any?(events, fn
                {:status_write, "11923258050", "Cancelled"} -> true
