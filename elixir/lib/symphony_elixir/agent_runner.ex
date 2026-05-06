@@ -888,18 +888,25 @@ defmodule SymphonyElixir.AgentRunner do
   def observe_codex_message(_writer_pid, _issue, _message), do: :ok
 
   @doc """
-  Render and write the crash workpad + status when the agent run errored or
-  raised. Used both by the inline crash trap and tests.
+  Mark the issue Cancelled when the agent run errored or raised.
+
+  Failure details must already have been sent via `emit_failure_update_via_writer/4`;
+  the orchestrator owns the consolidated retry-cap update.
   """
   @spec finalize_crash(pid(), map(), term()) :: :ok
-  def finalize_crash(writer_pid, issue, reason) when is_pid(writer_pid) do
+  def finalize_crash(writer_pid, issue, _reason) when is_pid(writer_pid) do
+    # M-4b Codex-review fix on top of M-4a: the per-crash `## Symphony
+    # Workpad` write here was duplicating updates with the orchestrator's
+    # consolidated retry-cap summary. Every call site already invokes
+    # `emit_failure_update_via_writer/4` BEFORE `finalize_crash/3`, so the
+    # failure is already recorded in the orchestrator's per-issue history.
+    # The orchestrator emits ONE consolidated `## Symphony Run Summary` on
+    # retry-cap hit (per M-4a). All this function still owns is the
+    # Cancelled status transition for the immediate-terminal-crash path.
     if Process.alive?(writer_pid) do
-      session = Agent.get(writer_pid, fn state -> state.session end)
       issue_id = issue_id(issue)
 
       if is_binary(issue_id) do
-        body = Workpad.render_crash(session, inspect(reason))
-        _ = Tracker.upsert_workpad(issue_id, body)
         _ = Tracker.update_issue_state(issue_id, "Cancelled")
       end
     end
