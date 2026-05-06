@@ -291,11 +291,12 @@ defmodule SymphonyElixir.E2E.Harness do
   end
 
   defp poll_until_done(deps, item, deadline_ms, interval_ms, runner_task, last) do
-    case Task.yield(runner_task, 0) do
+    # Task.yield doubles as the inter-poll sleep; never spin without yielding.
+    case Task.yield(runner_task, interval_ms) do
       {:ok, runner_result} ->
         finalize_runner_result(runner_result, last)
 
-      nil ->
+      _nil_or_exit ->
         case maybe_check_item(deps, item, last) do
           {:complete, observed} ->
             shutdown_runner_task(runner_task)
@@ -304,20 +305,17 @@ defmodule SymphonyElixir.E2E.Harness do
           {:continue, observed} ->
             now = deps.monotonic_now_ms.()
 
-            cond do
-              now >= deadline_ms ->
-                shutdown_runner_task(runner_task)
+            if now >= deadline_ms do
+              shutdown_runner_task(runner_task)
 
-                %{
-                  final_state: observed.final_state,
-                  pr_url: observed.pr_url,
-                  runner_reason: :timeout,
-                  log_tail: ""
-                }
-
-              true ->
-                deps.sleeper.(min(interval_ms, max(deadline_ms - now, 0)))
-                poll_until_done(deps, item, deadline_ms, interval_ms, runner_task, observed)
+              %{
+                final_state: observed.final_state,
+                pr_url: observed.pr_url,
+                runner_reason: :timeout,
+                log_tail: ""
+              }
+            else
+              poll_until_done(deps, item, deadline_ms, interval_ms, runner_task, observed)
             end
         end
     end
