@@ -1354,23 +1354,28 @@ defmodule SymphonyElixir.AgentRunner do
   # ship via their own adapter contracts. Result is logged and forwarded
   # as a structured event to the orchestrator (codex_update_recipient).
   defp maybe_run_finalizer(%Profile{kind: :codex}, workspace, issue, :ok, recipient) do
-    input = %{
-      workspace: workspace,
-      issue_id: issue_id(issue),
-      issue_identifier: issue_identifier(issue),
-      issue_title: issue_title(issue),
-      issue_description: issue_description(issue),
-      profile_kind: :codex,
-      profile_name: profile_name_for(issue),
-      base_branch: nil
-    }
+    if terminal_issue_now?(issue_id(issue)) do
+      Logger.info("Symphony finalizer skipped for #{issue_context(issue)} (issue is terminal)")
+      :skipped
+    else
+      input = %{
+        workspace: workspace,
+        issue_id: issue_id(issue),
+        issue_identifier: issue_identifier(issue),
+        issue_title: issue_title(issue),
+        issue_description: issue_description(issue),
+        profile_kind: :codex,
+        profile_name: profile_name_for(issue),
+        base_branch: nil
+      }
 
-    result = Finalizer.finalize(input)
+      result = Finalizer.finalize(input)
 
-    Logger.info("Symphony finalizer result for #{issue_context(issue)} -> #{inspect(result)}")
+      Logger.info("Symphony finalizer result for #{issue_context(issue)} -> #{inspect(result)}")
 
-    notify_finalizer_result(recipient, issue_id(issue), result)
-    result
+      notify_finalizer_result(recipient, issue_id(issue), result)
+      result
+    end
   end
 
   defp maybe_run_finalizer(%Profile{kind: :codex}, _workspace, issue, {:error, reason}, _recipient) do
@@ -1408,4 +1413,44 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp notify_finalizer_result(_, _, _), do: :ok
+
+  # Codex review block: skip finalizer when the issue has been moved to a
+  # terminal state (e.g., the operator flipped the Monday item to Cancelled
+  # mid-run). M-0c-D spec DL-004 requires this — without the guard, the
+  # finalizer would push + open a PR for an item the operator already
+  # cancelled.
+  defp terminal_issue_now?(issue_id) when is_binary(issue_id) and issue_id != "" do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, states} ->
+        states
+        |> Enum.find_value(false, fn
+          %Issue{id: ^issue_id, state: state_name} when is_binary(state_name) ->
+            terminal_state_name?(state_name)
+
+          %{id: ^issue_id, state: state_name} when is_binary(state_name) ->
+            terminal_state_name?(state_name)
+
+          _ ->
+            false
+        end)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp terminal_issue_now?(_), do: false
+
+  defp terminal_state_name?(state_name) when is_binary(state_name) do
+    normalized = normalize_issue_state(state_name)
+
+    Config.settings!().tracker.terminal_states
+    |> Enum.any?(fn state -> normalize_issue_state(state) == normalized end)
+  end
+
+  defp terminal_state_name?(_), do: false
 end
