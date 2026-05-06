@@ -20,44 +20,34 @@ defmodule SymphonyElixir.HttpServer do
   def start_link(opts \\ []) do
     case Keyword.get(opts, :port, Config.server_port()) do
       port when is_integer(port) and port >= 0 ->
+        host = Keyword.get(opts, :host, Config.settings!().server.host)
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
-        # Localhost binding is hard-coded per HIPAA constraint — agent stderr must
-        # never be exposed externally via the dashboard.
-        config_host =
-          try do
-            Config.settings!().server.host
-          rescue
-            _ -> nil
-          end
+        # M-2 PHI/HIPAA hardening: allowlist loopback only. PHI can leak via
+        # the /failures dashboard; binding to anything but loopback exposes
+        # it to the network. Validated against the resolved IP, not the
+        # input string, so "localhost" → 127.0.0.1 is accepted but "0.0.0.0"
+        # or any public IP is refused.
+        with {:ok, ip} <- parse_host(host),
+             :ok <- assert_loopback!(ip, host) do
+          endpoint_opts = [
+            server: true,
+            http: [ip: ip, port: port],
+            url: [host: normalize_host(host)],
+            orchestrator: orchestrator,
+            snapshot_timeout_ms: snapshot_timeout_ms,
+            secret_key_base: secret_key_base()
+          ]
 
-        effective_host = Keyword.get(opts, :host) || config_host
+          endpoint_config =
+            :symphony_elixir
+            |> Application.get_env(Endpoint, [])
+            |> Keyword.merge(endpoint_opts)
 
-        if effective_host in ["0.0.0.0", "[::]", "::"] do
-          raise RuntimeError,
-                "Symphony dashboard MUST NOT bind to #{effective_host} (HIPAA — agent stderr can leak via dashboard if exposed). " <>
-                  "Localhost binding is non-negotiable."
+          Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
+          Endpoint.start_link()
         end
-
-        ip = {127, 0, 0, 1}
-
-        endpoint_opts = [
-          server: true,
-          http: [ip: ip, port: port],
-          url: [host: "127.0.0.1"],
-          orchestrator: orchestrator,
-          snapshot_timeout_ms: snapshot_timeout_ms,
-          secret_key_base: secret_key_base()
-        ]
-
-        endpoint_config =
-          :symphony_elixir
-          |> Application.get_env(Endpoint, [])
-          |> Keyword.merge(endpoint_opts)
-
-        Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
-        Endpoint.start_link()
 
       _ ->
         :ignore
@@ -75,6 +65,39 @@ defmodule SymphonyElixir.HttpServer do
   catch
     :exit, _reason -> nil
   end
+
+  defp parse_host({_, _, _, _} = ip), do: {:ok, ip}
+  defp parse_host({_, _, _, _, _, _, _, _} = ip), do: {:ok, ip}
+
+  defp parse_host(host) when is_binary(host) do
+    charhost = String.to_charlist(host)
+
+    case :inet.parse_address(charhost) do
+      {:ok, ip} ->
+        {:ok, ip}
+
+      {:error, _reason} ->
+        case :inet.getaddr(charhost, :inet) do
+          {:ok, ip} -> {:ok, ip}
+          {:error, _reason} -> :inet.getaddr(charhost, :inet6)
+        end
+    end
+  end
+
+  defp assert_loopback!(ip, host) do
+    cond do
+      ip == {127, 0, 0, 1} -> :ok
+      ip == {0, 0, 0, 0, 0, 0, 0, 1} -> :ok
+      true ->
+        raise "M-2 dashboard refusing to bind: #{inspect(host)} resolves to #{:inet.ntoa(ip)}, " <>
+                "but only loopback (127.0.0.1, ::1, localhost) is allowed. PHI in /failures " <>
+                "must never leave the host."
+    end
+  end
+
+  defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"
+  defp normalize_host(host) when is_binary(host), do: host
+  defp normalize_host(host), do: to_string(host)
 
   defp secret_key_base do
     Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)

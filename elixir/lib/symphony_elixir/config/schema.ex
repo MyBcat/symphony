@@ -429,14 +429,16 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:enabled, :boolean, default: true)
-      field(:port, :integer)
+      field(:port, :integer, default: 4000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, [:enabled, :port], empty_values: [])
-      |> validate_number(:port, greater_than: 0)
+      # M-2 hardening: restrict to valid unprivileged port range. Below 1024
+      # would require root; above 65535 is invalid.
+      |> validate_number(:port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65535)
     end
   end
 

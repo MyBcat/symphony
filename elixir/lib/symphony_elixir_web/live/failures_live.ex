@@ -92,7 +92,10 @@ defmodule SymphonyElixirWeb.FailuresLive do
   end
 
   defp build_failure_entry(entry) do
-    error = entry.error || ""
+    # M-2 PHI/secret scrub: stderr can contain Bearer tokens, /home/ paths, or PHI from the
+    # agent's runtime. Apply the M-5 Secrets.Scrubber before tailing so /failures
+    # never renders raw error text in the dashboard.
+    error = SymphonyElixir.Secrets.Scrubber.scrub(entry.error || "")
     lines = error |> String.split("\n") |> Enum.take(-@max_stderr_lines) |> Enum.join("\n")
     exit_code = extract_exit_code(error)
 
