@@ -6,8 +6,7 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
 
   describe "parse_ref/1" do
     test "accepts <SECRET_ID>:<ENV_VAR> shape" do
-      assert {:ok,
-              %{env: "HUBSPOT_TOKEN", secret_id: "mybcat/integrations/hubspot", field: nil}} =
+      assert {:ok, %{env: "HUBSPOT_TOKEN", secret_id: "mybcat/integrations/hubspot", field: nil}} =
                Resolver.parse_ref("mybcat/integrations/hubspot:HUBSPOT_TOKEN")
     end
 
@@ -114,6 +113,7 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
 
       on_exit(fn ->
         File.rm(manifest_path)
+
         if previous, do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
           else: System.delete_env("SYMPHONY_FAKE_SECRETS_PATH")
       end)
@@ -190,9 +190,7 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
     test "fails fast on malformed reference and never invokes secret_exec.py" do
       workspace = make_workspace!()
 
-      assert {:error,
-              {:secret_resolution_failed, "demo-repo",
-               {:invalid_secret_ref, "no-colon-here", _}}} =
+      assert {:error, {:secret_resolution_failed, "demo-repo", {:invalid_secret_ref, "no-colon-here", _}}} =
                Resolver.write_env_file(
                  ["no-colon-here"],
                  workspace,
@@ -206,8 +204,7 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
     test "fails when secret_exec_path does not exist" do
       workspace = make_workspace!()
 
-      assert {:error,
-              {:secret_resolution_failed, "demo-repo", {:secret_exec_path_missing, _path}}} =
+      assert {:error, {:secret_resolution_failed, "demo-repo", {:secret_exec_path_missing, _path}}} =
                Resolver.write_env_file(
                  ["mybcat/integrations/hubspot:HUBSPOT_TOKEN"],
                  workspace,
@@ -257,6 +254,7 @@ defmodule SymphonyElixir.Secrets.ResolverTest do
 
       on_exit(fn ->
         File.rm(manifest_path)
+
         if previous, do: System.put_env("SYMPHONY_FAKE_SECRETS_PATH", previous),
           else: System.delete_env("SYMPHONY_FAKE_SECRETS_PATH")
       end)

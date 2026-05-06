@@ -692,9 +692,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{state | outage_failure_count: next_count}
 
       true ->
-        Logger.warning(
-          "Symphony tracker: 5xx/timeout failure ##{next_count} (threshold=#{threshold}; latest reason=#{inspect(reason)})"
-        )
+        Logger.warning("Symphony tracker: 5xx/timeout failure ##{next_count} (threshold=#{threshold}; latest reason=#{inspect(reason)})")
 
         %{state | outage_failure_count: next_count}
     end

@@ -364,15 +364,15 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow)
          ] ++
            cost_line_lines() ++
-         [
-           colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
-           project_link_lines,
-           project_refresh_line,
-           colorize("├─ Running", @ansi_bold),
-           "│",
-           running_table_header_row(running_event_width),
-           running_table_separator_row(running_event_width)
-         ] ++
+           [
+             colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+             project_link_lines,
+             project_refresh_line,
+             colorize("├─ Running", @ansi_bold),
+             "│",
+             running_table_header_row(running_event_width),
+             running_table_separator_row(running_event_width)
+           ] ++
            running_rows ++
            running_to_backoff_spacer ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++

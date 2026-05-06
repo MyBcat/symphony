@@ -96,12 +96,14 @@ defmodule SymphonyElixir.Heartbeat do
   status dashboard. Returns `nil` when no Heartbeat process is registered
   under `server`.
   """
-  @spec snapshot(GenServer.server()) :: %{
-          ttl_ms: pos_integer(),
-          last_success_at_ms: integer(),
-          degraded?: boolean(),
-          consecutive_failures: non_neg_integer()
-        } | nil
+  @spec snapshot(GenServer.server()) ::
+          %{
+            ttl_ms: pos_integer(),
+            last_success_at_ms: integer(),
+            degraded?: boolean(),
+            consecutive_failures: non_neg_integer()
+          }
+          | nil
   def snapshot(server \\ __MODULE__) do
     case resolve_server(server) do
       nil -> nil

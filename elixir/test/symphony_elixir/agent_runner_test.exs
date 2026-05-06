@@ -936,11 +936,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
           send(self(), {:recording_event, %{kind: :stalled}})
         end
 
-        send(
-          self(),
-          {:recording_event,
-           %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}}
-        )
+        send(self(), {:recording_event, %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}})
 
         :ok
       end
@@ -1090,8 +1086,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
       AgentRunner.run(issue, self(), max_turns: 1)
 
-      assert_received {:agent_native_tokens, "issue-tokens-1",
-                       %{"claude" => %{input: 10, output: 5, total: 15}}}
+      assert_received {:agent_native_tokens, "issue-tokens-1", %{"claude" => %{input: 10, output: 5, total: 15}}}
     end
 
     test "cost-cap refusal posts workpad, skips adapter dispatch, and exits with backoff reason" do
@@ -1382,9 +1377,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
         try do
           assert :ok =
-                   SymphonyElixir.Codex.Adapter.send_turn(session, "Use profile config",
-                     issue: issue
-                   )
+                   SymphonyElixir.Codex.Adapter.send_turn(session, "Use profile config", issue: issue)
 
           assert %{input: 7, output: 3, total: 10} =
                    SymphonyElixir.Codex.Adapter.runtime_native_tokens(session)
