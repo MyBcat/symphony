@@ -528,7 +528,11 @@ defmodule SymphonyElixir.AgentRunner do
          max_turns,
          writer_pid
        ) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    # M-0b: thread profile.kind into the prompt builder so the WORKFLOW.md
+    # template can branch on `{% if profile_kind == "codex" %}` for
+    # codex-specific git/gh scaffolding.
+    prompt_opts = Keyword.put(opts, :profile_kind, profile.kind)
+    prompt = build_turn_prompt(issue, prompt_opts, turn_number, max_turns)
     handler = codex_message_handler(codex_update_recipient, issue, writer_pid, profile)
 
     case run_single_turn(adapter, profile, app_session, prompt, issue, handler) do

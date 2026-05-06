@@ -233,16 +233,45 @@ defmodule SymphonyElixir.Workspace do
   defp run_clone(workspace, clone_url, default_branch, issue_context, worker_host)
        when is_binary(clone_url) do
     branch_arg = if is_binary(default_branch) and default_branch != "", do: " --branch #{default_branch}", else: ""
+    identifier = Map.get(issue_context, :issue_identifier)
+    work_branch = work_branch_for(identifier)
+
+    # M-0b: pre-create the per-issue work branch on clone so the agent doesn't
+    # have to `git checkout -b` itself. Codex's exec mode is more
+    # autonomous-tool-call-driven and frequently skips branch checkout, leaving
+    # the workspace on `main` and producing commits that get refused by M-8 PR
+    # safety. Pre-creating + checking out leaves HEAD on the work branch.
+    # Identity also configured here so commit/push works without further setup.
+    branch_setup =
+      if work_branch do
+        """
+        git checkout -B #{work_branch}
+        git config user.email "symphony-agent@mybcat.com"
+        git config user.name "Symphony Agent"
+        """
+      else
+        ""
+      end
 
     command = """
     set -e
     git clone --depth 1 --no-recurse-submodules#{branch_arg} #{clone_url} .
+    #{branch_setup}
     """
 
-    Logger.info("Symphony cloning repo for #{Map.get(issue_context, :issue_identifier)} from #{clone_url}#{branch_arg}")
+    Logger.info("Symphony cloning repo for #{identifier} from #{clone_url}#{branch_arg}; work_branch=#{inspect(work_branch)}")
 
     run_hook(command, workspace, issue_context, "clone", worker_host)
   end
+
+  # Symphony per-issue work branch convention is `symphony/<identifier>/attempt-1`
+  # (per Spec 4 §2.8 / M-8 PR safety). Idempotent across retries via
+  # `git checkout -B`. Returns nil for issues without an identifier.
+  defp work_branch_for(identifier) when is_binary(identifier) and identifier != "" do
+    "symphony/#{identifier}/attempt-1"
+  end
+
+  defp work_branch_for(_), do: nil
 
   defp run_clone(_workspace, _clone_url, _default_branch, issue_context, _worker_host) do
     {:error, {:no_clone_url, Map.get(issue_context, :issue_identifier)}}

@@ -405,6 +405,26 @@ This is an unattended orchestration session. Never ask a human to perform follow
 
 Work only in the provided repository copy. Do not touch any other path.
 
+{% if profile_kind == "codex" %}
+**Codex runtime — scaffolded checklist.**
+
+Symphony pre-created the work branch `symphony/{{ issue.identifier }}/attempt-1` for you. HEAD is already on it; you do NOT need `git checkout -b`. Identity is also pre-configured (`user.email`, `user.name`).
+
+You MUST execute every command below verbatim, in order. Do NOT skip a step. Do NOT improvise the order.
+
+Required end-of-run command sequence (after the work in Phases 1–3 below is done):
+
+- `git status` — verify your changes are present
+- `git add -A` — stage everything
+- `git commit -m "feat({{ issue.identifier }}): <one-line summary>"` — commit
+- `git push -u origin symphony/{{ issue.identifier }}/attempt-1` — push to origin
+- `gh pr view --json nameWithOwner` — confirm the repo name
+- `gh pr create --base main --head symphony/{{ issue.identifier }}/attempt-1 --title "..." --body "..."` — open the PR
+- `cat > _symphony_summary.md` — write the summary file with the PR URL
+
+The PR URL printed by `gh pr create` is what Symphony detects. Make sure the URL is in your stdout output verbatim. Do NOT paste any other GitHub PR URL — Symphony will refuse it via M-8 PR safety branch policy.
+{% endif %}
+
 ## Phase 1 — PLAN (always do this first)
 
 Before changing any code:
