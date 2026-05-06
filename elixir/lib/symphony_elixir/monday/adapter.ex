@@ -178,7 +178,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   @impl true
   def fetch_candidate_issues_with_phi_findings, do: fetch_candidate_issues_with_phi_findings([])
 
-  @spec fetch_candidate_issues_with_phi_findings(keyword()) :: {:ok, fetch_with_phi_result()} | {:error, term()}
+  @spec fetch_candidate_issues_with_phi_findings(keyword()) :: {:ok, SymphonyElixir.Tracker.fetch_with_phi_result()} | {:error, term()}
   def fetch_candidate_issues_with_phi_findings(opts) do
     cfg = tracker_config()
     eligible_states = cfg.active_states ++ cfg.handoff_states
