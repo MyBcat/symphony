@@ -111,5 +111,5 @@ all landed exactly as specified.
 
 ## PR
 
-Branch: `symphony/SYM-11941611091/attempt-1`. PR URL is in the
-following section once `gh pr create` runs.
+Branch: `symphony/SYM-11941611091/attempt-1`.
+PR URL: https://github.com/MyBcat/symphony/pull/28
