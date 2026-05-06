@@ -1,56 +1,43 @@
-# Symphony Summary — SYM-11923088195
+# Symphony Summary — SYM-11942134820
 
-**Task:** [Symphony M-2] Web dashboard (Phoenix LiveView, localhost:4000)
+**Task:** [Symphony M-4a] Consolidate failure updates — one final summary + enforce retry cap
 
-**Branch:** `symphony/SYM-11923088195/attempt-1`
+**Branch:** `symphony/SYM-11942134820/attempt-1`
 
-**Status:** Complete — PR open (#26), awaiting /codex:rescue before merge
+**PR:** https://github.com/MyBcat/symphony/pull/29
 
-**PR:** https://github.com/MyBcat/symphony/pull/26
-
----
-
-## What was built
-
-Added a Phoenix LiveView observability dashboard to the existing OTP app with three pages:
-
-- **`/agents`** — Live agent session list: ID, repo, profile, age/turns, tokens, last event. Auto-refreshes via PubSub + 1s runtime tick.
-- **`/failures`** — Last 50 failed/retrying sessions with exit code extraction and stderr tail (last 20 lines).
-- **`/repos`** — Per-repo health derived from workspace_path grouping: running count, retrying count, last activity, health badge.
-
-Navigation bar (Overview / Agents / Failures / Repos) shared across all pages via the `:app` layout.
+**Status:** Open — awaiting `/codex:rescue` review per `.claude/CLAUDE.md`.
 
 ---
 
-## Files changed
+## What changed
 
-### New files
-- `elixir/lib/symphony_elixir_web/live/agents_live.ex`
-- `elixir/lib/symphony_elixir_web/live/failures_live.ex`
-- `elixir/lib/symphony_elixir_web/live/repos_live.ex`
-- `elixir/test/symphony_elixir_web/live/agents_live_test.exs`
-- `elixir/test/symphony_elixir_web/live/failures_live_test.exs`
-- `elixir/test/symphony_elixir_web/live/repos_live_test.exs`
+Replaced AgentRunner's per-attempt `## Symphony Failures` Monday Updates with a single consolidated Update the Orchestrator posts at retry-cap exhaustion. AgentRunner now sends a structured `{:agent_failure, issue_id, entry}` message to the orchestrator's recipient pid at every error site instead of writing to Monday on each retry. The orchestrator accumulates per-issue history (bounded by `tracker.failure_ttl_count`, default 5, FIFO-trimmed) and renders one consolidated body — header + per-attempt blocks (timestamp / profile / repo / reason / message / optional stderr tail) — at stranded TTL. Stalled-issue restarts (`reconcile_stalled_running_issues/1`) now flow through `record_dispatch_failure/3` so they count toward the cap; previously a repeatedly-hanging agent could be restarted forever.
 
-### Modified files
-- `elixir/lib/symphony_elixir/config/schema.ex` — Added `Schema.Dashboard` embedded schema (enabled, port)
-- `elixir/lib/symphony_elixir/config.ex` — `server_port/0` reads from `dashboard.port` when dashboard enabled
-- `elixir/lib/symphony_elixir/http_server.ex` — Hardcoded 127.0.0.1 binding; loudly rejects 0.0.0.0 opts
-- `elixir/lib/symphony_elixir/orchestrator.ex` — Snapshot includes `profile` and `repo` from `metadata.issue`
-- `elixir/lib/symphony_elixir_web/presenter.ex` — `running_entry_payload/1` includes `profile` and `repo`
-- `elixir/lib/symphony_elixir_web/components/layouts.ex` — Added nav bar with all page links
-- `elixir/lib/symphony_elixir_web/router.ex` — Added `/agents`, `/failures`, `/repos` LiveView routes
-- `elixir/mix.exs` — Added new LiveViews to `ignore_modules` coverage exclusions
-- `elixir/WORKFLOW.md` — Added `dashboard: {enabled: true, port: 4000}` config section
+## Plan vs reality
 
----
+The shipped diff matches `_symphony_plan.md`:
 
-## HIPAA constraint
+- Files touched are exactly the four identified in the plan plus `WORKFLOW.md`.
+- AgentRunner public surface (`emit_failure_update/4`, `emit_failure_update_via_writer/4`, `build_session/3` defaults) is preserved; `build_session/4` arity is added with a default-`nil` recipient so all existing call sites compile.
+- The consolidated body's header is unchanged (`Stranded after N consecutive failures: <reason>`) so the existing M-4 stranded-TTL test passes without modification.
+- One small extension over the plan: `restart_stalled_issue/5` appends a synthetic `:stalled` failure_history entry so the consolidated body still shows per-attempt detail when every attempt was a hang (the runner never reaches an `:agent_failure` send site, so without this the body would contain only the header).
+- `WORKFLOW.md` got a comment annotating the new dual role of `failure_ttl_count` (retry cap + history cap).
 
-Localhost binding is non-negotiable: `ip = {127, 0, 0, 1}` is hardcoded in `HttpServer.start_link/1`. The guard checks both `opts[:host]` and `Config.settings!().server.host`; either being `"0.0.0.0"`, `"[::]"`, or `"::"` raises `RuntimeError` at startup. Dead `parse_host/1` and `normalize_host/1` helpers were removed in a follow-up commit.
+## Test plan executed
 
----
+- New plan committed first to `_symphony_plan.md` and pushed before any code change (the "plan vs reality" contract).
+- Static review of all five files (agent_runner, orchestrator, both test files, WORKFLOW.md) for compilation issues, message ordering, and pattern-match coverage.
+- Updated existing M-4 tests in `agent_runner_test.exs` to the new contract (structured message + zero Monday writes) and added a dead/missing-recipient case.
+- Added four new orchestrator tests: single failure does NOT post a Monday Update, `:agent_failure` history is FIFO-capped at `failure_ttl_count`, stranded body lists every captured attempt, and stalled restarts contribute to the retry cap.
 
-## Data source
+## Open concerns / follow-ups
 
-All data flows from `SymphonyElixir.Orchestrator.snapshot/2` → `SymphonyElixirWeb.Presenter.state_payload/2` — no new external data sources or DB. Live updates via `SymphonyElixirWeb.ObservabilityPubSub` topic `"observability:dashboard"`.
+- **`mix test --no-start` was NOT run locally.** The agent sandbox lacks a usable Erlang/Elixir toolchain — `mise install` tried to compile OTP from source and there is no `gcc`/`cc` in-sandbox, and the host wrappers under `/var/run/host/usr/share/elixir/.../bin` shebang to `/usr/bin/elixir` which doesn't exist inside the sandbox. The implementation was static-reviewed against the existing M-4 contract; per `.claude/CLAUDE.md` the merge gate is `/codex:rescue` so logic regressions get caught there + on CI.
+- `:max_turns_exceeded` still does not increment the retry cap — current "continuation retry" semantics preserved (out of scope per the plan). Future work if operators want max_turns to also trip the cap.
+- `terminate_running_issue/3` intentionally does NOT clear `failure_counts` / `failure_history` — both are cleared only on spawn-success, completion, and stranded TTL. Stalled restart relies on this so the counter persists across iterations. If a future change wants to clear them on terminate, that would silently break the stalled-cap test.
+- The shipped consolidated body uses the "Attempt history:" prefix + `- attempt N: …` bullets. If operators want a more compact one-liner, that's a downstream rendering tweak, not a logic change.
+
+## PR URL
+
+https://github.com/MyBcat/symphony/pull/29
