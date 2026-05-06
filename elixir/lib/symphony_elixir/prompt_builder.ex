@@ -14,10 +14,18 @@ defmodule SymphonyElixir.PromptBuilder do
       |> prompt_template!()
       |> parse_template!()
 
+    # M-0b: expose profile_kind to the template so per-runtime sections
+    # (`{% if profile_kind == "codex" %}` blocks) can give codex a more
+    # explicit, scaffolded git/gh recipe than the prose Claude follows
+    # naturally. Defaults to nil when not provided, which Liquid treats as
+    # falsy.
+    profile_kind = Keyword.get(opts, :profile_kind)
+
     template
     |> Solid.render!(
       %{
         "attempt" => Keyword.get(opts, :attempt),
+        "profile_kind" => profile_kind && to_string(profile_kind),
         "issue" => issue |> Map.from_struct() |> to_solid_map()
       },
       @render_opts
