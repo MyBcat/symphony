@@ -316,9 +316,8 @@ defmodule SymphonyElixir.Config do
       true ->
         with :ok <- validate_clone_url(key, repo.clone_url, settings.repo_policy.allowed_clone_hosts),
              :ok <- validate_repo_hook(key, repo.after_create),
-             :ok <- validate_allowed_profiles(key, repo.allowed_profiles, settings.profiles),
-             :ok <- validate_repo_secrets(key, repo.secrets) do
-          :ok
+             :ok <- validate_allowed_profiles(key, repo.allowed_profiles, settings.profiles) do
+          validate_repo_secrets(key, repo.secrets)
         end
     end
   end
@@ -369,9 +368,8 @@ defmodule SymphonyElixir.Config do
   defp parse_clone_url(key, "git@" <> _ = clone_url, allowed_hosts) do
     case Regex.run(~r/\Agit@([^:\/\\]+):([^\/\\]+)\/([^\/\\]+)\z/, clone_url) do
       [_url, host, org, repo] ->
-        with :ok <- validate_clone_host(key, host, allowed_hosts),
-             :ok <- validate_clone_path_segments(key, [org, repo]) do
-          :ok
+        with :ok <- validate_clone_host(key, host, allowed_hosts) do
+          validate_clone_path_segments(key, [org, repo])
         end
 
       _ ->
@@ -394,9 +392,8 @@ defmodule SymphonyElixir.Config do
 
       true ->
         with :ok <- validate_clone_host(key, uri.host, allowed_hosts),
-             {:ok, segments} <- https_path_segments(key, uri.path),
-             :ok <- validate_clone_path_segments(key, segments) do
-          :ok
+             {:ok, segments} <- https_path_segments(key, uri.path) do
+          validate_clone_path_segments(key, segments)
         end
     end
   end
