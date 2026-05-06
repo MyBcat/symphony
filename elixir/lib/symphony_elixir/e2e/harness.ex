@@ -264,11 +264,7 @@ defmodule SymphonyElixir.E2E.Harness do
       if overall_status == :passed do
         :ok
       else
-        {:assertions_failed,
-         %{
-           runner: runner_reason,
-           assertions: assertions
-         }}
+        {:assertions_failed, %{runner: runner_reason, assertions: assertions}}
       end
 
     finalize(deps, item, identifier,

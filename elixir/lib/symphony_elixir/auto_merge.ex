@@ -75,8 +75,7 @@ defmodule SymphonyElixir.AutoMerge do
           required(:pr_url) => String.t(),
           required(:session) => Workpad.session(),
           optional(:repo_key) => String.t() | nil,
-          optional(:repo_entry) =>
-            SymphonyElixir.Config.Schema.RepoEntry.t() | nil,
+          optional(:repo_entry) => SymphonyElixir.Config.Schema.RepoEntry.t() | nil,
           optional(:workspace_path) => Path.t() | nil,
           optional(:base_branch) => String.t() | nil
         }

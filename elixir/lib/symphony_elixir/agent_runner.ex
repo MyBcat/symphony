@@ -75,9 +75,7 @@ defmodule SymphonyElixir.AgentRunner do
     worker_host =
       selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-    Logger.info(
-      "Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}"
-    )
+    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
@@ -98,9 +96,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-    Logger.info(
-      "Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}"
-    )
+    Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
@@ -157,9 +153,7 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:error, reason} ->
-          Logger.error(
-            "Profile resolution failed for #{issue_context(issue)}: #{inspect(reason)}"
-          )
+          Logger.error("Profile resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
 
           emit_profile_resolution_failure(writer_pid, issue, reason)
 
@@ -218,8 +212,7 @@ defmodule SymphonyElixir.AgentRunner do
   # `:profile_resolution_failed` so dashboard filters can still flag it.
   defp emit_profile_resolution_failure(writer_pid, issue, {:profile_not_allowed_on_repo, profile_name, repo_key} = reason) do
     emit_failure_update_via_writer(writer_pid, issue, :profile_not_allowed_on_repo,
-      message:
-        "profile=#{inspect(profile_name)} not in repos.#{inspect(repo_key)}.allowed_profiles; original=#{inspect(reason)}"
+      message: "profile=#{inspect(profile_name)} not in repos.#{inspect(repo_key)}.allowed_profiles; original=#{inspect(reason)}"
     )
   end
 
@@ -429,9 +422,7 @@ defmodule SymphonyElixir.AgentRunner do
         adapter = adapter_for_kind(profile.kind)
         session_config = build_session_config(profile, worker_host)
 
-        Logger.info(
-          "Dispatching agent run for #{issue_context(issue)} profile=#{profile.name} kind=#{profile.kind}"
-        )
+        Logger.info("Dispatching agent run for #{issue_context(issue)} profile=#{profile.name} kind=#{profile.kind}")
 
         with {:ok, session} <- adapter.start_session(workspace, session_config) do
           try do
@@ -493,9 +484,7 @@ defmodule SymphonyElixir.AgentRunner do
     {:cost_cap_exceeded, scope, current, cap, estimated} = refusal
     issue_id = issue_id(issue)
 
-    Logger.warning(
-      "Symphony cost cap exceeded for #{issue_context(issue)} profile=#{profile.name} scope=#{scope} current=$#{:erlang.float_to_binary(current * 1.0, decimals: 2)} cap=$#{:erlang.float_to_binary(cap * 1.0, decimals: 2)} estimated=$#{:erlang.float_to_binary(estimated * 1.0, decimals: 2)}"
-    )
+    Logger.warning("Symphony cost cap exceeded for #{issue_context(issue)} profile=#{profile.name} scope=#{scope} current=$#{:erlang.float_to_binary(current * 1.0, decimals: 2)} cap=$#{:erlang.float_to_binary(cap * 1.0, decimals: 2)} estimated=$#{:erlang.float_to_binary(estimated * 1.0, decimals: 2)}")
 
     if is_pid(writer_pid) and Process.alive?(writer_pid) and is_binary(issue_id) do
       try do
@@ -528,15 +517,11 @@ defmodule SymphonyElixir.AgentRunner do
 
     case run_single_turn(adapter, profile, app_session, prompt, issue, handler) do
       :ok ->
-        Logger.info(
-          "Completed agent run for #{issue_context(issue)} workspace=#{workspace} turn=#{turn_number}/#{max_turns}"
-        )
+        Logger.info("Completed agent run for #{issue_context(issue)} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
         case continue_with_issue?(issue, issue_state_fetcher) do
           {:continue, refreshed_issue} when turn_number < max_turns ->
-            Logger.info(
-              "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}"
-            )
+            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
             do_run_agent_turns(
               adapter,
@@ -553,13 +538,10 @@ defmodule SymphonyElixir.AgentRunner do
             )
 
           {:continue, refreshed_issue} ->
-            Logger.info(
-              "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator"
-            )
+            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
             emit_failure_update_via_writer(writer_pid, refreshed_issue, :max_turns_exceeded,
-              message:
-                "agent reached agent.max_turns=#{max_turns} for #{issue_context(refreshed_issue)} with issue still in active state #{inspect(refreshed_issue.state)}; orchestrator will requeue"
+              message: "agent reached agent.max_turns=#{max_turns} for #{issue_context(refreshed_issue)} with issue still in active state #{inspect(refreshed_issue.state)}; orchestrator will requeue"
             )
 
             :ok
@@ -946,9 +928,7 @@ defmodule SymphonyElixir.AgentRunner do
           # Logging the failure-of-the-failure-write is best-effort; the
           # disk log already captured the underlying error and we don't
           # want emit_failure_update/4 itself to crash the runner.
-          Logger.warning(
-            "Failed to post Monday failure update for issue_id=#{issue_id} reason=#{reason_atom}: #{inspect(reason)}"
-          )
+          Logger.warning("Failed to post Monday failure update for issue_id=#{issue_id} reason=#{reason_atom}: #{inspect(reason)}")
 
           :ok
       end
@@ -1035,9 +1015,7 @@ defmodule SymphonyElixir.AgentRunner do
           :ok
 
         {:error, reason} ->
-          Logger.warning(
-            "Failed to read #{@summary_filename} for issue_id=#{issue_id}: #{inspect(reason)}"
-          )
+          Logger.warning("Failed to read #{@summary_filename} for issue_id=#{issue_id}: #{inspect(reason)}")
 
           :ok
       end
@@ -1097,9 +1075,7 @@ defmodule SymphonyElixir.AgentRunner do
             spawn_auto_merge(writer_pid, issue_id, url)
           else
             {:error, reason} ->
-              Logger.warning(
-                "AutoMerge: skipping spawn because Tracker write failed; item still in prior state issue_id=#{issue_id} reason=#{inspect(reason)}"
-              )
+              Logger.warning("AutoMerge: skipping spawn because Tracker write failed; item still in prior state issue_id=#{issue_id} reason=#{inspect(reason)}")
           end
 
           :ok
@@ -1128,9 +1104,7 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       not is_pid(writer_pid) or not Process.alive?(writer_pid) ->
-        Logger.debug(
-          "AutoMerge: skipping spawn; writer_pid=#{inspect(writer_pid)} is not alive"
-        )
+        Logger.debug("AutoMerge: skipping spawn; writer_pid=#{inspect(writer_pid)} is not alive")
 
         :ok
 
@@ -1174,9 +1148,7 @@ defmodule SymphonyElixir.AgentRunner do
         AutoMerge.evaluate_human_review(ctx)
       catch
         kind, reason ->
-          Logger.warning(
-            "AutoMerge: evaluate_human_review crashed item_id=#{ctx.item_id} kind=#{inspect(kind)} reason=#{inspect(reason)}"
-          )
+          Logger.warning("AutoMerge: evaluate_human_review crashed item_id=#{ctx.item_id} kind=#{inspect(kind)} reason=#{inspect(reason)}")
       end
     end)
     |> case do
@@ -1184,9 +1156,7 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "AutoMerge: failed to spawn evaluate_human_review item_id=#{ctx.item_id} reason=#{inspect(reason)}"
-        )
+        Logger.warning("AutoMerge: failed to spawn evaluate_human_review item_id=#{ctx.item_id} reason=#{inspect(reason)}")
 
         :ok
     end

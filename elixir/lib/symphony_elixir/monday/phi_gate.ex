@@ -89,9 +89,7 @@ defmodule SymphonyElixir.Monday.PHIGate do
   """
   @spec warn(offender()) :: :ok
   def warn(offender) when is_map(offender) do
-    Logger.warning(
-      "Symphony PHI gate (warn mode) detected PHI in item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing without status change"
-    )
+    Logger.warning("Symphony PHI gate (warn mode) detected PHI in item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing without status change")
 
     :ok
   end

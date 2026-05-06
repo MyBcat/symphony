@@ -273,11 +273,7 @@ defmodule SymphonyElixir.E2E.HarnessTest do
           end,
           tracker: %{
             fetch_issue_state: fn _item_id ->
-              {:ok,
-               %{
-                 state: "Human Review",
-                 pr_url: "https://github.com/MyBcat/symphony/pull/42"
-               }}
+              {:ok, %{state: "Human Review", pr_url: "https://github.com/MyBcat/symphony/pull/42"}}
             end
           }
         })
@@ -360,8 +356,7 @@ defmodule SymphonyElixir.E2E.HarnessTest do
           symphony_runner: fn _opts -> Process.sleep(:infinity) end,
           tracker: %{
             fetch_issue_state: fn _item_id ->
-              {:ok,
-               %{state: "Human Review", pr_url: "https://github.com/x/y/pull/1"}}
+              {:ok, %{state: "Human Review", pr_url: "https://github.com/x/y/pull/1"}}
             end
           },
           workspace_branch_exists?: fn _path, _branch -> false end,

@@ -206,10 +206,7 @@ defmodule SymphonyElixir.CostMeter do
         {:error, reason} ->
           state = fail_closed_state()
 
-          Logger.warning(
-            "CostMeter: failed to load #{path()}: #{inspect(reason)}; " <>
-              "starting fail-closed at $#{format_usd(state.spend_usd)} today"
-          )
+          Logger.warning("CostMeter: failed to load #{path()}: #{inspect(reason)}; starting fail-closed at $#{format_usd(state.spend_usd)} today")
 
           persist(state)
           state
@@ -295,15 +292,11 @@ defmodule SymphonyElixir.CostMeter do
         # Fail-closed: missing cost config — refuse with estimated = cap so
         # the operator sees an estimate that trips the kill switch on
         # first encounter. Spec requirement: "treat its spend as MAX".
-        {:error,
-         {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap),
-          decimal_to_float(cap)}}
+        {:error, {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap), decimal_to_float(cap)}}
 
       %Decimal{} = estimated ->
         if Decimal.compare(Decimal.add(state.spend_usd, estimated), cap) == :gt do
-          {:error,
-           {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap),
-            decimal_to_float(estimated)}}
+          {:error, {:cost_cap_exceeded, :daily, decimal_to_float(state.spend_usd), decimal_to_float(cap), decimal_to_float(estimated)}}
         else
           :ok
         end
@@ -388,9 +381,7 @@ defmodule SymphonyElixir.CostMeter do
     if Date.compare(today, date) == :eq do
       state
     else
-      Logger.info(
-        "CostMeter: UTC day rollover from #{Date.to_iso8601(date)} to #{Date.to_iso8601(today)}; resetting spend to $0.00"
-      )
+      Logger.info("CostMeter: UTC day rollover from #{Date.to_iso8601(date)} to #{Date.to_iso8601(today)}; resetting spend to $0.00")
 
       new_state = %{state | date_utc: today, spend_usd: @zero}
       persist(new_state)

@@ -239,9 +239,7 @@ defmodule SymphonyElixir.Workspace do
     git clone --depth 1 --no-recurse-submodules#{branch_arg} #{clone_url} .
     """
 
-    Logger.info(
-      "Symphony cloning repo for #{Map.get(issue_context, :issue_identifier)} from #{clone_url}#{branch_arg}"
-    )
+    Logger.info("Symphony cloning repo for #{Map.get(issue_context, :issue_identifier)} from #{clone_url}#{branch_arg}")
 
     run_hook(command, workspace, issue_context, "clone", worker_host)
   end
@@ -303,9 +301,7 @@ defmodule SymphonyElixir.Workspace do
   defp write_repo_env_file(workspace, repo_key, secrets, issue_context) when is_list(secrets) do
     secret_exec_path = Config.secret_exec_path()
 
-    Logger.info(
-      "Symphony resolving #{length(secrets)} secret(s) for #{issue_log_context(issue_context)} repo=#{repo_key} env_names=#{Enum.join(SecretsResolver.declared_env_names(secrets), ",")}"
-    )
+    Logger.info("Symphony resolving #{length(secrets)} secret(s) for #{issue_log_context(issue_context)} repo=#{repo_key} env_names=#{Enum.join(SecretsResolver.declared_env_names(secrets), ",")}")
 
     case SecretsResolver.write_env_file(secrets, workspace,
            secret_exec_path: secret_exec_path,
@@ -315,16 +311,12 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       {:error, {:secret_resolution_failed, ^repo_key, reason}} ->
-        Logger.error(
-          "Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}"
-        )
+        Logger.error("Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}")
 
         {:error, {:secret_resolution_failed, repo_key, redact_reason(reason)}}
 
       {:error, reason} ->
-        Logger.error(
-          "Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}"
-        )
+        Logger.error("Symphony secret resolution failed #{issue_log_context(issue_context)} repo=#{repo_key} reason=#{inspect(redact_reason(reason))}")
 
         {:error, {:secret_resolution_failed, repo_key, redact_reason(reason)}}
     end
@@ -360,18 +352,12 @@ defmodule SymphonyElixir.Workspace do
         {:ok, normalize_after_create_command(command)}
 
       {:error, :no_default_repo} ->
-        Logger.error(
-          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
-            "Symphony Repo column empty AND hooks.after_create unset"
-        )
+        Logger.error("Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: Symphony Repo column empty AND hooks.after_create unset")
 
         {:error, {:no_default_repo, Map.get(issue_context, :issue_identifier)}}
 
       {:error, {:unknown_repo, repo_key}} ->
-        Logger.error(
-          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
-            "Symphony Repo \"#{repo_key}\" has no entry in WORKFLOW.md repos: map"
-        )
+        Logger.error("Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: Symphony Repo \"#{repo_key}\" has no entry in WORKFLOW.md repos: map")
 
         {:error, {:unknown_repo, repo_key}}
     end

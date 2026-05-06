@@ -123,21 +123,10 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
         max_wait_seconds: Keyword.get(opts, :max_wait_seconds, 600),
         poll_interval_ms: Keyword.get(opts, :poll_interval_ms, 5_000),
         non_synthetic_max: Keyword.get(opts, :non_synthetic_max, 5),
-        workspace_root:
-          opts
-          |> Keyword.get(:workspace_root, env_get.("SYMPHONY_E2E_WORKSPACE_ROOT"))
-          |> default_workspace_root(),
-        workflow_path:
-          opts
-          |> Keyword.get(:workflow_path, env_get.("SYMPHONY_E2E_WORKFLOW_PATH")),
-        symphony_binary:
-          opts
-          |> Keyword.get(:symphony_binary, env_get.("SYMPHONY_E2E_BINARY"))
-          |> default_symphony_binary(),
-        log_path:
-          opts
-          |> Keyword.get(:log_path, env_get.("SYMPHONY_E2E_LOG_PATH"))
-          |> default_log_path(deps),
+        workspace_root: opts |> Keyword.get(:workspace_root, env_get.("SYMPHONY_E2E_WORKSPACE_ROOT")) |> default_workspace_root(),
+        workflow_path: opts |> Keyword.get(:workflow_path, env_get.("SYMPHONY_E2E_WORKFLOW_PATH")),
+        symphony_binary: opts |> Keyword.get(:symphony_binary, env_get.("SYMPHONY_E2E_BINARY")) |> default_symphony_binary(),
+        log_path: opts |> Keyword.get(:log_path, env_get.("SYMPHONY_E2E_LOG_PATH")) |> default_log_path(deps),
         identifier_prefix: env_get.("SYMPHONY_E2E_IDENTIFIER_PREFIX") || "SYM",
         status_column_id: env_get.("SYMPHONY_E2E_STATUS_COLUMN_ID") || "color_mm30c3vb",
         pr_column_id: env_get.("SYMPHONY_E2E_PR_COLUMN_ID") || "link_mm30ak49",
@@ -255,11 +244,7 @@ defmodule Mix.Tasks.Symphony.E2eNightly do
         fetch_issue_state: fn item_id ->
           case tracker_module.fetch_issue_states_by_ids([item_id]) do
             {:ok, [issue]} ->
-              {:ok,
-               %{
-                 state: Map.get(issue, :state) || Map.get(issue, "state"),
-                 pr_url: Map.get(issue, :pr_url) || Map.get(issue, "pr_url")
-               }}
+              {:ok, %{state: Map.get(issue, :state) || Map.get(issue, "state"), pr_url: Map.get(issue, :pr_url) || Map.get(issue, "pr_url")}}
 
             {:ok, []} ->
               {:error, :item_not_found}

@@ -80,11 +80,7 @@ defmodule SymphonyElixir.ProfileResolver do
     label_set = MapSet.new(dropdown_labels)
     profile_set = MapSet.new(profile_names)
 
-    {:ok,
-     %{
-       missing_in_dropdown: profile_set |> MapSet.difference(label_set) |> Enum.sort(),
-       orphan_dropdown_labels: label_set |> MapSet.difference(profile_set) |> Enum.sort()
-     }}
+    {:ok, %{missing_in_dropdown: profile_set |> MapSet.difference(label_set) |> Enum.sort(), orphan_dropdown_labels: label_set |> MapSet.difference(profile_set) |> Enum.sort()}}
   end
 
   @doc """

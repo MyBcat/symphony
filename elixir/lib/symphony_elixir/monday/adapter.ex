@@ -297,19 +297,13 @@ defmodule SymphonyElixir.Monday.Adapter do
             {:ok, ids}
 
           missing ->
-            Logger.error(
-              "Monday status labels not found on column #{inspect(cfg.symphony_status_column_id)}: " <>
-                inspect(missing) <> "; refusing to run partial items_page filter"
-            )
+            Logger.error("Monday status labels not found on column #{inspect(cfg.symphony_status_column_id)}: " <> inspect(missing) <> "; refusing to run partial items_page filter")
 
             {:error, {:unknown_monday_status_labels, cfg.symphony_status_column_id, missing}}
         end
 
       {:error, reason} = err ->
-        Logger.error(
-          "Failed to fetch Monday status label IDs for column " <>
-            inspect(cfg.symphony_status_column_id) <> ": #{inspect(reason)}"
-        )
+        Logger.error("Failed to fetch Monday status label IDs for column " <> inspect(cfg.symphony_status_column_id) <> ": #{inspect(reason)}")
 
         err
     end
@@ -502,18 +496,12 @@ defmodule SymphonyElixir.Monday.Adapter do
         {:error, {:phi_detected, findings}} ->
           offender = build_phi_offender(raw_item, cfg, findings)
 
-          {:cont,
-           maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [
-             offender | offenders_acc
-           ])}
+          {:cont, maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [offender | offenders_acc])}
 
         {:error, {:phi_detector_failed, field}} ->
           offender = build_phi_detector_failure(raw_item, cfg, field)
 
-          {:cont,
-           maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [
-             offender | offenders_acc
-           ])}
+          {:cont, maybe_include_phi_item(raw_item, cfg, allowed_states, mode, items_acc, [offender | offenders_acc])}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
@@ -580,9 +568,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   end
 
   defp log_warn_refresh_offender(offender) do
-    Logger.warning(
-      "Symphony PHI gate (warn mode) detected PHI during item refresh identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing"
-    )
+    Logger.warning("Symphony PHI gate (warn mode) detected PHI during item refresh identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing")
   end
 
   defp phi_gate_mode do

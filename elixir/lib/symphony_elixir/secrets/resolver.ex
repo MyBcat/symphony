@@ -132,9 +132,7 @@ defmodule SymphonyElixir.Secrets.Resolver do
          {:ok, _output} <- run_writer(secret_exec, python, specs, env_file_path, opts),
          :ok <- File.chmod(env_file_path, 0o600),
          :ok <- verify_env_file(env_file_path, specs) do
-      Logger.info(
-        "Symphony secrets wrote #{@env_filename} repo=#{repo_key} count=#{length(specs)} path=#{env_file_path}"
-      )
+      Logger.info("Symphony secrets wrote #{@env_filename} repo=#{repo_key} count=#{length(specs)} path=#{env_file_path}")
 
       :ok
     else
@@ -377,16 +375,13 @@ defmodule SymphonyElixir.Secrets.Resolver do
         if output != "" do
           safe_output = redact_output(output, env_names_for_redaction(specs))
 
-          Logger.debug(
-            "secret_exec.py wrapper output (redacted): #{safe_output}"
-          )
+          Logger.debug("secret_exec.py wrapper output (redacted): #{safe_output}")
         end
 
         {:ok, output}
 
       {output, status} ->
-        {:error,
-         {:secret_resolution_failed, status, redact_output(output, env_names_for_redaction(specs))}}
+        {:error, {:secret_resolution_failed, status, redact_output(output, env_names_for_redaction(specs))}}
     end
   end
 

@@ -202,22 +202,12 @@ defmodule SymphonyElixir.Codex.Adapter do
 
         case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
           {:ok, result} ->
-            Logger.info(
-              "Codex session completed for #{issue_context(issue)} session_id=#{session_id}"
-            )
+            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+            {:ok, %{result: result, session_id: session_id, thread_id: thread_id, turn_id: turn_id}}
 
           {:error, reason} ->
-            Logger.warning(
-              "Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}"
-            )
+            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
             emit_message(
               on_message,
@@ -473,8 +463,7 @@ defmodule SymphonyElixir.Codex.Adapter do
           {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
         true ->
-          {:error,
-           {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
+          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
       end
     else
       {:error, {:path_canonicalize_failed, path, reason}} ->
@@ -580,11 +569,9 @@ defmodule SymphonyElixir.Codex.Adapter do
     with {:ok, legacy_policies} <- legacy_session_policies(workspace, worker_host) do
       {:ok,
        %{
-         approval_policy:
-           config_value(config, :approval_policy) || legacy_policies.approval_policy,
+         approval_policy: config_value(config, :approval_policy) || legacy_policies.approval_policy,
          thread_sandbox: config_value(config, :thread_sandbox) || legacy_policies.thread_sandbox,
-         turn_sandbox_policy:
-           config_value(config, :turn_sandbox_policy) || legacy_policies.turn_sandbox_policy
+         turn_sandbox_policy: config_value(config, :turn_sandbox_policy) || legacy_policies.turn_sandbox_policy
        }}
     end
   end
@@ -1221,8 +1208,7 @@ defmodule SymphonyElixir.Codex.Adapter do
       Enum.reduce_while(questions, %{}, fn question, acc ->
         case tool_request_user_input_question_id(question) do
           {:ok, question_id} ->
-            {:cont,
-             Map.put(acc, question_id, %{"answers" => [@non_interactive_tool_input_answer]})}
+            {:cont, Map.put(acc, question_id, %{"answers" => [@non_interactive_tool_input_answer]})}
 
           :error ->
             {:halt, :error}

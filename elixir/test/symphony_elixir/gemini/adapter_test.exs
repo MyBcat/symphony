@@ -60,8 +60,7 @@ defmodule SymphonyElixir.Gemini.AdapterTest do
 
     test "stream_events halts after emitting port exit" do
       config = %{
-        command:
-          "printf '%s\\n' '{\"type\":\"start\",\"session_id\":\"gem_stream\"}'; : --sandbox",
+        command: "printf '%s\\n' '{\"type\":\"start\",\"session_id\":\"gem_stream\"}'; : --sandbox",
         _safety_floor: %{"require_sandbox" => true, "forbid_yolo" => true}
       }
 

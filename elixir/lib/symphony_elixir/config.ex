@@ -188,12 +188,7 @@ defmodule SymphonyElixir.Config do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
              Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
-        {:ok,
-         %{
-           approval_policy: settings.codex.approval_policy,
-           thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
-         }}
+        {:ok, %{approval_policy: settings.codex.approval_policy, thread_sandbox: settings.codex.thread_sandbox, turn_sandbox_policy: turn_sandbox_policy}}
       end
     end
   end

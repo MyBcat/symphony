@@ -195,9 +195,7 @@ defmodule SymphonyElixir.Orchestrator do
           %{state | heartbeat_pid: pid}
 
         {:error, reason} ->
-          Logger.warning(
-            "Symphony heartbeat renewal loop failed to start (#{inspect(reason)}); orchestrator will run without heartbeat refresh until restart"
-          )
+          Logger.warning("Symphony heartbeat renewal loop failed to start (#{inspect(reason)}); orchestrator will run without heartbeat refresh until restart")
 
           state
       end
@@ -248,17 +246,13 @@ defmodule SymphonyElixir.Orchestrator do
           :warn ->
             Enum.each(offenders, &PHIGate.warn/1)
 
-            Logger.warning(
-              "Symphony PHI gate (warn mode) at boot: #{length(offenders)} item(s) have PHI findings; continuing"
-            )
+            Logger.warning("Symphony PHI gate (warn mode) at boot: #{length(offenders)} item(s) have PHI findings; continuing")
 
             :ok
         end
 
       {:error, reason} ->
-        Logger.warning(
-          "Symphony PHI boot scan failed (#{inspect(reason)}); continuing — first poll tick will retry"
-        )
+        Logger.warning("Symphony PHI boot scan failed (#{inspect(reason)}); continuing — first poll tick will retry")
 
         :ok
     end
@@ -381,9 +375,7 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             {:shutdown, :cost_cap_exceeded} ->
-              Logger.warning(
-                "Agent task refused by cost cap for issue_id=#{issue_id} session_id=#{session_id}; scheduling cost-cap backoff"
-              )
+              Logger.warning("Agent task refused by cost cap for issue_id=#{issue_id} session_id=#{session_id}; scheduling cost-cap backoff")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -677,9 +669,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_tracker_success(%State{outage_active?: true} = state) do
-    Logger.warning(
-      "Symphony tracker: outage exit (Tracker.fetch returned 200 after #{state.outage_failure_count} consecutive 5xx/timeout failures); resuming normal polling"
-    )
+    Logger.warning("Symphony tracker: outage exit (Tracker.fetch returned 200 after #{state.outage_failure_count} consecutive 5xx/timeout failures); resuming normal polling")
 
     %{state | outage_failure_count: 0, outage_active?: false}
   end
@@ -690,23 +680,17 @@ defmodule SymphonyElixir.Orchestrator do
 
     cond do
       not state.outage_active? and next_count >= threshold ->
-        Logger.error(
-          "Symphony tracker: outage entry (#{next_count} consecutive 5xx/timeout responses; latest reason=#{inspect(reason)}); continuing with last-known item set, no new dispatches until recovery"
-        )
+        Logger.error("Symphony tracker: outage entry (#{next_count} consecutive 5xx/timeout responses; latest reason=#{inspect(reason)}); continuing with last-known item set, no new dispatches until recovery")
 
         %{state | outage_failure_count: next_count, outage_active?: true}
 
       state.outage_active? ->
-        Logger.debug(
-          "Symphony tracker: still in outage (#{next_count} consecutive failures; latest reason=#{inspect(reason)})"
-        )
+        Logger.debug("Symphony tracker: still in outage (#{next_count} consecutive failures; latest reason=#{inspect(reason)})")
 
         %{state | outage_failure_count: next_count}
 
       true ->
-        Logger.warning(
-          "Symphony tracker: 5xx/timeout failure ##{next_count} (threshold=#{threshold}; latest reason=#{inspect(reason)})"
-        )
+        Logger.warning("Symphony tracker: 5xx/timeout failure ##{next_count} (threshold=#{threshold}; latest reason=#{inspect(reason)})")
 
         %{state | outage_failure_count: next_count}
     end
@@ -1455,13 +1439,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
-        {:noreply,
-         schedule_issue_retry(
-           state,
-           issue_id,
-           attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-         )}
+        {:noreply, schedule_issue_retry(state, issue_id, attempt + 1, Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"}))}
     end
   end
 
@@ -1527,16 +1505,7 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      {:noreply, schedule_issue_retry(state, issue.id, attempt + 1, Map.merge(metadata, %{identifier: issue.identifier, error: "no available orchestrator slots"}))}
     end
   end
 
@@ -1779,13 +1748,7 @@ defmodule SymphonyElixir.Orchestrator do
     coalesced = state.poll_check_in_progress == true or already_due?
     state = if coalesced, do: state, else: schedule_tick(state, 0)
 
-    {:reply,
-     %{
-       queued: true,
-       coalesced: coalesced,
-       requested_at: DateTime.utc_now(),
-       operations: ["poll", "reconcile"]
-     }, state}
+    {:reply, %{queued: true, coalesced: coalesced, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}, state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do

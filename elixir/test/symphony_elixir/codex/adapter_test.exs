@@ -627,8 +627,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       assert_received {:app_server_message,
                        %{
                          event: :tool_input_auto_answered,
-                         answer:
-                           "This is a non-interactive session. Operator input is unavailable."
+                         answer: "This is a non-interactive session. Operator input is unavailable."
                        }}
     after
       File.rm_rf(test_root)
