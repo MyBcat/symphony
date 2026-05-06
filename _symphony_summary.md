@@ -37,6 +37,7 @@ The shipped diff matches `_symphony_plan.md`:
 - `:max_turns_exceeded` still does not increment the retry cap — current "continuation retry" semantics preserved (out of scope per the plan). Future work if operators want max_turns to also trip the cap.
 - `terminate_running_issue/3` intentionally does NOT clear `failure_counts` / `failure_history` — both are cleared only on spawn-success, completion, and stranded TTL. Stalled restart relies on this so the counter persists across iterations. If a future change wants to clear them on terminate, that would silently break the stalled-cap test.
 - The shipped consolidated body uses the "Attempt history:" prefix + `- attempt N: …` bullets. If operators want a more compact one-liner, that's a downstream rendering tweak, not a logic change.
+- **Mid-flight merge of origin/main.** `main` advanced with the M-0a Codex-0.128 adapter rewrite (#28) while this PR was open, which left #29 in a `CONFLICTING` state. Resolved by merging `origin/main` into the branch (commit `321e79e`): the only content conflicts were in `_symphony_plan.md` / `_symphony_summary.md` (per-ticket workspace files — kept this branch's versions). `WORKFLOW.md` and `agent_runner_test.exs` auto-merged cleanly because the M-0a edits target the Codex profile / adapter test fixtures while M-4a's edits target failure-observability tests. Post-merge `gh pr view 29` reports `mergeable: MERGEABLE`.
 
 ## PR URL
 
