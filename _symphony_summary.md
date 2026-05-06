@@ -48,12 +48,12 @@ deltas worth flagging:
    `core_test.exs` was updated to assert this new shape (one process
    spawn per turn with the continuation guidance text in stdin).
 
-3. **`SymphonyElixir.Codex.DynamicTool` left in place.** The plan
-   considered deletion. The module is now dead code (no callers) but
-   has its own test (`test/symphony_elixir/dynamic_tool_test.exs`)
-   that still passes (asserts `tool_specs() == []` and `execute/3`
-   returns unsupported). Left intact to keep the diff focused on the
-   protocol switch. A follow-up cleanup PR can remove it.
+3. **`SymphonyElixir.Codex.DynamicTool` deletion.** Plan flagged it
+   as a possible follow-up; folded the cleanup into this PR after
+   confirming zero callers and removing the corresponding
+   `mix.exs` `test_coverage.ignore_modules` entry. The previous
+   `dynamic_tool_test.exs` was 2 trivial assertions on the unused
+   API; nothing of value lost.
 
 The plan's other deltas — schema default flip, env-var scrub,
 sandbox-floor preservation, JSONL event mapping, runtime token shape —
@@ -90,8 +90,6 @@ all landed exactly as specified.
 
 ## Open concerns / follow-ups
 
-- **`SymphonyElixir.Codex.DynamicTool`** (and its test) is now
-  unreachable. Cleanup candidate.
 - **Live smoke** for the new `codex_gpt55_xhigh` profile must be run
   manually (orchestration session can't invoke `codex` directly).
   Recommended: dispatch a tiny test Monday item with
