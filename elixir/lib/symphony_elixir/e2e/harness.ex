@@ -93,27 +93,59 @@ defmodule SymphonyElixir.E2E.Harness do
 
     with :ok <- guard_prod_board(board_id),
          :ok <- guard_non_synthetic_count(deps, synthetic_prefix, non_synthetic_max, log),
-         {:ok, item} <- create_synthetic(deps, synthetic_prefix, log),
-         :ok <- post_description(deps, item, log),
-         :ok <- set_ready(deps, item, log) do
+         {:ok, item} <- create_synthetic(deps, synthetic_prefix, log) do
       identifier = "#{identifier_prefix}-#{item.id}"
 
-      if dry_run? do
-        finalize(deps, item, identifier,
-          dry_run?: true,
-          status: :dry_run,
-          reason: :dry_run_complete,
-          workspace_root: workspace_root,
-          pr_url: nil
-        )
-      else
-        run_symphony_and_assert(deps, item, identifier, %{
-          max_wait_seconds: max_wait_seconds,
-          poll_interval_ms: poll_interval_ms,
-          workspace_root: workspace_root,
-          runner_opts: runner_opts,
-          log: log
-        })
+      # M-9 cleanup correctness: once `item` is bound the synthetic item exists
+      # on Monday. Any subsequent failure (post_description, set_ready,
+      # run_symphony_and_assert) MUST still call finalize so the item is
+      # deleted and its workspace is torn down. Without this, partial-setup
+      # failures leak synthetic items on the sandbox board.
+      try do
+        with :ok <- post_description(deps, item, log),
+             :ok <- set_ready(deps, item, log) do
+          if dry_run? do
+            finalize(deps, item, identifier,
+              dry_run?: true,
+              status: :dry_run,
+              reason: :dry_run_complete,
+              workspace_root: workspace_root,
+              pr_url: nil
+            )
+          else
+            run_symphony_and_assert(deps, item, identifier, %{
+              max_wait_seconds: max_wait_seconds,
+              poll_interval_ms: poll_interval_ms,
+              workspace_root: workspace_root,
+              runner_opts: runner_opts,
+              log: log
+            })
+          end
+        else
+          {:error, reason} ->
+            log.("e2e: setup failed after item create reason=#{inspect(reason)}; cleaning up")
+            finalize(deps, item, identifier,
+              dry_run?: dry_run?,
+              status: :failed,
+              reason: reason,
+              workspace_root: workspace_root,
+              pr_url: nil
+            )
+
+            %{status: :failed, item_id: item.id, identifier: identifier, reason: reason}
+        end
+      rescue
+        exception ->
+          log.("e2e: exception after item create #{inspect(exception)}; cleaning up")
+          finalize(deps, item, identifier,
+            dry_run?: dry_run?,
+            status: :failed,
+            reason: {:exception, Exception.message(exception)},
+            workspace_root: workspace_root,
+            pr_url: nil
+          )
+
+          reraise exception, __STACKTRACE__
       end
     else
       {:error, reason} ->

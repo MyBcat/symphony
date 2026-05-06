@@ -25,8 +25,9 @@ on:
         default: 'false'
 
 permissions:
-  contents: read
+  contents: write
   issues: write
+  pull-requests: write
 
 concurrency:
   group: nightly-e2e
@@ -70,6 +71,8 @@ jobs:
       SYMPHONY_E2E_LOG_PATH: ${{ runner.temp }}/symphony-e2e.log
       SYMPHONY_E2E_BINARY: ${{ github.workspace }}/elixir/bin/symphony
       SYMPHONY_E2E_WORKFLOW_PATH: ${{ runner.temp }}/WORKFLOW.e2e.md
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -197,6 +200,21 @@ jobs:
             const path = process.env.LOG_TAIL_PATH || '';
             let tail = '';
             try { tail = fs.readFileSync(path, 'utf8'); } catch (_) { tail = '(no log file)'; }
+
+            // M-9 PHI/secret scrub before posting to a public Issue body. The log
+            // tail may contain Bearer tokens, env-var-style secrets, known token
+            // formats (sk-, ghp_, github_pat_, xox*), home paths, or PHI from
+            // agent stderr. This mirrors the M-4 / M-5 redaction patterns.
+            const scrub = (text) => text
+              .split('\n')
+              .slice(-200)
+              .map(line => line
+                .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]{12,}/gi, 'Bearer [REDACTED-SECRET]')
+                .replace(/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS)[A-Za-z0-9_]*\s*[:=]\s*)\S+/gi, '$1[REDACTED-SECRET]')
+                .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/g, '[REDACTED-SECRET]')
+                .replace(/(?<![A-Za-z0-9._-])\/(?:home|Users)\/[^/\s:]+(?:\/\S*)?/g, '[REDACTED-HOME-PATH]'))
+              .join('\n');
+            tail = scrub(tail);
             const today = new Date().toISOString().slice(0, 10);
             const title = `[E2E nightly failed ${today}]`;
             const body = [
