@@ -57,6 +57,7 @@ defmodule SymphonyElixir.Secrets.Scrubber do
   @spec scrub(binary(), [binary()]) :: binary()
   def scrub(line, additional_values \\ [])
 
+  @spec scrub(binary(), [binary()]) :: binary()
   def scrub(line, additional_values) when is_binary(line) and is_list(additional_values) do
     line
     |> redact_literals(additional_values)

@@ -118,6 +118,7 @@ defmodule SymphonyElixir.Secrets.Resolver do
   @spec write_env_file([secret_ref()], Path.t(), opts()) :: :ok | {:error, term()}
   def write_env_file(secret_refs, workspace_path, opts \\ [])
 
+  @spec write_env_file([secret_ref()], Path.t(), opts()) :: :ok | {:error, term()}
   def write_env_file([], _workspace_path, _opts), do: :ok
 
   def write_env_file(secret_refs, workspace_path, opts) when is_list(secret_refs) do
