@@ -18,11 +18,33 @@ Replaced AgentRunner's per-attempt `## Symphony Failures` Monday Updates with a 
 
 The shipped diff matches `_symphony_plan.md`:
 
-- Files touched are exactly the four identified in the plan plus `WORKFLOW.md`.
+- Files touched are exactly the four identified in the plan plus `WORKFLOW.md` (and `monday/item.ex` for the deferred-marker reservation noted below).
 - AgentRunner public surface (`emit_failure_update/4`, `emit_failure_update_via_writer/4`, `build_session/3` defaults) is preserved; `build_session/4` arity is added with a default-`nil` recipient so all existing call sites compile.
 - The consolidated body's header is unchanged (`Stranded after N consecutive failures: <reason>`) so the existing M-4 stranded-TTL test passes without modification.
 - One small extension over the plan: `restart_stalled_issue/5` appends a synthetic `:stalled` failure_history entry so the consolidated body still shows per-attempt detail when every attempt was a hang (the runner never reaches an `:agent_failure` send site, so without this the body would contain only the header).
 - `WORKFLOW.md` got a comment annotating the new dual role of `failure_ttl_count` (retry cap + history cap).
+
+## Ticket vs plan — explicit scope deviation
+
+The committed `_symphony_plan.md` is narrower than the ticket body's behavior contract. Calling that out explicitly so the reviewer doesn't have to diff them themselves:
+
+| Ticket AC | Status in this PR | Notes |
+|-----------|-------------------|-------|
+| AC1 — suppress per-retry `## Symphony Failures` Workpad emissions | **Done** | AgentRunner now sends a structured `{:agent_failure, …}` event instead. |
+| AC2 — single Workpad emission at item-terminal-transition (Pass / Fail-cap / Fail-operator / Done) | **Partial** — only the Fail-cap path (retry cap fires) emits. Pass (PR opened), Fail-operator (manual Cancelled), and Done (PR merged) summaries are **deferred**. |
+| AC3 — honor `tracker.failure_ttl_count` as a hard retry cap | **Done** | Stalled restarts now count toward the cap (previously bypassed). |
+| AC4 — summary body PHI/secret scrubbed | **Done** | Reuses `Monday.Adapter.post_failure_update/2`'s existing scrub + 8 KiB cap. |
+| AC5 — register `## Symphony Run Summary` prefix in `monday/item.ex` | **Done (prefix only)** | The marker is reserved in `@symphony_marker_prefixes` so a future emission cannot fold its own body back into the agent prompt. The retry-cap consolidated body in this PR still posts under the existing `## Symphony Failures` marker so M-4 dashboards / parsers stay working without coordinated changes. |
+
+Why the scope is narrower: the committed plan was tied to the ticket's title and Goal sentence — "Consolidate failure updates — one final summary + enforce retry cap" — and to the M-4 follow-on framing in the References. The plan never expanded to cover Pass / Done / operator-cancelled summaries because those need new orchestrator hooks (PR-open emission, PR-merge detection, manual-Cancelled detection on the Tracker poll) that touch code paths well beyond M-4's per-failure write site. The result is a PR that lands the high-noise win (no more 5–6 Updates per stuck item) without doubling the diff size on speculative summary emissions.
+
+Recommended follow-up (M-4a-completion):
+
+- Switch the consolidated body emission from `Tracker.post_failure_update/2` to a new `Tracker.post_run_summary_update/2` (using a `## Symphony Run Summary` marker in `Monday.Adapter`).
+- Emit a Pass summary at PR-detect (currently in `AgentRunner.observe_codex_message/3` → orchestrator).
+- Emit a Done summary at PR-merge detect (PRSafety / AutoMerge path).
+- Emit a Fail summary on operator-initiated `Cancelled` transitions (orchestrator's Tracker poll loop).
+- Update the M-4 baseline tests + dashboard parsers to read both markers during the transition.
 
 ## Test plan executed
 
