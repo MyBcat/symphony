@@ -26,6 +26,12 @@ tracker:
   complexity_budget_per_tick: 500
   backoff_factor: 2.0
   max_polling_interval_ms: 60000
+  # Symphony M-4a (SYM-11942134820): doubles as the per-issue retry cap and
+  # the cap on consolidated `## Symphony Failures` history entries. Once an
+  # issue hits this many consecutive failures the orchestrator transitions it
+  # to Cancelled and posts ONE consolidated Update listing every captured
+  # attempt — instead of one Update per attempt. Stalled-issue restarts also
+  # count against this cap.
   failure_ttl_count: 5
   # Spec M-7 AC3: how many consecutive 5xx/timeout Tracker responses before
   # the orchestrator logs "outage entry" and pauses new dispatches. The

@@ -50,6 +50,11 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       failure_counts: %{},
+      # Per-issue list of structured `:agent_failure` events (newest last).
+      # Bounded by `tracker.failure_ttl_count` so a buggy runner can't grow
+      # this without bound; the orchestrator drains it into one consolidated
+      # `## Symphony Failures` Update at retry-cap exhaustion (SYM-11942134820).
+      failure_history: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
       outage_failure_count: 0,
@@ -453,6 +458,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
+
+  # SYM-11942134820: AgentRunner forwards each error site as a structured
+  # event so the orchestrator can consolidate them into a single Monday
+  # Update at retry-cap exhaustion. Append to per-issue history; cap the
+  # list at the same threshold the stranded TTL uses so a buggy runner
+  # cannot grow this without bound.
+  def handle_info({:agent_failure, issue_id, entry}, state)
+      when is_binary(issue_id) and is_map(entry) do
+    {:noreply, append_failure_history(state, issue_id, entry)}
+  end
+
+  def handle_info({:agent_failure, _issue_id, _entry}, state), do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
@@ -888,13 +905,35 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
 
       next_attempt = next_retry_attempt_from_running(running_entry)
+      reason_summary = "stalled for #{elapsed_ms}ms without codex activity"
 
-      state
-      |> terminate_running_issue(issue_id, false)
-      |> schedule_issue_retry(issue_id, next_attempt, %{
-        identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity"
-      })
+      state =
+        state
+        |> terminate_running_issue(issue_id, false)
+        |> append_failure_history(issue_id, %{
+          reason_atom: :stalled,
+          message: reason_summary,
+          stderr_tail: "",
+          profile_name: Map.get(running_entry, :profile_name),
+          repo: Map.get(running_entry, :repo),
+          occurred_at: DateTime.utc_now()
+        })
+
+      # SYM-11942134820: stalled restarts must count toward the retry cap;
+      # before this change the cap only fired for spawn/exit failures and a
+      # repeatedly-hanging agent could be restarted forever.
+      case record_dispatch_failure(state, issue_id, reason_summary) do
+        {:stranded, state} ->
+          state
+
+        {:continue, state} ->
+          schedule_issue_retry(state, issue_id, next_attempt, %{
+            identifier: identifier,
+            error: reason_summary,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+      end
     else
       state
     end
@@ -1252,7 +1291,8 @@ defmodule SymphonyElixir.Orchestrator do
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
-            failure_counts: Map.delete(state.failure_counts, issue.id)
+            failure_counts: Map.delete(state.failure_counts, issue.id),
+            failure_history: Map.delete(state.failure_history, issue.id)
         }
 
       {:error, reason} ->
@@ -1309,7 +1349,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_stranded_ttl(%State{} = state, issue_id, count, reason)
        when is_binary(issue_id) and is_integer(count) and is_binary(reason) do
-    Logger.warning("Stranded item TTL reached for issue_id=#{issue_id} consecutive_failures=#{count}; cancelling and posting failure update")
+    Logger.warning("Stranded item TTL reached for issue_id=#{issue_id} consecutive_failures=#{count}; cancelling and posting consolidated failure update")
 
     case Tracker.update_issue_state(issue_id, "Cancelled") do
       :ok ->
@@ -1319,7 +1359,8 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Tracker failed to mark stranded issue as Cancelled: issue_id=#{issue_id} reason=#{inspect(status_reason)}")
     end
 
-    body = "Stranded after #{count} consecutive failures: #{reason}"
+    history = Map.get(state.failure_history, issue_id, [])
+    body = render_stranded_failure_body(count, reason, history)
 
     case Tracker.post_failure_update(issue_id, body) do
       :ok ->
@@ -1334,10 +1375,96 @@ defmodule SymphonyElixir.Orchestrator do
         state
         | claimed: MapSet.delete(state.claimed, issue_id),
           retry_attempts: Map.delete(state.retry_attempts, issue_id),
-          failure_counts: Map.delete(state.failure_counts, issue_id)
+          failure_counts: Map.delete(state.failure_counts, issue_id),
+          failure_history: Map.delete(state.failure_history, issue_id)
       }
 
     {:stranded, state}
+  end
+
+  # SYM-11942134820: append a structured `:agent_failure` entry to the
+  # per-issue history. Bounded by the same `tracker.failure_ttl_count`
+  # threshold the stranded TTL uses; older entries fall off the front so
+  # the list never grows past the cap even if a buggy runner spams events.
+  defp append_failure_history(%State{} = state, issue_id, entry) do
+    cap = max(failure_ttl_count(), 1)
+    previous = Map.get(state.failure_history, issue_id, [])
+    next = trim_failure_history(previous ++ [entry], cap)
+    %{state | failure_history: Map.put(state.failure_history, issue_id, next)}
+  end
+
+  defp trim_failure_history(entries, cap) when is_list(entries) and is_integer(cap) and cap > 0 do
+    case length(entries) - cap do
+      drop when drop > 0 -> Enum.drop(entries, drop)
+      _ -> entries
+    end
+  end
+
+  # Build the consolidated `## Symphony Failures` body posted on stranded
+  # TTL. Header line preserves the "Stranded after N consecutive failures"
+  # phrasing existing tooling + tests parse against. When per-attempt
+  # `:agent_failure` events were captured we emit one bullet per attempt
+  # using the SYM-11923123790 AC2 line shape so operators still see
+  # timestamp/profile/repo/reason for each retry — just bundled into one
+  # Update instead of one per attempt.
+  defp render_stranded_failure_body(count, reason, history) when is_list(history) do
+    header = "Stranded after #{count} consecutive failures: #{reason}"
+
+    case history do
+      [] ->
+        header
+
+      entries ->
+        attempt_blocks =
+          entries
+          |> Enum.with_index(1)
+          |> Enum.map(&render_failure_history_entry/1)
+          |> Enum.join("\n\n")
+
+        header <> "\n\nAttempt history:\n\n" <> attempt_blocks
+    end
+  end
+
+  defp render_failure_history_entry({entry, attempt}) when is_map(entry) and is_integer(attempt) do
+    timestamp =
+      case Map.get(entry, :occurred_at) do
+        %DateTime{} = dt -> DateTime.to_iso8601(dt)
+        binary when is_binary(binary) -> binary
+        _ -> "unknown-time"
+      end
+
+    profile = Map.get(entry, :profile_name) || "unknown"
+    repo = Map.get(entry, :repo) || "unknown"
+    reason = Map.get(entry, :reason_atom) || :unknown
+    message = Map.get(entry, :message, "")
+    stderr_tail = Map.get(entry, :stderr_tail, "")
+
+    header = "- attempt #{attempt}: #{timestamp} | profile=#{profile} | repo=#{repo} | reason=#{reason}"
+
+    parts =
+      [header]
+      |> append_nonblank("  " <> message, message)
+      |> append_stderr_tail(stderr_tail)
+
+    Enum.join(parts, "\n")
+  end
+
+  defp append_nonblank(parts, _line, ""), do: parts
+  defp append_nonblank(parts, _line, nil), do: parts
+  defp append_nonblank(parts, line, value) when is_binary(value) and value != "" do
+    parts ++ [line]
+  end
+
+  defp append_stderr_tail(parts, ""), do: parts
+  defp append_stderr_tail(parts, nil), do: parts
+  defp append_stderr_tail(parts, tail) when is_binary(tail) do
+    indented =
+      tail
+      |> String.split(~r/\r?\n/)
+      |> Enum.map(&("    " <> &1))
+      |> Enum.join("\n")
+
+    parts ++ ["  --- last stderr ---", indented]
   end
 
   defp failure_ttl_count do
@@ -1371,7 +1498,9 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        failure_counts: Map.delete(state.failure_counts, issue_id),
+        failure_history: Map.delete(state.failure_history, issue_id)
     }
   end
 

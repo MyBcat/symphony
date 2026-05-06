@@ -743,7 +743,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert session.repo == "symphony"
     end
 
-    test "emit_failure_update posts a Monday Update with the SYM-11923123790 AC2 block format" do
+    test "emit_failure_update sends a structured :agent_failure to the recipient and does NOT write to Monday (SYM-11942134820)" do
       session = %{
         identifier: "SYM-FAIL",
         profile_name: "claude_sonnet",
@@ -751,7 +751,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
         host: "devbox",
         workspace_path: "/tmp/ws",
         short_sha: "abc1234",
-        started_at: DateTime.utc_now()
+        started_at: DateTime.utc_now(),
+        failure_recipient: self()
       }
 
       :ok =
@@ -760,77 +761,96 @@ defmodule SymphonyElixir.AgentRunnerTest do
           stderr_tail: "boom\nfatal: out of memory"
         )
 
-      events = MemoryMonday.events()
+      assert_receive {:agent_failure, "issue-fail-1", entry}, 200
+      assert entry.reason_atom == :port_exit_nonzero
+      assert entry.profile_name == "claude_sonnet"
+      assert entry.repo == "symphony"
+      assert entry.message == "agent crashed with status 137"
+      assert entry.stderr_tail == "boom\nfatal: out of memory"
+      assert %DateTime{} = entry.occurred_at
 
-      assert Enum.any?(events, fn
-               {:failure_write, "issue-fail-1", body} ->
-                 lines = String.split(body, "\n")
-
-                 [first | _] = lines
-
-                 String.match?(
-                   first,
-                   ~r/^[\d\-T:Z\.]+ \| profile=claude_sonnet \| repo=symphony \| reason=port_exit_nonzero$/
-                 ) and
-                   Enum.member?(lines, "agent crashed with status 137") and
-                   Enum.member?(lines, "--- last 20 lines stderr ---") and
-                   Enum.any?(lines, &(&1 =~ "fatal: out of memory"))
-
-               _ ->
-                 false
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, _, _} -> true
+               _ -> false
              end),
-             "expected failure_write with AC2 block format; got events=#{inspect(events)}"
+             "M-4a: AgentRunner must not write `## Symphony Failures` Updates per attempt; orchestrator owns the consolidated final post"
     end
 
     test "emit_failure_update is a no-op when issue_id is empty" do
       :ok =
         AgentRunner.emit_failure_update(
-          %{profile_name: "p", repo: "r"},
+          %{profile_name: "p", repo: "r", failure_recipient: self()},
           "",
           :workspace_create_failed,
           message: "x"
         )
 
-      events = MemoryMonday.events()
+      refute_receive {:agent_failure, _, _}, 50
 
-      refute Enum.any?(events, fn
+      refute Enum.any?(MemoryMonday.events(), fn
                {:failure_write, _, _} -> true
                _ -> false
              end)
     end
 
-    test "emit_failure_update_via_writer pulls session off the writer pid",
-         %{issue: issue, writer_pid: writer_pid} do
+    test "emit_failure_update is a no-op when the recipient pid is missing or dead" do
+      {:ok, dead_pid} = Agent.start(fn -> :dead end)
+      Agent.stop(dead_pid)
+
       :ok =
-        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded, message: "max_turns reached")
+        AgentRunner.emit_failure_update(
+          %{profile_name: "p", repo: "r", failure_recipient: dead_pid},
+          "issue-1",
+          :exception_in_adapter,
+          message: "should not be sent"
+        )
 
-      events = MemoryMonday.events()
+      :ok =
+        AgentRunner.emit_failure_update(
+          %{profile_name: "p", repo: "r", failure_recipient: nil},
+          "issue-2",
+          :exception_in_adapter,
+          message: "no recipient"
+        )
 
-      assert Enum.any?(events, fn
-               {:failure_write, "11923258050", body} ->
-                 String.contains?(body, "reason=max_turns_exceeded") and
-                   String.contains?(body, "max_turns reached")
+      refute Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, _, _} -> true
+               _ -> false
+             end)
+    end
 
-               _ ->
-                 false
-             end),
-             "expected failure_write via writer; got events=#{inspect(events)}"
+    test "emit_failure_update_via_writer forwards to the writer's recipient",
+         %{issue: issue, workspace: workspace} do
+      # The default writer in the test setup carries `failure_recipient: nil`;
+      # this test wires a fresh writer with `self()` so we can observe the
+      # forwarded message.
+      session =
+        AgentRunner.build_session(issue, workspace, nil, self())
+
+      {:ok, writer_pid} = AgentRunner.start_session_writer(session)
+      on_exit(fn -> AgentRunner.stop_session_writer(writer_pid) end)
+
+      :ok =
+        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded,
+          message: "max_turns reached"
+        )
+
+      assert_receive {:agent_failure, "11923258050", entry}, 200
+      assert entry.reason_atom == :max_turns_exceeded
+      assert entry.message == "max_turns reached"
     end
 
     test "emit_failure_update_via_writer is a no-op when the writer is already dead",
          %{issue: issue} do
-      {:ok, dead_pid} = Agent.start(fn -> %{session: %{}} end)
+      {:ok, dead_pid} = Agent.start(fn -> %{session: %{failure_recipient: self()}} end)
       Agent.stop(dead_pid)
 
       :ok =
-        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter, message: "should not be posted")
+        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter,
+          message: "should not be posted"
+        )
 
-      events = MemoryMonday.events()
-
-      refute Enum.any?(events, fn
-               {:failure_write, _, _} -> true
-               _ -> false
-             end)
+      refute_receive {:agent_failure, _, _}, 50
     end
   end
 
