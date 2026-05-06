@@ -197,10 +197,20 @@ defmodule SymphonyElixir.Monday.Item do
   # items don't, so the operator-written task body lives in Monday Updates.
   # Concatenate non-Symphony updates oldest-first as the rendered description.
   # Symphony's own writebacks (## Symphony Workpad / ## Symphony Failures /
-  # ## Symphony Heartbeat / ## Symphony Completion) are filtered out.
+  # ## Symphony Heartbeat / ## Symphony Completion / ## Symphony Run Summary)
+  # are filtered out. SYM-11942134820 (M-4a) AC5 reserves the new
+  # `## Symphony Run Summary` prefix for the consolidated terminal-transition
+  # Update so a future emission won't fold its own body back into the agent
+  # prompt context. The actual emission switch (rename `## Symphony Failures`
+  # → `## Symphony Run Summary` + the Pass/Done/operator-cancelled emit
+  # points) is deferred to an M-4a-completion follow-up; the consolidated
+  # retry-cap Update shipped in this PR still goes through the existing
+  # `Tracker.post_failure_update/2` path so the M-4 dashboard / parsers stay
+  # working untouched.
   @symphony_marker_prefixes [
     "## Symphony Workpad",
     "## Symphony Failures",
+    "## Symphony Run Summary",
     "## Symphony Heartbeat",
     "## Symphony Completion",
     "## Symphony PR Refusal",

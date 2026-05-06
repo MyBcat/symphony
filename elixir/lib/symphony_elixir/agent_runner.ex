@@ -119,10 +119,10 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         # Workspace.create_for_issue/2 failed before any session writer was
         # started, so we don't have a workspace path or short SHA. Build a
-        # minimal session map directly off the issue so the failure header
+        # minimal session map directly off the issue so the failure event
         # still carries profile + repo per Spec 4 §2.4 / SYM-11923123790 AC1.
         emit_failure_update(
-          build_session(issue, nil, worker_host),
+          build_session(issue, nil, worker_host, codex_update_recipient),
           issue_id(issue) || "",
           :workspace_create_failed,
           message: "Workspace.create_for_issue failed: #{inspect(reason)}"
@@ -136,7 +136,7 @@ defmodule SymphonyElixir.AgentRunner do
   # PR URL detection, completion summary, crash handler). Resolves the
   # per-issue Profile and dispatches to the matching AgentRuntime adapter.
   defp run_codex_turns_with_tracker(workspace, issue, codex_update_recipient, opts, worker_host) do
-    session = build_session(issue, workspace, worker_host)
+    session = build_session(issue, workspace, worker_host, codex_update_recipient)
     {:ok, writer_pid} = start_session_writer(session)
 
     try do
@@ -802,9 +802,15 @@ defmodule SymphonyElixir.AgentRunner do
 
   Includes `:repo` (when the tracker issue carries a repo column) so failure
   workpads can stamp `repo=<key>` per Spec 4 §2.4 / SYM-11923123790 AC2.
+
+  When called with a `failure_recipient` pid (the orchestrator), the session
+  carries it so `emit_failure_update/4` can post a structured `:agent_failure`
+  message instead of writing to Monday on every retry. Per SYM-11942134820 the
+  orchestrator consolidates these into one final Monday Update at retry-cap
+  exhaustion.
   """
-  @spec build_session(map(), Path.t() | nil, worker_host()) :: map()
-  def build_session(issue, workspace, worker_host) do
+  @spec build_session(map(), Path.t() | nil, worker_host(), pid() | nil) :: map()
+  def build_session(issue, workspace, worker_host, failure_recipient \\ nil) do
     %{
       identifier: issue_identifier(issue),
       profile_name: profile_name(),
@@ -812,7 +818,8 @@ defmodule SymphonyElixir.AgentRunner do
       workspace_path: workspace || "",
       short_sha: short_sha_for_workspace(workspace, worker_host),
       repo: issue_repo(issue),
-      started_at: DateTime.utc_now()
+      started_at: DateTime.utc_now(),
+      failure_recipient: failure_recipient
     }
   end
 
@@ -899,21 +906,27 @@ defmodule SymphonyElixir.AgentRunner do
   def finalize_crash(_writer_pid, _issue, _reason), do: :ok
 
   @doc """
-  Post a `## Symphony Failures` Monday Update for an error path.
+  Send a structured `:agent_failure` message to the orchestrator for an error
+  path.
 
-  Per SYM-11923123790 AC1, every AgentRunner error site must emit one of these
-  updates so failures land on the corresponding Monday item instead of only in
-  `/tmp/symphony.boot.log`. The marker prefix, PHI scrub, and 8 KiB truncation
-  are owned by `SymphonyElixir.Monday.Adapter.post_failure_update/2`; this
-  helper is just the formatting + dispatch glue.
+  Per SYM-11942134820 (M-4a), every AgentRunner error site records the failure
+  on the orchestrator's per-issue history instead of writing a `## Symphony
+  Failures` Monday Update on every attempt. The orchestrator accumulates these
+  entries and posts ONE consolidated Monday Update via
+  `SymphonyElixir.Monday.Adapter.post_failure_update/2` once the retry cap
+  (`tracker.failure_ttl_count`) is reached. The marker prefix, PHI scrub, and
+  8 KiB cap remain owned by the adapter — this helper is just the structured
+  glue between the runner and the orchestrator.
 
-  `session` is a map matching the shape produced by `build_session/3`. For
-  pre-workspace failures (Workspace.create_for_issue errors) the caller can
-  build a minimal session map directly off the issue.
+  `session` is a map matching the shape produced by `build_session/4` and must
+  carry a `:failure_recipient` pid for the message to go anywhere. When the
+  recipient is missing/dead, the call is a no-op (tests + the legacy
+  single-process boot path silently drop instead of crashing the runner).
 
   `reason_atom` is the structured reason (e.g. `:port_exit_nonzero`,
-  `:max_turns_exceeded`, `:profile_not_allowed_on_repo`) that gets stamped
-  into the failure header.
+  `:max_turns_exceeded`, `:profile_not_allowed_on_repo`) preserved verbatim
+  from the SYM-11923123790 AC1 vocabulary so dashboard filters and the
+  consolidated body still group failures the same way.
 
   Optional opts:
     * `:message` — human-readable error description (single line preferred).
@@ -923,34 +936,38 @@ defmodule SymphonyElixir.AgentRunner do
   def emit_failure_update(session, issue_id, reason_atom, opts \\ [])
       when is_map(session) and is_atom(reason_atom) do
     if is_binary(issue_id) and issue_id != "" do
-      message = Keyword.get(opts, :message, "")
-      stderr_tail = Keyword.get(opts, :stderr_tail, "")
+      recipient = Map.get(session, :failure_recipient)
 
-      body =
-        Workpad.render_failure(%{
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-          profile_name: Map.get(session, :profile_name),
-          repo: Map.get(session, :repo),
-          reason: reason_atom,
-          message: message,
-          stderr_tail: stderr_tail
-        })
+      entry = %{
+        reason_atom: reason_atom,
+        message: Keyword.get(opts, :message, ""),
+        stderr_tail: Keyword.get(opts, :stderr_tail, ""),
+        profile_name: Map.get(session, :profile_name),
+        repo: Map.get(session, :repo),
+        occurred_at: DateTime.utc_now()
+      }
 
-      case Tracker.post_failure_update(issue_id, body) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          # Logging the failure-of-the-failure-write is best-effort; the
-          # disk log already captured the underlying error and we don't
-          # want emit_failure_update/4 itself to crash the runner.
-          Logger.warning("Failed to post Monday failure update for issue_id=#{issue_id} reason=#{reason_atom}: #{inspect(reason)}")
-
-          :ok
-      end
+      send_agent_failure(recipient, issue_id, entry, reason_atom)
+      :ok
     else
       :ok
     end
+  end
+
+  defp send_agent_failure(recipient, issue_id, entry, reason_atom)
+       when is_pid(recipient) do
+    if Process.alive?(recipient) do
+      send(recipient, {:agent_failure, issue_id, entry})
+      :ok
+    else
+      Logger.debug("Skipping agent_failure send; recipient pid is no longer alive issue_id=#{issue_id} reason=#{reason_atom}")
+      :ok
+    end
+  end
+
+  defp send_agent_failure(_recipient, issue_id, _entry, reason_atom) do
+    Logger.debug("No failure_recipient on session for issue_id=#{issue_id} reason=#{reason_atom}; agent_failure event dropped")
+    :ok
   end
 
   @doc """
@@ -959,7 +976,7 @@ defmodule SymphonyElixir.AgentRunner do
   `run_codex_turns_with_tracker` where the writer is already running.
 
   Defensive: if the writer pid is gone, dead, or times out we silently no-op
-  so a Monday write failure never escalates over the original error.
+  so a recipient send failure never escalates over the original error.
   """
   @spec emit_failure_update_via_writer(pid() | nil, map(), atom(), keyword()) :: :ok
   def emit_failure_update_via_writer(writer_pid, issue, reason_atom, opts \\ []) do

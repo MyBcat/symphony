@@ -218,6 +218,268 @@ defmodule SymphonyElixir.OrchestratorTest do
              "expected claim to be released after stranded TTL"
     end
 
+    test "single dispatch failure does NOT post a Monday Update (M-4a consolidates) (SYM-11942134820)" do
+      orchestrator_name = Module.concat(__MODULE__, :SingleFailureOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue_id = "issue-single-fail-1"
+
+      :sys.replace_state(pid, fn state ->
+        %{state | claimed: MapSet.put(state.claimed, issue_id)}
+      end)
+
+      state = :sys.get_state(pid)
+
+      capture_log(fn ->
+        {:continue, state} =
+          Orchestrator.record_dispatch_failure_for_test(
+            state,
+            issue_id,
+            "spawn boom 1"
+          )
+
+        :sys.replace_state(pid, fn _ -> state end)
+      end)
+
+      events = MemoryMonday.events()
+
+      refute Enum.any?(events, fn
+               {:failure_write, ^issue_id, _body} -> true
+               _ -> false
+             end),
+             "expected NO Monday failure_write before retry cap is reached; got events=#{inspect(events)}"
+
+      refute Enum.any?(events, fn
+               {:status_write, ^issue_id, "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected NO Cancelled status write before retry cap is reached"
+    end
+
+    test ":agent_failure messages append to per-issue failure_history (capped at failure_ttl_count) (SYM-11942134820)" do
+      orchestrator_name = Module.concat(__MODULE__, :AgentFailureHistoryOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue_id = "issue-history-1"
+
+      Enum.each(1..7, fn n ->
+        send(pid, {
+          :agent_failure,
+          issue_id,
+          %{
+            reason_atom: :port_exit_nonzero,
+            message: "boom #{n}",
+            stderr_tail: "",
+            profile_name: "codex_default",
+            repo: "symphony",
+            occurred_at: DateTime.utc_now()
+          }
+        })
+      end)
+
+      Process.sleep(30)
+
+      state = :sys.get_state(pid)
+      history = Map.get(state.failure_history, issue_id, [])
+
+      # Default `tracker.failure_ttl_count` is 5; oldest entries are dropped.
+      assert length(history) == 5
+      assert List.first(history).message == "boom 3"
+      assert List.last(history).message == "boom 7"
+    end
+
+    test "consolidated failure body lists every captured attempt (SYM-11942134820)" do
+      orchestrator_name = Module.concat(__MODULE__, :ConsolidatedBodyOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue_id = "issue-consolidated-1"
+
+      :sys.replace_state(pid, fn state ->
+        %{state | claimed: MapSet.put(state.claimed, issue_id)}
+      end)
+
+      reasons = [
+        :workspace_create_failed,
+        :profile_resolution_failed,
+        :exception_in_adapter,
+        :max_turns_exceeded,
+        :port_exit_nonzero
+      ]
+
+      Enum.each(reasons, fn reason ->
+        send(pid, {
+          :agent_failure,
+          issue_id,
+          %{
+            reason_atom: reason,
+            message: "msg-#{reason}",
+            stderr_tail: "",
+            profile_name: "claude_sonnet",
+            repo: "symphony",
+            occurred_at: DateTime.utc_now()
+          }
+        })
+      end)
+
+      Process.sleep(30)
+
+      Enum.each(1..4, fn n ->
+        state = :sys.get_state(pid)
+
+        {:continue, state} =
+          Orchestrator.record_dispatch_failure_for_test(
+            state,
+            issue_id,
+            "exit reason #{n}"
+          )
+
+        :sys.replace_state(pid, fn _ -> state end)
+      end)
+
+      state = :sys.get_state(pid)
+
+      capture_log(fn ->
+        {:stranded, state} =
+          Orchestrator.record_dispatch_failure_for_test(
+            state,
+            issue_id,
+            "exit reason 5"
+          )
+
+        :sys.replace_state(pid, fn _ -> state end)
+      end)
+
+      assert Enum.any?(MemoryMonday.events(), fn
+               {:failure_write, ^issue_id, body} ->
+                 String.contains?(body, "Stranded after 5 consecutive failures") and
+                   String.contains?(body, "exit reason 5") and
+                   String.contains?(body, "Attempt history:") and
+                   String.contains?(body, "reason=workspace_create_failed") and
+                   String.contains?(body, "reason=profile_resolution_failed") and
+                   String.contains?(body, "reason=exception_in_adapter") and
+                   String.contains?(body, "reason=max_turns_exceeded") and
+                   String.contains?(body, "reason=port_exit_nonzero") and
+                   String.contains?(body, "msg-workspace_create_failed") and
+                   String.contains?(body, "msg-port_exit_nonzero") and
+                   String.contains?(body, "profile=claude_sonnet") and
+                   String.contains?(body, "repo=symphony")
+
+               _ ->
+                 false
+             end),
+             "expected consolidated body to include every captured attempt; got events=#{inspect(MemoryMonday.events())}"
+
+      final_state = :sys.get_state(pid)
+
+      refute Map.has_key?(final_state.failure_history, issue_id),
+             "expected failure_history entry to be cleared after stranded TTL"
+    end
+
+    test "stalled restart counts toward the retry cap (SYM-11942134820)" do
+      orchestrator_name = Module.concat(__MODULE__, :StalledCapOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue_id = "issue-stalled-cap-1"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "SYM-STALL-CAP",
+        title: "Stalled cap test",
+        description: "no PHI",
+        state: "Symphony Ready",
+        url: "https://example.org/issues/SYM-STALL-CAP",
+        assigned_to_worker: true
+      }
+
+      # Intentionally do NOT register the issue with MemoryMonday so the
+      # orchestrator's poll cycle won't try to dispatch a fresh agent run
+      # after each stalled restart — we only care about the stalled-cap
+      # accounting here.
+      ancient = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      capture_log(fn ->
+        Enum.each(1..5, fn n ->
+          worker =
+            spawn(fn ->
+              receive do
+                :stop -> :ok
+              end
+            end)
+
+          ref = Process.monitor(worker)
+
+          :sys.replace_state(pid, fn state ->
+            running_entry = %{
+              pid: worker,
+              ref: ref,
+              issue: issue,
+              identifier: issue.identifier,
+              profile_name: "codex_default",
+              worker_host: nil,
+              workspace_path: "/tmp/work",
+              started_at: ancient,
+              last_codex_timestamp: ancient,
+              retry_attempt: n - 1
+            }
+
+            %{
+              state
+              | running: Map.put(state.running, issue_id, running_entry),
+                claimed: MapSet.put(state.claimed, issue_id)
+            }
+          end)
+
+          send(pid, :run_poll_cycle)
+          Process.sleep(80)
+
+          send(worker, :stop)
+        end)
+      end)
+
+      events = MemoryMonday.events()
+
+      assert Enum.any?(events, fn
+               {:status_write, ^issue_id, "Cancelled"} -> true
+               _ -> false
+             end),
+             "expected stalled-issue restart to hit retry cap and write Cancelled"
+
+      assert Enum.any?(events, fn
+               {:failure_write, ^issue_id, body} ->
+                 String.contains?(body, "Stranded after 5 consecutive failures") and
+                   String.contains?(body, "stalled for") and
+                   String.contains?(body, "reason=stalled")
+
+               _ ->
+                 false
+             end),
+             "expected consolidated stranded body to mention stalled attempts; got events=#{inspect(events)}"
+    end
+
     test "cost cap shutdown keeps Ready item claimed and schedules failure-style backoff without stranded TTL accounting" do
       orchestrator_name = Module.concat(__MODULE__, :CostCapBackoffOrchestrator)
       {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
