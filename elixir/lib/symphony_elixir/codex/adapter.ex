@@ -279,15 +279,37 @@ defmodule SymphonyElixir.Codex.Adapter do
   end
 
   defp local_launch_command(command, prompt_file) do
-    "exec " <> command <> " < " <> shell_escape(prompt_file)
+    "exec " <> command_with_policies(command) <> " < " <> shell_escape(prompt_file)
   end
 
   defp remote_launch_command(workspace, command, prompt) do
+    # M-0a Codex review fix: SSH inherits parent env via SendEnv/AcceptEnv. Strip
+    # CODEX_COMPANION_* + OPENAI_API_KEY explicitly on the remote shell so the
+    # remote codex spawn doesn't attach to the parent session's broker or flip
+    # auth modes. Mirrors scrub_inherited_env/0 which only covers Port.open env.
     [
+      "unset CODEX_COMPANION_SESSION_ID CODEX_COMPANION_BROKER_SOCK CODEX_COMPANION_BROKER_PID OPENAI_API_KEY",
       "cd #{shell_escape(workspace)}",
-      "exec #{command} #{shell_escape(prompt)}"
+      "exec #{command_with_policies(command)} #{shell_escape(prompt)}"
     ]
     |> Enum.join(" && ")
+  end
+
+  # Inject sandbox + approval policies if the configured command doesn't already
+  # carry them. Prevents misconfigured profiles from running codex with no
+  # workspace-write or with an unintended approval mode.
+  defp command_with_policies(command) when is_binary(command) do
+    command
+    |> ensure_config_flag("sandbox_mode", "workspace-write")
+    |> ensure_config_flag("approval_policy", "never")
+  end
+
+  defp ensure_config_flag(command, key, default_value) do
+    if String.contains?(command, key <> "=") do
+      command
+    else
+      command <> " -c '" <> key <> "=\"" <> default_value <> "\"'"
+    end
   end
 
   # Strip env vars that would corrupt a fresh `codex exec` child:
@@ -442,9 +464,37 @@ defmodule SymphonyElixir.Codex.Adapter do
 
   defp handle_event("item.updated", event, raw, port, state) do
     state = ensure_session_started_emitted(state)
-    emit_notification(state, event, raw)
+    item = Map.get(event, "item", %{})
+    item_type = Map.get(item, "type")
+
+    # M-0a Codex review fix: agent_message item.updated events MUST emit
+    # :turn_delta so AgentRunner streaming consumers and cost-cap telemetry
+    # receive the delta payload. Other item types fall through to :notification.
+    symphony_event =
+      case item_type do
+        "agent_message" -> :turn_delta
+        _ -> nil
+      end
+
+    if symphony_event do
+      emit(
+        state.on_message,
+        symphony_event,
+        %{payload: event, raw: raw, item: item, delta: extract_message_delta(item)},
+        state.metadata
+      )
+    else
+      emit_notification(state, event, raw)
+    end
+
     drive_stream(port, "", state)
   end
+
+  defp extract_message_delta(item) when is_map(item) do
+    Map.get(item, "delta") || Map.get(item, "text") || ""
+  end
+
+  defp extract_message_delta(_), do: ""
 
   defp handle_event("item.completed", event, raw, port, state) do
     state = ensure_session_started_emitted(state)
