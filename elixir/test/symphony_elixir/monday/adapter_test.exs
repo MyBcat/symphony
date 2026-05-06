@@ -892,15 +892,15 @@ defmodule SymphonyElixir.Monday.AdapterTest do
       defp self_pid, do: Process.get(:test_pid)
     end
 
-    defmodule E2EErrorClient do
+    defmodule E2EHarnessErrorClient do
       def graphql(_query, _vars, _opts), do: {:error, :rate_limited}
     end
 
-    defmodule E2EBadShapeClient do
+    defmodule E2EHarnessBadShapeClient do
       def graphql(_query, _vars, _opts), do: {:ok, %{"data" => %{}}}
     end
 
-    defmodule E2EBoardNotFoundClient do
+    defmodule E2EHarnessBoardNotFoundClient do
       def graphql(_query, _vars, _opts), do: {:ok, %{"data" => %{"boards" => []}}}
     end
 
@@ -921,12 +921,12 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     end
 
     test "create_item propagates client errors" do
-      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
       assert {:error, :rate_limited} = Adapter.create_item(123_456, "[E2E] hello")
     end
 
     test "create_item rejects unexpected response shapes" do
-      Application.put_env(:symphony_elixir, :monday_client_module, E2EBadShapeClient)
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessBadShapeClient)
       assert {:error, {:unexpected_response, _}} = Adapter.create_item(123_456, "[E2E] hello")
     end
 
@@ -942,7 +942,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     end
 
     test "delete_item propagates client errors" do
-      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
       assert {:error, :rate_limited} = Adapter.delete_item("8888888888")
     end
 
@@ -964,12 +964,12 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     end
 
     test "list_board_items returns :board_not_found when boards is empty" do
-      Application.put_env(:symphony_elixir, :monday_client_module, E2EBoardNotFoundClient)
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessBoardNotFoundClient)
       assert {:error, :board_not_found} = Adapter.list_board_items(999_999)
     end
 
     test "list_board_items propagates client errors" do
-      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
       assert {:error, :rate_limited} = Adapter.list_board_items(123_456)
     end
   end
