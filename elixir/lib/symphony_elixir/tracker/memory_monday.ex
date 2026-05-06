@@ -125,6 +125,7 @@ defmodule SymphonyElixir.Tracker.MemoryMonday do
 
   defp push_event(event) do
     ensure_started()
+
     Agent.update(__MODULE__, fn s ->
       Map.update(s, :events, [event], &[event | &1])
     end)

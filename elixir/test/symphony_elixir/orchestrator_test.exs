@@ -115,9 +115,7 @@ defmodule SymphonyElixir.OrchestratorTest do
 
         case Orchestrator.start_link(name: second_name) do
           {:ok, second_pid} ->
-            flunk(
-              "expected second orchestrator to fail to acquire heartbeat lock; got pid=#{inspect(second_pid)}"
-            )
+            flunk("expected second orchestrator to fail to acquire heartbeat lock; got pid=#{inspect(second_pid)}")
 
           {:error, _reason} ->
             :ok

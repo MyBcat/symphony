@@ -147,9 +147,11 @@ defmodule SymphonyElixir.Monday.Adapter do
   @impl true
   def fetch_candidate_issues_with_phi_findings, do: fetch_candidate_issues_with_phi_findings([])
 
+  @spec fetch_candidate_issues_with_phi_findings(keyword()) :: {:ok, SymphonyElixir.Tracker.fetch_with_phi_result()} | {:error, term()}
   def fetch_candidate_issues_with_phi_findings(opts) do
     cfg = tracker_config()
     eligible_states = cfg.active_states ++ cfg.handoff_states
+
     fetch_issues_filtered_with_phi(
       cfg,
       eligible_states,
@@ -549,9 +551,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   end
 
   defp log_warn_refresh_offender(offender) do
-    Logger.warning(
-      "Symphony PHI gate (warn mode) detected PHI during item refresh identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing"
-    )
+    Logger.warning("Symphony PHI gate (warn mode) detected PHI during item refresh identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing")
   end
 
   defp phi_gate_mode do

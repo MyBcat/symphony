@@ -125,8 +125,7 @@ defmodule SymphonyElixir.Monday.ItemTest do
           },
           %{
             "id" => "u2",
-            "body" =>
-              "## Symphony PR Refusal\n\nReason: branch_convention_violation\n",
+            "body" => "## Symphony PR Refusal\n\nReason: branch_convention_violation\n",
             "created_at" => "2026-05-01T11:00:00Z"
           }
         ]
@@ -166,8 +165,7 @@ defmodule SymphonyElixir.Monday.ItemTest do
           },
           %{
             "id" => "u2",
-            "body" =>
-              "## Symphony PHI Refusal\n\nFinding types: `patient_name`\n",
+            "body" => "## Symphony PHI Refusal\n\nFinding types: `patient_name`\n",
             "created_at" => "2026-05-01T11:00:00Z"
           }
         ]
@@ -207,8 +205,7 @@ defmodule SymphonyElixir.Monday.ItemTest do
           },
           %{
             "id" => "u2",
-            "body" =>
-              "## Symphony Cost Cap\n\nToday's spend: `$50.00`\nSymphony refused dispatch.\n",
+            "body" => "## Symphony Cost Cap\n\nToday's spend: `$50.00`\nSymphony refused dispatch.\n",
             "created_at" => "2026-05-01T11:00:00Z"
           }
         ]
@@ -248,14 +245,12 @@ defmodule SymphonyElixir.Monday.ItemTest do
           },
           %{
             "id" => "u2",
-            "body" =>
-              "## Symphony Codex Review\n\n```text\nReviewed PR. NO BLOCKING ISSUES\n```\n",
+            "body" => "## Symphony Codex Review\n\n```text\nReviewed PR. NO BLOCKING ISSUES\n```\n",
             "created_at" => "2026-05-05T10:30:00Z"
           },
           %{
             "id" => "u3",
-            "body" =>
-              "## Symphony Auto-Merge Failed\n\n```text\ngh pr merge exited 1\n```\n",
+            "body" => "## Symphony Auto-Merge Failed\n\n```text\ngh pr merge exited 1\n```\n",
             "created_at" => "2026-05-05T11:00:00Z"
           }
         ]
