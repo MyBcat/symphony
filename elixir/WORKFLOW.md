@@ -418,7 +418,7 @@ Required end-of-run command sequence (after the work in Phases 1–3 below is do
 - `git add -A` — stage everything
 - `git commit -m "feat({{ issue.identifier }}): <one-line summary>"` — commit
 - `git push -u origin symphony/{{ issue.identifier }}/attempt-1` — push to origin
-- `gh pr view --json nameWithOwner` — confirm the repo name
+- `gh repo view --json nameWithOwner` — confirm the repo name
 - `gh pr create --base main --head symphony/{{ issue.identifier }}/attempt-1 --title "..." --body "..."` — open the PR
 - `cat > _symphony_summary.md` — write the summary file with the PR URL
 

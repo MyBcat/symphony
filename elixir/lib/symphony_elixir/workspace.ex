@@ -267,8 +267,15 @@ defmodule SymphonyElixir.Workspace do
   # Symphony per-issue work branch convention is `symphony/<identifier>/attempt-1`
   # (per Spec 4 §2.8 / M-8 PR safety). Idempotent across retries via
   # `git checkout -B`. Returns nil for issues without an identifier.
+  #
+  # M-0b Codex review fix: identifier flows into a shell heredoc — strip any
+  # character that isn't a Monday-id-safe alphanumeric/hyphen/underscore so a
+  # malformed identifier can't inject shell metachars. Tracker identifiers
+  # are SYM-<digits>, so this is a tight whitelist.
   defp work_branch_for(identifier) when is_binary(identifier) and identifier != "" do
-    "symphony/#{identifier}/attempt-1"
+    sanitized = String.replace(identifier, ~r/[^A-Za-z0-9\-_]/, "")
+
+    if sanitized == "", do: nil, else: "symphony/#{sanitized}/attempt-1"
   end
 
   defp work_branch_for(_), do: nil
