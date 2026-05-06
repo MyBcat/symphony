@@ -56,8 +56,7 @@ defmodule SymphonyElixir.CostMeter do
   the cost that would have tipped the meter past the cap.
   """
   @type refusal ::
-          {:cost_cap_exceeded, :daily, current :: float(), cap :: float(),
-           estimated :: float()}
+          {:cost_cap_exceeded, :daily, current :: float(), cap :: float(), estimated :: float()}
 
   @typedoc "Token counts forwarded to `add/3`."
   @type token_input :: %{

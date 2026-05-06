@@ -238,9 +238,7 @@ defmodule SymphonyElixir.E2E.Harness do
   defp run_symphony_and_assert(deps, item, identifier, ctx) do
     workspace_path = Path.join(ctx.workspace_root, identifier)
 
-    deps.logger.(
-      "e2e: invoking symphony runner identifier=#{identifier} max_wait_s=#{ctx.max_wait_seconds}"
-    )
+    deps.logger.("e2e: invoking symphony runner identifier=#{identifier} max_wait_s=#{ctx.max_wait_seconds}")
 
     runner_result =
       run_runner_with_polling(deps, item, ctx)
