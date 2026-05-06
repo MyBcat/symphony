@@ -1050,10 +1050,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Handle failed tool calls", issue,
-                 on_message: on_message,
-                 tool_executor: tool_executor
-               )
+               Adapter.run(workspace, "Handle failed tool calls", issue, on_message: on_message, tool_executor: tool_executor)
 
       assert_received {:tool_called, "legacy_tracker_graphql", %{"query" => "query Viewer { viewer { id } }"}}
 

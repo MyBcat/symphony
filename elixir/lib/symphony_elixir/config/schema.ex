@@ -421,6 +421,27 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Dashboard do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: true)
+      field(:port, :integer, default: 4000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :port], empty_values: [])
+      # M-2 hardening: restrict to valid unprivileged port range. Below 1024
+      # would require root; above 65535 is invalid.
+      |> validate_number(:port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65535)
+    end
+  end
+
   defmodule CostCap do
     @moduledoc false
     use Ecto.Schema
@@ -478,6 +499,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:repo_policy, RepoPolicy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:dashboard, Dashboard, on_replace: :update, defaults_to_struct: true)
     embeds_one(:cost_cap, CostCap, on_replace: :update, defaults_to_struct: true)
     embeds_one(:phi_gate, PHIGate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:secrets, Secrets, on_replace: :update, defaults_to_struct: true)
@@ -576,6 +598,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:repo_policy, with: &RepoPolicy.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:dashboard, with: &Dashboard.changeset/2)
     |> cast_embed(:cost_cap, with: &CostCap.changeset/2)
     |> cast_embed(:phi_gate, with: &PHIGate.changeset/2)
     |> cast_embed(:secrets, with: &Secrets.changeset/2)

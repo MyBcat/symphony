@@ -24,7 +24,13 @@ defmodule SymphonyElixir.HttpServer do
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
-        with {:ok, ip} <- parse_host(host) do
+        # M-2 PHI/HIPAA hardening: allowlist loopback only. PHI can leak via
+        # the /failures dashboard; binding to anything but loopback exposes
+        # it to the network. Validated against the resolved IP, not the
+        # input string, so "localhost" → 127.0.0.1 is accepted but "0.0.0.0"
+        # or any public IP is refused.
+        with {:ok, ip} <- parse_host(host),
+             :ok <- assert_loopback!(ip, host) do
           endpoint_opts = [
             server: true,
             http: [ip: ip, port: port],
@@ -75,6 +81,17 @@ defmodule SymphonyElixir.HttpServer do
           {:ok, ip} -> {:ok, ip}
           {:error, _reason} -> :inet.getaddr(charhost, :inet6)
         end
+    end
+  end
+
+  defp assert_loopback!(ip, host) do
+    cond do
+      ip == {127, 0, 0, 1} -> :ok
+      ip == {0, 0, 0, 0, 0, 0, 0, 1} -> :ok
+      true ->
+        raise "M-2 dashboard refusing to bind: #{inspect(host)} resolves to #{:inet.ntoa(ip)}, " <>
+                "but only loopback (127.0.0.1, ::1, localhost) is allowed. PHI in /failures " <>
+                "must never leave the host."
     end
   end
 

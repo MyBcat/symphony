@@ -1712,7 +1712,9 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
-          runtime_seconds: running_seconds(metadata.started_at, now)
+          runtime_seconds: running_seconds(metadata.started_at, now),
+          profile: Map.get(metadata.issue, :profile),
+          repo: Map.get(metadata.issue, :repo)
         }
       end)
 

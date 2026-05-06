@@ -106,7 +106,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       MemoryMonday.reset()
 
       on_exit(fn ->
-        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
+        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
         Application.delete_env(:symphony_elixir, :pr_safety_gh_module)
         Application.delete_env(:symphony_elixir, :pr_safety_state_path)
         Application.delete_env(:symphony_elixir, :auto_merge_runner)
@@ -845,7 +845,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       )
 
       on_exit(fn ->
-        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
+        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
       end)
 
       :ok
@@ -936,10 +936,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
           send(self(), {:recording_event, %{kind: :stalled}})
         end
 
-        send(
-          self(),
-          {:recording_event, %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}}
-        )
+        send(self(), {:recording_event, %{kind: :turn_completed, payload: %{}, tokens: %{input: 10, output: 5, total: 15}}})
 
         :ok
       end
@@ -992,7 +989,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       MemoryMonday.reset()
 
       on_exit(fn ->
-        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
+        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
         Application.delete_env(:symphony_elixir, :recording_adapter_test_pid)
         Application.delete_env(:symphony_elixir, :agent_runtime_adapter_overrides)
 
@@ -1092,7 +1089,6 @@ defmodule SymphonyElixir.AgentRunnerTest do
       assert_received {:agent_native_tokens, "issue-tokens-1", %{"claude" => %{input: 10, output: 5, total: 15}}}
     end
 
-    @tag :skip
     test "cost-cap refusal posts workpad, skips adapter dispatch, and exits with backoff reason" do
       install_recording_adapter(:claude)
       configure_profiles_workflow(:claude, "claude_test", %{}, cost_cap_daily_usd: 0.0001)
@@ -1204,7 +1200,6 @@ defmodule SymphonyElixir.AgentRunnerTest do
              "expected failure_write for profile_resolution_failed; got events=#{inspect(MemoryMonday.events())}"
     end
 
-    @tag :skip
     test "repo allowed_profiles blocks disallowed profile before adapter dispatch" do
       install_recording_adapter(:claude)
 

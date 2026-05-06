@@ -1,5 +1,9 @@
 import Config
 
+if config_env() == :test do
+  import_config "test.exs"
+end
+
 config :phoenix, :json_library, Jason
 
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,

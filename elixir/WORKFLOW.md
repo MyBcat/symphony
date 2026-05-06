@@ -1,6 +1,9 @@
 ---
 cost_cap:
   daily_usd: 50
+dashboard:
+  enabled: true
+  port: 4000
 # Spec M-6 PHI gate. `strict` flips PHI-tainted items to "Cancelled" and posts
 # a `## Symphony PHI Refusal` workpad with finding *kinds* only (never raw
 # matched text). `warn` logs and continues dispatch. Strict is the refuse
