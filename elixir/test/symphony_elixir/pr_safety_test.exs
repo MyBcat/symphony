@@ -66,7 +66,8 @@ defmodule SymphonyElixir.PRSafetyTest do
     test "returns {:ok, :transition} when branch matches the convention" do
       url = "https://github.com/MyBcat/symphony/pull/100"
 
-      StubGH.stub_pr_view_basic(url,
+      StubGH.stub_pr_view_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -84,7 +85,8 @@ defmodule SymphonyElixir.PRSafetyTest do
     test "returns branch_convention_violation when branch does not match" do
       url = "https://github.com/MyBcat/symphony/pull/101"
 
-      StubGH.stub_pr_view_basic(url,
+      StubGH.stub_pr_view_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -137,7 +139,8 @@ defmodule SymphonyElixir.PRSafetyTest do
 
       :ok = PRState.record("11923258050", %{url: old_url, sha: "abc1234"})
 
-      StubGH.stub_pr_view_basic(new_url,
+      StubGH.stub_pr_view_basic(
+        new_url,
         {:ok,
          %{
            base_branch: "main",
@@ -164,9 +167,7 @@ defmodule SymphonyElixir.PRSafetyTest do
   describe "reason_label/1" do
     test "renders branch_convention_violation with got/expected" do
       label =
-        PRSafety.reason_label(
-          {:branch_convention_violation, "feature/x", "symphony/SYM-1/attempt-N"}
-        )
+        PRSafety.reason_label({:branch_convention_violation, "feature/x", "symphony/SYM-1/attempt-N"})
 
       assert label == "branch_convention_violation: got feature/x, expected symphony/SYM-1/attempt-N"
     end

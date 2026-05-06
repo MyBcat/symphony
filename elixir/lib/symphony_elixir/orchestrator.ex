@@ -195,9 +195,7 @@ defmodule SymphonyElixir.Orchestrator do
           %{state | heartbeat_pid: pid}
 
         {:error, reason} ->
-          Logger.warning(
-            "Symphony heartbeat renewal loop failed to start (#{inspect(reason)}); orchestrator will run without heartbeat refresh until restart"
-          )
+          Logger.warning("Symphony heartbeat renewal loop failed to start (#{inspect(reason)}); orchestrator will run without heartbeat refresh until restart")
 
           state
       end
@@ -248,17 +246,13 @@ defmodule SymphonyElixir.Orchestrator do
           :warn ->
             Enum.each(offenders, &PHIGate.warn/1)
 
-            Logger.warning(
-              "Symphony PHI gate (warn mode) at boot: #{length(offenders)} item(s) have PHI findings; continuing"
-            )
+            Logger.warning("Symphony PHI gate (warn mode) at boot: #{length(offenders)} item(s) have PHI findings; continuing")
 
             :ok
         end
 
       {:error, reason} ->
-        Logger.warning(
-          "Symphony PHI boot scan failed (#{inspect(reason)}); continuing — first poll tick will retry"
-        )
+        Logger.warning("Symphony PHI boot scan failed (#{inspect(reason)}); continuing — first poll tick will retry")
 
         :ok
     end
@@ -381,9 +375,7 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             {:shutdown, :cost_cap_exceeded} ->
-              Logger.warning(
-                "Agent task refused by cost cap for issue_id=#{issue_id} session_id=#{session_id}; scheduling cost-cap backoff"
-              )
+              Logger.warning("Agent task refused by cost cap for issue_id=#{issue_id} session_id=#{session_id}; scheduling cost-cap backoff")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -677,9 +669,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_tracker_success(%State{outage_active?: true} = state) do
-    Logger.warning(
-      "Symphony tracker: outage exit (Tracker.fetch returned 200 after #{state.outage_failure_count} consecutive 5xx/timeout failures); resuming normal polling"
-    )
+    Logger.warning("Symphony tracker: outage exit (Tracker.fetch returned 200 after #{state.outage_failure_count} consecutive 5xx/timeout failures); resuming normal polling")
 
     %{state | outage_failure_count: 0, outage_active?: false}
   end
@@ -697,9 +687,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{state | outage_failure_count: next_count, outage_active?: true}
 
       state.outage_active? ->
-        Logger.debug(
-          "Symphony tracker: still in outage (#{next_count} consecutive failures; latest reason=#{inspect(reason)})"
-        )
+        Logger.debug("Symphony tracker: still in outage (#{next_count} consecutive failures; latest reason=#{inspect(reason)})")
 
         %{state | outage_failure_count: next_count}
 

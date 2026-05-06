@@ -71,9 +71,7 @@ defmodule SymphonyElixir.Secrets.BootCheck do
   end
 
   defp do_run(other) do
-    Logger.warning(
-      "Symphony secrets boot check ignoring unknown mode #{inspect(other)}; treating as :skip"
-    )
+    Logger.warning("Symphony secrets boot check ignoring unknown mode #{inspect(other)}; treating as :skip")
 
     :ok
   end
@@ -101,16 +99,12 @@ defmodule SymphonyElixir.Secrets.BootCheck do
       |> Enum.map(&length/1)
       |> Enum.sum()
 
-    Logger.info(
-      "Symphony secrets boot check passed: #{total} secret(s) across #{map_size(secrets_by_repo)} repo(s)"
-    )
+    Logger.info("Symphony secrets boot check passed: #{total} secret(s) across #{map_size(secrets_by_repo)} repo(s)")
 
     Enum.each(secrets_by_repo, fn {repo_key, refs} ->
       env_names = Resolver.declared_env_names(refs)
 
-      Logger.info(
-        "Symphony secrets boot check: repo=#{repo_key} env_names=#{Enum.join(env_names, ",")}"
-      )
+      Logger.info("Symphony secrets boot check: repo=#{repo_key} env_names=#{Enum.join(env_names, ",")}")
     end)
   end
 

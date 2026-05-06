@@ -627,8 +627,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       assert_received {:app_server_message,
                        %{
                          event: :tool_input_auto_answered,
-                         answer:
-                           "This is a non-interactive session. Operator input is unavailable."
+                         answer: "This is a non-interactive session. Operator input is unavailable."
                        }}
     after
       File.rm_rf(test_root)
@@ -927,9 +926,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Handle supported tool calls", issue,
-                 tool_executor: tool_executor
-               )
+               Adapter.run(workspace, "Handle supported tool calls", issue, tool_executor: tool_executor)
 
       assert_received {:tool_called, "legacy_tracker_graphql",
                        %{
@@ -1053,10 +1050,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Handle failed tool calls", issue,
-                 on_message: on_message,
-                 tool_executor: tool_executor
-               )
+               Adapter.run(workspace, "Handle failed tool calls", issue, on_message: on_message, tool_executor: tool_executor)
 
       assert_received {:tool_called, "legacy_tracker_graphql",
                        %{"query" => "query Viewer { viewer { id } }"}}

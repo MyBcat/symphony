@@ -44,6 +44,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
     @impl true
     def fetch_candidate_issues_with_phi_findings,
       do: {:ok, %{items: [], phi_offenders: []}}
+
     @impl true
     def fetch_issues_by_states(_), do: {:ok, []}
     @impl true
@@ -205,7 +206,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/42"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -243,7 +245,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/142"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -285,7 +288,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
       try do
         url = "https://github.com/openai/symphony/pull/999"
 
-        PRSafetyStubGH.stub_basic(url,
+        PRSafetyStubGH.stub_basic(
+          url,
           {:ok,
            %{
              base_branch: "main",
@@ -314,7 +318,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/156"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -339,7 +344,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/42"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -384,7 +390,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/4242"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -422,7 +429,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
          %{issue: issue, writer_pid: writer_pid} do
       url = "https://github.com/openai/symphony/pull/55"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -553,7 +561,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
       # First emit a PR URL so that completion bumps status to "Human Review".
       url = "https://github.com/openai/symphony/pull/99"
 
-      PRSafetyStubGH.stub_basic(url,
+      PRSafetyStubGH.stub_basic(
+        url,
         {:ok,
          %{
            base_branch: "main",
@@ -793,9 +802,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
     test "emit_failure_update_via_writer pulls session off the writer pid",
          %{issue: issue, writer_pid: writer_pid} do
       :ok =
-        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded,
-          message: "max_turns reached"
-        )
+        AgentRunner.emit_failure_update_via_writer(writer_pid, issue, :max_turns_exceeded, message: "max_turns reached")
 
       events = MemoryMonday.events()
 
@@ -816,9 +823,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       Agent.stop(dead_pid)
 
       :ok =
-        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter,
-          message: "should not be posted"
-        )
+        AgentRunner.emit_failure_update_via_writer(dead_pid, issue, :exception_in_adapter, message: "should not be posted")
 
       events = MemoryMonday.events()
 

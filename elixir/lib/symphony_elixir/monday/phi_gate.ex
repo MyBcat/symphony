@@ -57,18 +57,14 @@ defmodule SymphonyElixir.Monday.PHIGate do
 
     body = Workpad.render_phi_refusal(session, offender.kinds)
 
-    Logger.warning(
-      "Symphony PHI gate refusing item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; flipping to Cancelled"
-    )
+    Logger.warning("Symphony PHI gate refusing item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; flipping to Cancelled")
 
     case Tracker.post_phi_refusal(offender.id, body) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.error(
-          "Symphony PHI gate failed to post refusal for identifier=#{offender.identifier}: #{inspect(reason)}"
-        )
+        Logger.error("Symphony PHI gate failed to post refusal for identifier=#{offender.identifier}: #{inspect(reason)}")
 
         :ok
     end
@@ -78,9 +74,7 @@ defmodule SymphonyElixir.Monday.PHIGate do
         :ok
 
       {:error, reason} ->
-        Logger.error(
-          "Symphony PHI gate failed to flip status to Cancelled for identifier=#{offender.identifier}: #{inspect(reason)}"
-        )
+        Logger.error("Symphony PHI gate failed to flip status to Cancelled for identifier=#{offender.identifier}: #{inspect(reason)}")
 
         :ok
     end
@@ -95,9 +89,7 @@ defmodule SymphonyElixir.Monday.PHIGate do
   """
   @spec warn(offender()) :: :ok
   def warn(offender) when is_map(offender) do
-    Logger.warning(
-      "Symphony PHI gate (warn mode) detected PHI in item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing without status change"
-    )
+    Logger.warning("Symphony PHI gate (warn mode) detected PHI in item identifier=#{offender.identifier} kinds=#{inspect(offender.kinds)}; continuing without status change")
 
     :ok
   end
