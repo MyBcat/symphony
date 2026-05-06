@@ -1,6 +1,6 @@
 ---
 cost_cap:
-  daily_usd: 50
+  daily_usd: 1000
 dashboard:
   enabled: true
   port: 4000
@@ -158,6 +158,120 @@ repos:
       - claude_sonnet
       - gemini_long_context
     default_branch: main
+  # Auto-discovered from /mnt/d_drive/repos local clones with MyBcat GitHub
+  # remotes. All default to the safe profile allowlist + auto_merge OFF.
+  # Operator must explicitly review + flip auto_merge_on_codex_pass to true
+  # per repo before unattended merging is allowed.
+  call-analysis:
+    clone_url: https://github.com/MyBcat/call-analysis.git
+    after_create: |
+      if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  eyecloud-ai:
+    clone_url: https://github.com/MyBcat/eyecloud-ai.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  finance_seat:
+    clone_url: https://github.com/MyBcat/finance_seat.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  hal:
+    clone_url: https://github.com/MyBcat/hal.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  hubspot-cleaner:
+    clone_url: https://github.com/MyBcat/hubspot-cleaner.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  insurance-auto:
+    clone_url: https://github.com/MyBcat/insurance-auto.git
+    after_create: |
+      if [ -f package.json ]; then npm ci || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  mso:
+    clone_url: https://github.com/MyBcat/mso.git
+    after_create: |
+      if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  OB-mybcat:
+    clone_url: https://github.com/MyBcat/OB-mybcat.git
+    after_create: |
+      if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  patient_cordinator:
+    clone_url: https://github.com/MyBcat/patient_cordinator.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  pivot:
+    clone_url: https://github.com/MyBcat/pivot.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  sales-agent:
+    clone_url: https://github.com/MyBcat/sales-agent.git
+    after_create: |
+      if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
+  # CVC marketing site — owned by AnkitClassicVision (personal account), not
+  # MyBcat org. Local clone at /mnt/d_drive/repos/cvc_grow/cvc-new.
+  cvc-new-site:
+    clone_url: https://github.com/AnkitClassicVision/cvc-new-site.git
+    after_create: |
+      if [ -f package.json ]; then npm ci || true; fi
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
@@ -176,7 +290,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-opus-4-7"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
   claude_sonnet:
     kind: claude
     max_concurrent: 6
@@ -186,7 +300,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-sonnet-4-6"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
   codex_gpt55_xhigh:
     kind: codex
     max_concurrent: 4
@@ -279,22 +393,49 @@ No description provided.
 
 Instructions:
 
-1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
-2. You do NOT have access to Monday.com. Symphony manages all Monday writes (status transitions, workpad updates, PR linkage) based on observing your event stream and the workspace files you write.
-3. Do the engineering work needed to satisfy the item description. Work only in the provided repository copy. Do not touch any other path.
-4. **Git remote and PR target — strict rules.** Symphony has already cloned the repository for you and configured the remote `origin`. The ONLY valid push target is `origin`. You MUST NOT:
-   - run `gh repo create` (you don't have permission to create repos)
+This is an unattended orchestration session. Never ask a human to perform follow-up actions. You do NOT have access to Monday.com — Symphony manages all Monday writes based on your event stream and workspace files.
+
+Work only in the provided repository copy. Do not touch any other path.
+
+## Phase 1 — PLAN (always do this first)
+
+Before changing any code:
+
+1. If the description is ambiguous OR scope spans 3+ files OR there are design choices to make, invoke the `superpowers:brainstorming` skill to explore intent and tradeoffs. Skip only for trivial bug fixes or one-line config changes.
+2. Invoke `superpowers:writing-plans` to produce a structured plan. Write the result to `_symphony_plan.md` in the workspace root with:
+   - Goal (1 sentence)
+   - Acceptance criteria (bulleted)
+   - Files to touch (paths, with rationale per file)
+   - Out of scope (explicit)
+   - Risks / unknowns
+
+**Commit and push `_symphony_plan.md` to your work branch BEFORE making any code or test changes.** The plan is the contract — committing it first means the "plan vs reality" delta in the summary is meaningful.
+
+## Phase 2 — EXECUTE
+
+3. Follow the plan. For new behavior or bug fixes, invoke `superpowers:test-driven-development` — write failing test first, watch it fail, then implement.
+4. After significant changes, invoke `superpowers:requesting-code-review` to self-review before opening the PR.
+
+(Sub-agent spawning via the `Task` tool is intentionally NOT enabled in the agent's allowed_tools allowlist until per-sub-agent workspace sandboxing is verified — Codex review on PR #27 flagged this. Treat all work as single-process for now.)
+
+## Phase 3 — SHIP
+
+6. **Git remote and PR target — strict rules.** Symphony has already cloned the repository and configured `origin`. The ONLY valid push target is `origin`. You MUST NOT:
+   - run `gh repo create` (no permission)
    - change the remote URL with `git remote set-url`
-   - push to a different remote / a repo name you invented
-   - try `git push --force` or `git push --force-with-lease`
-   To inspect the remote, run `git remote -v` and use that exact URL. Run `gh repo view --json nameWithOwner` to confirm what repo you are working in before opening the PR.
-5. **Branch naming.** Create your work branch as `symphony/{{ issue.identifier }}/attempt-1` (or attempt-N for retry contexts). Push that branch to `origin`. Do not push to `main` or `master`.
-6. **Open the PR.** Run `gh pr create --base main --head <your-branch>` against `origin`. Title and body should reference `{{ issue.identifier }}`. Symphony detects the PR URL in your output and writes it to Monday.
-7. At completion, write a markdown summary to `_symphony_summary.md` in the workspace root. Include:
-   - One-paragraph description of what changed
+   - push to a different remote / invented repo name
+   - run `git push --force` or `--force-with-lease`
+   To inspect the remote, run `git remote -v` and use that exact URL. Run `gh repo view --json nameWithOwner` to confirm.
+7. **Branch naming.** Use `symphony/{{ issue.identifier }}/attempt-1` (or attempt-N for retry contexts). Push to `origin`. Never push to `main` or `master`.
+8. **Open the PR.** Run `gh pr create --base main --head <your-branch>` against `origin`. Title and body must reference `{{ issue.identifier }}`. Body should summarize the plan and acceptance criteria. Symphony detects the PR URL in your output and writes it to Monday.
+9. **Write `_symphony_summary.md`** in the workspace root with:
+   - What changed (one paragraph)
+   - **Plan vs reality** — what differed from `_symphony_plan.md` and why
    - Test plan executed
-   - Any open concerns or follow-ups
-   - The PR URL (so Symphony has redundancy if URL detection misses it)
-   - Symphony will fold this into the Monday workpad on completion.
-8. Only stop early for a true blocker (missing required auth/permissions/secrets that are NOT addressable by the rules above). If blocked, write the blocker to `_symphony_summary.md` and exit with a clear final message.
-9. Do not exit voluntarily until the PR is open or you are explicitly blocked.
+   - Open concerns or follow-ups
+   - The PR URL (redundancy if URL detection misses it)
+
+## Stopping rules
+
+10. Only stop early for a true blocker (missing required auth/permissions/secrets that aren't addressable by the rules above). If blocked, write the blocker to `_symphony_summary.md` and exit with a clear final message.
+11. Do not exit voluntarily until the PR is open or you are explicitly blocked.
