@@ -15,7 +15,7 @@ defmodule SymphonyElixir.Monday.PHIGateTest do
     end
 
     on_exit(fn ->
-      Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
 
       if pid = Process.whereis(MemoryMonday) do
         Process.exit(pid, :normal)

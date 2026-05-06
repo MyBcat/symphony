@@ -499,7 +499,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  test "todo issue with terminal blockers remains dispatch-eligible" do
+  test "issue with only terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
       running: %{},
@@ -512,7 +512,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       id: "ready-1",
       identifier: "MT-1003",
       title: "Ready work",
-      state: "Todo",
+      state: "Symphony Ready",
       blocked_by: [%{id: "blocker-2", identifier: "MT-1004", state: "Done"}]
     }
 

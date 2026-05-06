@@ -106,7 +106,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       MemoryMonday.reset()
 
       on_exit(fn ->
-        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
         Application.delete_env(:symphony_elixir, :pr_safety_gh_module)
         Application.delete_env(:symphony_elixir, :pr_safety_state_path)
         Application.delete_env(:symphony_elixir, :auto_merge_runner)
@@ -845,7 +845,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       )
 
       on_exit(fn ->
-        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
       end)
 
       :ok
@@ -992,7 +992,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       MemoryMonday.reset()
 
       on_exit(fn ->
-        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
         Application.delete_env(:symphony_elixir, :recording_adapter_test_pid)
         Application.delete_env(:symphony_elixir, :agent_runtime_adapter_overrides)
 

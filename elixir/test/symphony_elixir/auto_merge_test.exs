@@ -173,7 +173,7 @@ defmodule SymphonyElixir.AutoMergeTest do
     MemoryMonday.set(:item_states_result, {:ok, [issue_in_human_review]})
 
     on_exit(fn ->
-      Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday)
       Application.delete_env(:symphony_elixir, :auto_merge_gh_module)
       Application.delete_env(:symphony_elixir, :codex_review_module)
       Application.delete_env(:symphony_elixir, :auto_merge_state_path)

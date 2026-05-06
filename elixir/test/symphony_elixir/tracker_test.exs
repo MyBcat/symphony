@@ -23,7 +23,7 @@ defmodule SymphonyElixir.TrackerTest do
 
   setup do
     Application.put_env(:symphony_elixir, :tracker_adapter_override, FakeAdapter)
-    on_exit(fn -> Application.delete_env(:symphony_elixir, :tracker_adapter_override) end)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :tracker_adapter_override, SymphonyElixir.Tracker.MemoryMonday) end)
     :ok
   end
 
