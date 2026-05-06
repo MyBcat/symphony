@@ -124,6 +124,7 @@ defmodule SymphonyElixir.E2E.Harness do
         else
           {:error, reason} ->
             log.("e2e: setup failed after item create reason=#{inspect(reason)}; cleaning up")
+
             finalize(deps, item, identifier,
               dry_run?: dry_run?,
               status: :failed,
@@ -137,6 +138,7 @@ defmodule SymphonyElixir.E2E.Harness do
       rescue
         exception ->
           log.("e2e: exception after item create #{inspect(exception)}; cleaning up")
+
           finalize(deps, item, identifier,
             dry_run?: dry_run?,
             status: :failed,

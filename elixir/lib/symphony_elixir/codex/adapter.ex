@@ -1,40 +1,151 @@
 defmodule SymphonyElixir.Codex.Adapter do
   @moduledoc """
-  Codex runtime adapter. Implements `SymphonyElixir.AgentRuntime` on top of the
-  long-running Codex app-server JSON-RPC 2.0 stream over stdio.
+  Codex runtime adapter. Drives Codex CLI 0.128+ via `codex exec --json`,
+  spawning one subprocess per turn and parsing the JSONL `ThreadEvent`
+  stream (`thread.started`, `turn.started`, `turn.completed`, `turn.failed`,
+  `error`, `item.{started,updated,completed}`).
 
-  This module preserves the legacy `run/4` and `run_turn/4` entry points used
-  by extension tests and Spec 1 callers, while exposing the six
-  `AgentRuntime` callbacks consumed by `AgentRunner`'s polymorphic dispatch
-  path.
+  Each `send_turn/3` invocation is a one-shot `codex exec --json` run.
+  Multi-turn continuity comes from workspace state (committed code, branch,
+  workpad) — Codex `exec` itself is stateless and exits after emitting
+  `turn.completed` (or `turn.failed`).
 
-  Token accounting stays Codex-native (`%{input, output, total}`) per Spec 2
-  DL-007 — there is no cross-runtime normalization.
+  Token accounting stays Codex-native (`%{input, output, total,
+  cached_input, reasoning_output}`) per Spec 2 DL-007 — there is no
+  cross-runtime normalization. AgentRunner's
+  `extract_token_delta_from_usage/1` reads `input_tokens` / `output_tokens`
+  off the `:usage` map carried on the `:turn_completed` envelope, which
+  this adapter populates verbatim from the JSONL stream.
   """
 
   @behaviour SymphonyElixir.AgentRuntime
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.ProjectTrust, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, PathSafety, SSH}
 
-  @initialize_id 1
-  @thread_start_id 2
-  @turn_start_id 3
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
-  @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
 
   @type session :: %{
-          port: port(),
-          metadata: map(),
-          approval_policy: String.t() | map(),
-          auto_approve_requests: boolean(),
-          thread_sandbox: String.t(),
-          turn_sandbox_policy: map(),
-          thread_id: String.t(),
+          command: String.t(),
           workspace: Path.t(),
-          worker_host: String.t() | nil
+          worker_host: String.t() | nil,
+          approval_policy: String.t() | map(),
+          thread_sandbox: String.t(),
+          turn_timeout_ms: pos_integer(),
+          stream_buffer_key: reference()
         }
+
+  ## ──────────────────────────────────────────────────────────────────────
+  ## AgentRuntime callbacks
+  ## ──────────────────────────────────────────────────────────────────────
+
+  @impl SymphonyElixir.AgentRuntime
+  @spec start_session(Path.t(), keyword() | map()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts_or_config \\ []) do
+    worker_host = fetch_worker_host(opts_or_config)
+
+    with :ok <- validate_profile_config(opts_or_config),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+         {:ok, command} <- command_for_session(opts_or_config),
+         {:ok, policies} <- session_policies(expanded_workspace, worker_host, opts_or_config) do
+      {:ok,
+       %{
+         command: command,
+         workspace: expanded_workspace,
+         worker_host: worker_host,
+         approval_policy: policies.approval_policy,
+         thread_sandbox: policies.thread_sandbox,
+         turn_timeout_ms: Config.settings!().codex.turn_timeout_ms,
+         stream_buffer_key: make_ref()
+       }}
+    end
+  end
+
+  @impl SymphonyElixir.AgentRuntime
+  @spec stop_session(session()) :: :ok
+  def stop_session(_session), do: :ok
+
+  @doc """
+  Submit a single prompt to a previously-started session.
+
+  Spawns a fresh `codex exec --json` subprocess, writes the prompt to it
+  via stdin (a temp file in the workspace, redirected via the bash
+  wrapper), and consumes the JSONL event stream until `turn.completed`,
+  `turn.failed`, or a top-level `error` event arrives. Events are observed
+  inline via the optional `:on_message` callback AND mirrored into a
+  per-session buffer that `stream_events/1` drains, so the polymorphic
+  AgentRunner contract stays uniform across runtimes.
+
+  Recognized opts:
+
+    * `:issue` — issue map (with `:id`, `:identifier`, `:title`) used by
+      `run_turn/4`. If absent, a placeholder is generated.
+    * `:on_message` — observer fn invoked inline for each event during the
+      turn. AgentRunner uses this to drive Tracker writes (status flips,
+      workpad upserts, PR detection).
+  """
+  @impl SymphonyElixir.AgentRuntime
+  @spec send_turn(session(), String.t(), keyword()) :: :ok | {:error, term()}
+  def send_turn(session, prompt, opts \\ []) do
+    issue = Keyword.get(opts, :issue, default_issue_for_send_turn())
+    extra_on_message = Keyword.get(opts, :on_message)
+
+    reset_event_buffer(session)
+    reset_session_tokens(session)
+
+    on_message =
+      compose_on_message(
+        fn message -> capture_event_for_stream(session, message) end,
+        compose_on_message(
+          fn message -> accumulate_tokens_from_message(session, message) end,
+          extra_on_message
+        )
+      )
+
+    case run_turn(session, prompt, issue, on_message: on_message) do
+      {:ok, _result} -> :ok
+      {:error, _reason} = err -> err
+    end
+  end
+
+  @impl SymphonyElixir.AgentRuntime
+  @spec stream_events(session()) :: Enumerable.t()
+  def stream_events(session) do
+    Stream.unfold(session, fn s ->
+      case drain_event_buffer(s) do
+        nil -> nil
+        [] -> nil
+        events when is_list(events) -> {Enum.reverse(events), :done}
+      end
+    end)
+    |> Stream.flat_map(& &1)
+  end
+
+  @impl SymphonyElixir.AgentRuntime
+  @spec runtime_native_tokens(session()) :: %{required(atom()) => non_neg_integer()}
+  def runtime_native_tokens(session) do
+    case Process.get({:symphony_codex_adapter_tokens, session_buffer_key(session)}) do
+      %{} = tokens -> tokens
+      _ -> empty_tokens()
+    end
+  end
+
+  @impl SymphonyElixir.AgentRuntime
+  @spec passes_safety_floor?(map(), map()) :: boolean()
+  def passes_safety_floor?(config, floor) do
+    thread_sandbox = config[:thread_sandbox] || config["thread_sandbox"]
+    approval_policy = config[:approval_policy] || config["approval_policy"]
+
+    floor_thread_sandbox = Map.get(floor, "thread_sandbox", "workspace-write")
+
+    sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox) and
+      approval_policy == "never"
+  end
+
+  ## ──────────────────────────────────────────────────────────────────────
+  ## Legacy entry points (preserved for Spec 1 callers + tests)
+  ## ──────────────────────────────────────────────────────────────────────
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
@@ -48,73 +159,491 @@ defmodule SymphonyElixir.Codex.Adapter do
   end
 
   @doc """
-  Start a Codex app-server session for `workspace`.
-
-  This function serves both the legacy `AgentRunner` integration (which passes
-  a `Keyword.t()` of opts, currently only `:worker_host`) and the
-  `SymphonyElixir.AgentRuntime.start_session/2` behaviour callback (which
-  passes a `map()` config). Map keys may use either atoms or strings. Profile
-  map config controls the Codex command plus `approval_policy`,
-  `thread_sandbox`, and optional `turn_sandbox_policy`; legacy keyword opts keep
-  using the top-level `codex.*` settings.
+  Run a single Codex `exec --json` turn against a started session.
   """
-  @impl SymphonyElixir.AgentRuntime
-  @spec start_session(Path.t(), keyword() | map()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace, opts_or_config \\ []) do
-    worker_host = fetch_worker_host(opts_or_config)
+  @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def run_turn(session, prompt, issue, opts \\ []) do
+    on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    metadata = base_metadata(session)
 
-    with :ok <- validate_profile_config(opts_or_config),
-         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         :ok <- maybe_ensure_local_codex_trust(expanded_workspace, worker_host),
-         {:ok, command} <- command_for_session(opts_or_config),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, command) do
-      metadata = port_metadata(port, worker_host)
+    case start_codex_process(session, prompt) do
+      {:ok, port, prompt_file} ->
+        try do
+          state = %{
+            on_message: on_message,
+            metadata: metadata,
+            issue: issue,
+            session_id: nil,
+            thread_id: nil,
+            session_emitted?: false,
+            timeout_ms: session.turn_timeout_ms
+          }
 
-      with {:ok, session_policies} <-
-             session_policies(expanded_workspace, worker_host, opts_or_config),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
-        {:ok,
-         %{
-           port: port,
-           metadata: metadata,
-           approval_policy: session_policies.approval_policy,
-           auto_approve_requests: session_policies.approval_policy == "never",
-           thread_sandbox: session_policies.thread_sandbox,
-           turn_sandbox_policy: session_policies.turn_sandbox_policy,
-           thread_id: thread_id,
-           workspace: expanded_workspace,
-           worker_host: worker_host
-         }}
-      else
-        {:error, reason} ->
+          drive_stream(port, "", state)
+        after
           stop_port(port)
-          {:error, reason}
+          if is_binary(prompt_file), do: File.rm(prompt_file)
+        end
+
+      {:error, reason} ->
+        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
+        emit(on_message, :startup_failed, %{reason: reason}, metadata)
+        {:error, reason}
+    end
+  end
+
+  ## ──────────────────────────────────────────────────────────────────────
+  ## Subprocess + stream loop
+  ## ──────────────────────────────────────────────────────────────────────
+
+  defp start_codex_process(session, prompt) do
+    case write_prompt_file(session, prompt) do
+      {:ok, prompt_file} ->
+        with {:ok, port} <- spawn_port(session, prompt, prompt_file) do
+          {:ok, port, prompt_file}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp write_prompt_file(%{worker_host: nil, workspace: workspace}, prompt) do
+    dir = Path.join(workspace, ".symphony")
+
+    with :ok <- File.mkdir_p(dir) do
+      path =
+        Path.join(
+          dir,
+          "codex_prompt_#{System.unique_integer([:positive])}.txt"
+        )
+
+      case File.write(path, prompt) do
+        :ok -> {:ok, path}
+        {:error, reason} -> {:error, {:prompt_write_failed, path, reason}}
       end
     end
   end
 
-  # SSH-backed sessions execute Codex on the remote worker, where the
-  # `~/.codex/config.toml` trust file is owned by that host. Local trust
-  # automation only runs when worker_host is absent; remote workers are
-  # responsible for their own trust setup.
-  defp maybe_ensure_local_codex_trust(_workspace, worker_host) when is_binary(worker_host),
-    do: :ok
+  # Remote workers receive the prompt as a shell-escaped positional
+  # argument inside the SSH command (no remote temp file created — that
+  # would require a second SSH round trip). See `spawn_port/3` remote
+  # branch.
+  defp write_prompt_file(_session, _prompt), do: {:ok, nil}
 
-  defp maybe_ensure_local_codex_trust(workspace, nil) do
-    case ProjectTrust.ensure_trusted(workspace) do
-      :ok ->
-        :ok
+  defp spawn_port(%{worker_host: nil} = session, _prompt, prompt_file) when is_binary(prompt_file) do
+    executable = System.find_executable("bash")
 
-      {:error, reason} ->
-        Logger.warning(
-          "Codex project trust update failed for workspace=#{workspace}: #{inspect(reason)}; " <>
-            "if Codex emits 'remoteControl/status/changed status: disabled' the workspace " <>
-            "must be added manually to ~/.codex/config.toml"
+    if is_nil(executable) do
+      {:error, :bash_not_found}
+    else
+      cmd = local_launch_command(session.command, prompt_file)
+      wrapped = SymphonyElixir.Secrets.Resolver.wrap_command(cmd)
+      env = scrub_inherited_env()
+
+      port =
+        Port.open(
+          {:spawn_executable, String.to_charlist(executable)},
+          [
+            :binary,
+            :exit_status,
+            :stderr_to_stdout,
+            args: [~c"-lc", String.to_charlist(wrapped)],
+            cd: String.to_charlist(session.workspace),
+            line: @port_line_bytes,
+            env: env
+          ]
         )
 
+      {:ok, port}
+    end
+  end
+
+  defp spawn_port(%{worker_host: worker_host} = session, prompt, _prompt_file)
+       when is_binary(worker_host) do
+    # Remote workers receive the prompt as a shell-escaped positional
+    # argument embedded directly in the SSH command. SSH's stdin pipe
+    # cannot be half-closed from Erlang, so streaming the prompt over
+    # stdin would require closing the port to signal EOF — which
+    # terminates the SSH connection before codex finishes reading. The
+    # positional-arg path avoids that timing trap and matches how
+    # `codex exec` documents its `[PROMPT]` argument. ARG_MAX limits
+    # apply (typically ≥ 128 KB on Linux), which is far above the
+    # ~50 KB Symphony prompts produced by `PromptBuilder`.
+    remote_command = remote_launch_command(session.workspace, session.command, prompt)
+
+    case SSH.start_port(worker_host, remote_command, line: @port_line_bytes) do
+      {:ok, port} -> {:ok, port}
+      other -> other
+    end
+  end
+
+  defp local_launch_command(command, prompt_file) do
+    "exec " <> command_with_policies(command) <> " < " <> shell_escape(prompt_file)
+  end
+
+  defp remote_launch_command(workspace, command, prompt) do
+    # M-0a Codex review fix: SSH inherits parent env via SendEnv/AcceptEnv. Strip
+    # CODEX_COMPANION_* + OPENAI_API_KEY explicitly on the remote shell so the
+    # remote codex spawn doesn't attach to the parent session's broker or flip
+    # auth modes. Mirrors scrub_inherited_env/0 which only covers Port.open env.
+    [
+      "unset CODEX_COMPANION_SESSION_ID CODEX_COMPANION_BROKER_SOCK CODEX_COMPANION_BROKER_PID OPENAI_API_KEY",
+      "cd #{shell_escape(workspace)}",
+      "exec #{command_with_policies(command)} #{shell_escape(prompt)}"
+    ]
+    |> Enum.join(" && ")
+  end
+
+  # Inject sandbox + approval policies if the configured command doesn't already
+  # carry them. Prevents misconfigured profiles from running codex with no
+  # workspace-write or with an unintended approval mode.
+  defp command_with_policies(command) when is_binary(command) do
+    command
+    |> ensure_config_flag("sandbox_mode", "workspace-write")
+    |> ensure_config_flag("approval_policy", "never")
+  end
+
+  defp ensure_config_flag(command, key, default_value) do
+    if String.contains?(command, key <> "=") do
+      command
+    else
+      command <> " -c '" <> key <> "=\"" <> default_value <> "\"'"
+    end
+  end
+
+  # Strip env vars that would corrupt a fresh `codex exec` child:
+  #
+  # * `CODEX_COMPANION_*` — when Symphony runs inside a parent Claude
+  #   Code session that has booted the codex-companion broker (the
+  #   `cxc-*` daemon under /tmp), the BEAM inherits these. Children
+  #   would attempt to talk to that broker socket and either crash or
+  #   leak state across orchestrations.
+  # * `OPENAI_API_KEY` — codex 0.128 prefers ChatGPT auth via
+  #   `~/.codex/auth.toml`; an inherited operator API key from the
+  #   parent shell can flip auth modes mid-flight.
+  defp scrub_inherited_env do
+    [
+      {~c"CODEX_COMPANION_SESSION_ID", false},
+      {~c"CODEX_COMPANION_BROKER_SOCK", false},
+      {~c"CODEX_COMPANION_BROKER_PID", false},
+      {~c"OPENAI_API_KEY", false}
+    ]
+  end
+
+  defp drive_stream(port, pending_line, state) do
+    receive do
+      {^port, {:data, {:eol, chunk}}} ->
+        line = pending_line <> to_string(chunk)
+        process_line(line, port, state)
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        drive_stream(port, pending_line <> to_string(chunk), state)
+
+      {^port, {:exit_status, status}} ->
+        handle_exit(status, state)
+    after
+      state.timeout_ms ->
+        emit(state.on_message, :turn_failed, %{reason: :turn_timeout}, state.metadata)
+        {:error, :turn_timeout}
+    end
+  end
+
+  defp process_line(line, port, state) do
+    case Jason.decode(line) do
+      {:ok, %{"type" => type} = event} when is_binary(type) ->
+        handle_event(type, event, line, port, state)
+
+      {:ok, _other} ->
+        log_non_json_stream_line(line, "turn stream")
+        drive_stream(port, "", state)
+
+      {:error, _reason} ->
+        log_non_json_stream_line(line, "turn stream")
+
+        if protocol_message_candidate?(line) do
+          emit(
+            state.on_message,
+            :malformed,
+            %{payload: line, raw: line},
+            state.metadata
+          )
+        end
+
+        drive_stream(port, "", state)
+    end
+  end
+
+  defp handle_event("thread.started", event, _raw, port, state) do
+    thread_id = Map.get(event, "thread_id")
+    state = %{state | thread_id: thread_id, session_id: thread_id}
+
+    state = ensure_session_started_emitted(state)
+    drive_stream(port, "", state)
+  end
+
+  defp handle_event("turn.started", _event, _raw, port, state) do
+    # Symphony's `:session_started` is already emitted on `thread.started`,
+    # so `turn.started` only carries observability value. Forward as a
+    # generic notification so workpad-write triggers can react if they want
+    # without confusing AgentRunner's `:codex` event matcher (which only
+    # cares about `:turn_completed` / `:turn_failed`).
+    state = ensure_session_started_emitted(state)
+    drive_stream(port, "", state)
+  end
+
+  defp handle_event("turn.completed", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    usage = Map.get(event, "usage") || %{}
+
+    metadata = Map.put(state.metadata, :usage, usage)
+
+    emit(
+      state.on_message,
+      :turn_completed,
+      %{
+        payload: event,
+        raw: raw,
+        details: event,
+        usage: usage
+      },
+      metadata
+    )
+
+    # Drain remaining bytes so the port closes cleanly. Codex exits after
+    # `turn.completed`; we don't loop further to receive more events.
+    _ = drain_port_until_exit(port, "")
+    {:ok, %{result: :turn_completed, session_id: state.session_id, thread_id: state.thread_id}}
+  end
+
+  defp handle_event("turn.failed", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    error = Map.get(event, "error", %{})
+
+    emit(
+      state.on_message,
+      :turn_failed,
+      %{payload: event, raw: raw, details: error},
+      state.metadata
+    )
+
+    _ = drain_port_until_exit(port, "")
+    {:error, {:turn_failed, error}}
+  end
+
+  defp handle_event("error", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    message = Map.get(event, "message", "codex stream error")
+
+    emit(
+      state.on_message,
+      :turn_failed,
+      %{payload: event, raw: raw, details: %{"message" => message}},
+      state.metadata
+    )
+
+    _ = drain_port_until_exit(port, "")
+    {:error, {:turn_failed, %{"message" => message}}}
+  end
+
+  defp handle_event("item.started", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    item = Map.get(event, "item", %{})
+    item_type = Map.get(item, "type")
+
+    case classify_item_event(:started, item_type, item) do
+      nil ->
+        emit_notification(state, event, raw)
+
+      symphony_event ->
+        emit(state.on_message, symphony_event, %{payload: event, raw: raw, item: item}, state.metadata)
+    end
+
+    drive_stream(port, "", state)
+  end
+
+  defp handle_event("item.updated", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    item = Map.get(event, "item", %{})
+    item_type = Map.get(item, "type")
+
+    # M-0a Codex review fix: agent_message item.updated events MUST emit
+    # :turn_delta so AgentRunner streaming consumers and cost-cap telemetry
+    # receive the delta payload. Other item types fall through to :notification.
+    symphony_event =
+      case item_type do
+        "agent_message" -> :turn_delta
+        _ -> nil
+      end
+
+    if symphony_event do
+      emit(
+        state.on_message,
+        symphony_event,
+        %{payload: event, raw: raw, item: item, delta: extract_message_delta(item)},
+        state.metadata
+      )
+    else
+      emit_notification(state, event, raw)
+    end
+
+    drive_stream(port, "", state)
+  end
+
+  defp extract_message_delta(item) when is_map(item) do
+    Map.get(item, "delta") || Map.get(item, "text") || ""
+  end
+
+  defp extract_message_delta(_), do: ""
+
+  defp handle_event("item.completed", event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    item = Map.get(event, "item", %{})
+    item_type = Map.get(item, "type")
+
+    symphony_event =
+      classify_item_event(:completed, item_type, item) || :notification
+
+    emit(
+      state.on_message,
+      symphony_event,
+      %{payload: event, raw: raw, item: item},
+      state.metadata
+    )
+
+    drive_stream(port, "", state)
+  end
+
+  defp handle_event(_type, event, raw, port, state) do
+    state = ensure_session_started_emitted(state)
+    emit_notification(state, event, raw)
+    drive_stream(port, "", state)
+  end
+
+  defp emit_notification(state, event, raw) do
+    emit(
+      state.on_message,
+      :notification,
+      %{payload: event, raw: raw},
+      state.metadata
+    )
+  end
+
+  # Map Codex `item.{started,completed}` payloads onto Symphony's existing
+  # tool-call vocabulary. `:tool_call_started`/`:tool_call_completed`/
+  # `:tool_call_failed` mirror what AgentRunner already understood under
+  # the JSON-RPC adapter — emitting these keeps any future workpad/UI
+  # integration that relies on them firing.
+  defp classify_item_event(:started, "command_execution", _item), do: :tool_call_started
+  defp classify_item_event(:started, "mcp_tool_call", _item), do: :tool_call_started
+  defp classify_item_event(:started, "file_change", _item), do: :tool_call_started
+  defp classify_item_event(:started, "web_search", _item), do: :tool_call_started
+
+  defp classify_item_event(:completed, "command_execution", item) do
+    case Map.get(item, "status") do
+      "completed" -> :tool_call_completed
+      "failed" -> :tool_call_failed
+      "declined" -> :tool_call_failed
+      _ -> :tool_call_completed
+    end
+  end
+
+  defp classify_item_event(:completed, "mcp_tool_call", item) do
+    case Map.get(item, "status") do
+      "completed" -> :tool_call_completed
+      "failed" -> :tool_call_failed
+      _ -> :tool_call_completed
+    end
+  end
+
+  defp classify_item_event(:completed, "file_change", item) do
+    case Map.get(item, "status") do
+      "completed" -> :tool_call_completed
+      "failed" -> :tool_call_failed
+      _ -> :tool_call_completed
+    end
+  end
+
+  defp classify_item_event(:completed, "agent_message", _item), do: nil
+  defp classify_item_event(:completed, "reasoning", _item), do: nil
+  defp classify_item_event(:completed, "todo_list", _item), do: nil
+  defp classify_item_event(:completed, "web_search", _item), do: :tool_call_completed
+  defp classify_item_event(:completed, "error", _item), do: nil
+  defp classify_item_event(_phase, _type, _item), do: nil
+
+  defp ensure_session_started_emitted(%{session_emitted?: true} = state), do: state
+
+  defp ensure_session_started_emitted(%{session_emitted?: false, thread_id: thread_id} = state) do
+    session_id = state.session_id || thread_id || generate_synthetic_session_id()
+
+    Logger.info("Codex session started for #{issue_context(state.issue)} session_id=#{session_id}")
+
+    emit(
+      state.on_message,
+      :session_started,
+      %{
+        session_id: session_id,
+        thread_id: thread_id,
+        turn_id: nil
+      },
+      state.metadata
+    )
+
+    %{state | session_emitted?: true, session_id: session_id}
+  end
+
+  defp generate_synthetic_session_id do
+    "codex-exec-" <> Integer.to_string(System.unique_integer([:positive]))
+  end
+
+  defp drain_port_until_exit(port, pending_line) do
+    receive do
+      {^port, {:data, {:eol, chunk}}} ->
+        line = pending_line <> to_string(chunk)
+        log_non_json_stream_line(line, "turn stream tail")
+        drain_port_until_exit(port, "")
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        drain_port_until_exit(port, pending_line <> to_string(chunk))
+
+      {^port, {:exit_status, _status}} ->
+        :ok
+    after
+      1_000 ->
         :ok
     end
   end
+
+  defp handle_exit(status, state) when status == 0 do
+    # Codex exited cleanly without emitting `turn.completed`. This is
+    # unexpected — something terminated the stream early. Surface as a
+    # turn_failed so AgentRunner can retry/escalate.
+    reason = {:codex_exit_without_turn_completed, status}
+
+    emit(
+      state.on_message,
+      :turn_failed,
+      %{reason: reason},
+      state.metadata
+    )
+
+    {:error, reason}
+  end
+
+  defp handle_exit(status, state) do
+    emit(
+      state.on_message,
+      :turn_failed,
+      %{reason: {:port_exit, status}},
+      state.metadata
+    )
+
+    {:error, {:port_exit, status}}
+  end
+
+  ## ──────────────────────────────────────────────────────────────────────
+  ## Configuration helpers
+  ## ──────────────────────────────────────────────────────────────────────
 
   defp fetch_worker_host(opts) when is_list(opts), do: Keyword.get(opts, :worker_host)
 
@@ -125,9 +654,7 @@ defmodule SymphonyElixir.Codex.Adapter do
   defp fetch_worker_host(_), do: nil
 
   defp command_for_session(config) when is_map(config) do
-    config
-    |> config_value(:command)
-    |> case do
+    case config_value(config, :command) do
       command when is_binary(command) and command != "" -> {:ok, command}
       _ -> legacy_codex_command()
     end
@@ -154,294 +681,37 @@ defmodule SymphonyElixir.Codex.Adapter do
 
   defp validate_profile_config(_opts), do: :ok
 
-  @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def run_turn(
-        %{
-          port: port,
-          metadata: metadata,
-          approval_policy: approval_policy,
-          auto_approve_requests: auto_approve_requests,
-          turn_sandbox_policy: turn_sandbox_policy,
-          thread_id: thread_id,
-          workspace: workspace
-        },
-        prompt,
-        issue,
-        opts \\ []
-      ) do
-    on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-
-    tool_executor =
-      Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments, [])
-      end)
-
-    case start_turn(
-           port,
-           thread_id,
-           prompt,
-           issue,
-           workspace,
-           approval_policy,
-           turn_sandbox_policy
-         ) do
-      {:ok, turn_id} ->
-        session_id = "#{thread_id}-#{turn_id}"
-        Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
-
-        emit_message(
-          on_message,
-          :session_started,
-          %{
-            session_id: session_id,
-            thread_id: thread_id,
-            turn_id: turn_id
-          },
-          metadata
-        )
-
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-          {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
-
-            {:ok, %{result: result, session_id: session_id, thread_id: thread_id, turn_id: turn_id}}
-
-          {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
-
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
-
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
-        emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
-        {:error, reason}
+  defp session_policies(workspace, worker_host, config) when is_map(config) do
+    with {:ok, legacy_policies} <- legacy_session_policies(workspace, worker_host) do
+      {:ok,
+       %{
+         approval_policy: config_value(config, :approval_policy) || legacy_policies.approval_policy,
+         thread_sandbox: config_value(config, :thread_sandbox) || legacy_policies.thread_sandbox
+       }}
     end
   end
 
-  @impl SymphonyElixir.AgentRuntime
-  @spec stop_session(session()) :: :ok
-  def stop_session(%{port: port}) when is_port(port) do
-    stop_port(port)
+  defp session_policies(workspace, worker_host, _opts) do
+    legacy_session_policies(workspace, worker_host)
   end
 
-  @doc """
-  Submit a single prompt to a previously-started session.
-
-  `AgentRuntime` shape: events are observed inline via the optional
-  `:on_message` callback AND mirrored into a per-session buffer that
-  `stream_events/1` drains. The Codex JSON-RPC App Server protocol is
-  synchronous in nature: a turn is driven to completion in one call, so
-  `send_turn/3` blocks until `turn/completed`, `turn/failed`, or
-  `turn/cancelled`. Real-time observation is preserved via the inline
-  callback so AgentRunner's workpad-write triggers fire as events arrive.
-
-  Recognized opts:
-    * `:issue` — issue map (with `:id`, `:identifier`, `:title`) used by
-      `run_turn/4`. If absent, a placeholder is generated.
-    * `:on_message` — observer fn invoked inline for each event during the
-      turn. AgentRunner uses this to drive Tracker writes (status flips,
-      workpad upserts, PR detection). Events are also captured to a
-      per-session buffer so `stream_events/1` can still emit them; this
-      keeps the polymorphic adapter contract uniform across runtimes.
-    * `:tool_executor` — passed through to `run_turn/4`.
-  """
-  @impl SymphonyElixir.AgentRuntime
-  @spec send_turn(session(), String.t(), keyword()) :: :ok | {:error, term()}
-  def send_turn(session, prompt, opts \\ []) do
-    issue = Keyword.get(opts, :issue, default_issue_for_send_turn())
-    extra_on_message = Keyword.get(opts, :on_message)
-
-    reset_event_buffer(session)
-    reset_session_tokens(session)
-
-    on_message =
-      compose_on_message(
-        fn message -> capture_event_for_stream(session, message) end,
-        compose_on_message(
-          fn message -> accumulate_tokens_from_message(session, message) end,
-          extra_on_message
-        )
-      )
-
-    run_turn_opts =
-      opts
-      |> Keyword.drop([:issue, :on_message])
-      |> Keyword.put(:on_message, on_message)
-
-    case run_turn(session, prompt, issue, run_turn_opts) do
-      {:ok, _result} -> :ok
-      {:error, _reason} = err -> err
+  defp legacy_session_policies(workspace, nil) do
+    case Config.codex_runtime_settings(workspace) do
+      {:ok, settings} -> {:ok, Map.take(settings, [:approval_policy, :thread_sandbox])}
+      other -> other
     end
   end
 
-  @doc """
-  Return an `Enumerable` of events captured for `session` during the most
-  recent `send_turn/3` call. The buffer is replenished per turn (cleared
-  at the start of each `send_turn/3`) so the same Stream API works for the
-  multi-turn loop in AgentRunner.
-
-  Codex events have already been observed inline via the `:on_message`
-  callback before `stream_events/1` is consumed; the Stream is provided so
-  the polymorphic AgentRunner contract stays uniform across adapters.
-  """
-  @impl SymphonyElixir.AgentRuntime
-  @spec stream_events(session()) :: Enumerable.t()
-  def stream_events(session) do
-    Stream.unfold(session, fn s ->
-      case drain_event_buffer(s) do
-        nil -> nil
-        [] -> nil
-        events when is_list(events) -> {Enum.reverse(events), :done}
-      end
-    end)
-    |> Stream.flat_map(& &1)
-  end
-
-  @doc """
-  Return Codex's native token shape `%{input: int, output: int, total: int}`.
-
-  Tokens are accumulated by `send_turn/3` from `usage` blocks attached to
-  JSON-RPC events. The shape stays Codex-native (no cross-runtime
-  normalization) per Spec 2 DL-007.
-  """
-  @impl SymphonyElixir.AgentRuntime
-  @spec runtime_native_tokens(session()) :: %{required(atom()) => non_neg_integer()}
-  def runtime_native_tokens(session) do
-    case Process.get({:symphony_codex_adapter_tokens, session_buffer_key(session)}) do
-      %{} = tokens -> tokens
-      _ -> %{input: 0, output: 0, total: 0}
+  defp legacy_session_policies(workspace, worker_host) when is_binary(worker_host) do
+    case Config.codex_runtime_settings(workspace, remote: true) do
+      {:ok, settings} -> {:ok, Map.take(settings, [:approval_policy, :thread_sandbox])}
+      other -> other
     end
   end
 
-  @doc """
-  Check whether `config` satisfies the profile safety floor.
-
-  Codex-native vocabulary:
-
-    * `thread_sandbox` ∈ `["read-only", "workspace-write", "danger-full-access"]`
-    * `approval_policy` ∈ `["never", ...]`
-
-  Floor passes when `thread_sandbox` is no more permissive than the floor's
-  `thread_sandbox` within the safe v1 set (`read-only` <= `workspace-write`),
-  AND `approval_policy` is exactly `never`. Both atom and string keys are
-  accepted on `config` so YAML-parsed and runtime-built configs share this
-  check.
-  """
-  @impl SymphonyElixir.AgentRuntime
-  @spec passes_safety_floor?(map(), map()) :: boolean()
-  def passes_safety_floor?(config, floor) do
-    thread_sandbox = config[:thread_sandbox] || config["thread_sandbox"]
-    approval_policy = config[:approval_policy] || config["approval_policy"]
-
-    floor_thread_sandbox = Map.get(floor, "thread_sandbox", "workspace-write")
-
-    thread_sandbox_ok = sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox)
-    approval_policy_ok = approval_policy == "never"
-
-    thread_sandbox_ok and approval_policy_ok
+  defp config_value(config, key) when is_map(config) and is_atom(key) do
+    Map.get(config, key) || Map.get(config, Atom.to_string(key))
   end
-
-  defp sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox) do
-    sandbox_rank = %{"read-only" => 0, "workspace-write" => 1}
-
-    with sandbox when is_integer(sandbox) <- Map.get(sandbox_rank, thread_sandbox),
-         floor when is_integer(floor) <- Map.get(sandbox_rank, floor_thread_sandbox) do
-      sandbox <= floor
-    else
-      _ -> false
-    end
-  end
-
-  defp default_issue_for_send_turn do
-    %{
-      id: "send-turn-#{System.unique_integer([:positive])}",
-      identifier: "AGENT",
-      title: "send_turn"
-    }
-  end
-
-  defp compose_on_message(primary, nil), do: primary
-
-  defp compose_on_message(primary, secondary) when is_function(secondary, 1) do
-    fn message ->
-      _ = primary.(message)
-      _ = secondary.(message)
-      :ok
-    end
-  end
-
-  defp capture_event_for_stream(session, message) do
-    key = {:symphony_codex_adapter_events, session_buffer_key(session)}
-    existing = Process.get(key, [])
-    Process.put(key, [message | existing])
-    :ok
-  end
-
-  defp reset_event_buffer(session) do
-    Process.put({:symphony_codex_adapter_events, session_buffer_key(session)}, [])
-    :ok
-  end
-
-  defp drain_event_buffer(session) do
-    Process.delete({:symphony_codex_adapter_events, session_buffer_key(session)})
-  end
-
-  defp reset_session_tokens(session) do
-    Process.put(
-      {:symphony_codex_adapter_tokens, session_buffer_key(session)},
-      %{input: 0, output: 0, total: 0}
-    )
-
-    :ok
-  end
-
-  defp accumulate_tokens_from_message(session, %{usage: usage}) when is_map(usage) do
-    update_session_tokens(session, usage)
-  end
-
-  defp accumulate_tokens_from_message(_session, _message), do: :ok
-
-  defp update_session_tokens(session, usage) when is_map(usage) do
-    key = {:symphony_codex_adapter_tokens, session_buffer_key(session)}
-    current = Process.get(key, %{input: 0, output: 0, total: 0})
-
-    input = pick_token_count(usage, ["input_tokens", "prompt_tokens", :input])
-    output = pick_token_count(usage, ["output_tokens", "completion_tokens", :output])
-    total = pick_token_count(usage, ["total_tokens", :total])
-
-    Process.put(key, %{
-      input: max(current.input, input),
-      output: max(current.output, output),
-      total: max(current.total, total)
-    })
-
-    :ok
-  end
-
-  defp pick_token_count(usage, keys) when is_map(usage) and is_list(keys) do
-    Enum.reduce_while(keys, 0, fn key, acc ->
-      case Map.get(usage, key) do
-        value when is_integer(value) and value >= 0 -> {:halt, value}
-        _ -> {:cont, acc}
-      end
-    end)
-  end
-
-  # Use the session port (a process-local term) as the buffer key so that
-  # multiple concurrent sessions in the same process don't share state.
-  defp session_buffer_key(%{port: port}) when is_port(port), do: port
-  defp session_buffer_key(session), do: session
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
@@ -485,828 +755,98 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp start_port(workspace, nil, command) do
-    executable = System.find_executable("bash")
+  defp sandbox_at_or_below_floor?(thread_sandbox, floor_thread_sandbox) do
+    sandbox_rank = %{"read-only" => 0, "workspace-write" => 1}
 
-    if is_nil(executable) do
-      {:error, :bash_not_found}
+    with sandbox when is_integer(sandbox) <- Map.get(sandbox_rank, thread_sandbox),
+         floor when is_integer(floor) <- Map.get(sandbox_rank, floor_thread_sandbox) do
+      sandbox <= floor
     else
-      wrapped_command = SymphonyElixir.Secrets.Resolver.wrap_command(command)
-
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(wrapped_command)],
-            cd: String.to_charlist(workspace),
-            line: @port_line_bytes
-          ]
-        )
-
-      {:ok, port}
+      _ -> false
     end
   end
 
-  defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
-    # Remote workers don't currently receive .env.symphony — secrets resolved
-    # locally are not transported via SSH (per SYM-11923119480 §Out of scope).
-    remote_command = remote_launch_command(workspace, command)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
-  end
+  ## ──────────────────────────────────────────────────────────────────────
+  ## Per-session token + event buffer state (process dictionary)
+  ## ──────────────────────────────────────────────────────────────────────
 
-  defp remote_launch_command(workspace, command) when is_binary(workspace) do
-    [
-      "cd #{shell_escape(workspace)}",
-      "exec #{command}"
-    ]
-    |> Enum.join(" && ")
-  end
+  defp compose_on_message(primary, nil), do: primary
 
-  defp port_metadata(port, worker_host) when is_port(port) do
-    base_metadata =
-      case :erlang.port_info(port, :os_pid) do
-        {:os_pid, os_pid} ->
-          %{codex_app_server_pid: to_string(os_pid)}
-
-        _ ->
-          %{}
-      end
-
-    case worker_host do
-      host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
-      _ -> base_metadata
-    end
-  end
-
-  defp send_initialize(port) do
-    payload = %{
-      "method" => "initialize",
-      "id" => @initialize_id,
-      "params" => %{
-        "capabilities" => %{
-          "experimentalApi" => true
-        },
-        "clientInfo" => %{
-          "name" => "symphony-orchestrator",
-          "title" => "Symphony Orchestrator",
-          "version" => "0.1.0"
-        }
-      }
-    }
-
-    send_message(port, payload)
-
-    with {:ok, _} <- await_response(port, @initialize_id) do
-      send_message(port, %{"method" => "initialized", "params" => %{}})
+  defp compose_on_message(primary, secondary) when is_function(secondary, 1) do
+    fn message ->
+      _ = primary.(message)
+      _ = secondary.(message)
       :ok
     end
   end
 
-  defp session_policies(workspace, worker_host, config) when is_map(config) do
-    with {:ok, legacy_policies} <- legacy_session_policies(workspace, worker_host) do
-      {:ok,
-       %{
-         approval_policy: config_value(config, :approval_policy) || legacy_policies.approval_policy,
-         thread_sandbox: config_value(config, :thread_sandbox) || legacy_policies.thread_sandbox,
-         turn_sandbox_policy: config_value(config, :turn_sandbox_policy) || legacy_policies.turn_sandbox_policy
-       }}
-    end
+  defp capture_event_for_stream(session, message) do
+    key = {:symphony_codex_adapter_events, session_buffer_key(session)}
+    existing = Process.get(key, [])
+    Process.put(key, [message | existing])
+    :ok
   end
 
-  defp session_policies(workspace, worker_host, _opts) do
-    legacy_session_policies(workspace, worker_host)
+  defp reset_event_buffer(session) do
+    Process.put({:symphony_codex_adapter_events, session_buffer_key(session)}, [])
+    :ok
   end
 
-  defp legacy_session_policies(workspace, nil) do
-    Config.codex_runtime_settings(workspace)
+  defp drain_event_buffer(session) do
+    Process.delete({:symphony_codex_adapter_events, session_buffer_key(session)})
   end
 
-  defp legacy_session_policies(workspace, worker_host) when is_binary(worker_host) do
-    Config.codex_runtime_settings(workspace, remote: true)
+  defp reset_session_tokens(session) do
+    Process.put({:symphony_codex_adapter_tokens, session_buffer_key(session)}, empty_tokens())
+    :ok
   end
 
-  defp config_value(config, key) when is_map(config) and is_atom(key) do
-    Map.get(config, key) || Map.get(config, Atom.to_string(key))
+  defp accumulate_tokens_from_message(session, %{usage: usage}) when is_map(usage) do
+    update_session_tokens(session, usage)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  defp accumulate_tokens_from_message(_session, _message), do: :ok
 
-  defp start_thread(port, workspace, %{
-         approval_policy: approval_policy,
-         thread_sandbox: thread_sandbox
-       }) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => workspace,
-        "dynamicTools" => DynamicTool.tool_specs()
-      }
+  defp update_session_tokens(session, usage) when is_map(usage) do
+    key = {:symphony_codex_adapter_tokens, session_buffer_key(session)}
+    current = Process.get(key, empty_tokens())
+
+    input = pick_token_count(usage, ["input_tokens", "prompt_tokens", :input_tokens, :input])
+    output = pick_token_count(usage, ["output_tokens", "completion_tokens", :output_tokens, :output])
+    cached_input = pick_token_count(usage, ["cached_input_tokens", :cached_input_tokens, :cached_input])
+    reasoning = pick_token_count(usage, ["reasoning_output_tokens", :reasoning_output_tokens, :reasoning_output])
+    total = pick_token_count(usage, ["total_tokens", :total_tokens, :total])
+
+    inferred_total = if total > 0, do: total, else: input + output
+
+    Process.put(key, %{
+      input: max(current.input, input),
+      output: max(current.output, output),
+      total: max(current.total, inferred_total),
+      cached_input: max(current.cached_input, cached_input),
+      reasoning_output: max(current.reasoning_output, reasoning)
     })
 
-    case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload}} ->
-        case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id}
-          _ -> {:error, {:invalid_thread_payload, thread_payload}}
-        end
-
-      other ->
-        other
-    end
+    :ok
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
-          %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => workspace,
-        "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
-    })
-
-    case await_response(port, @turn_start_id) do
-      {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
-      other -> other
-    end
-  end
-
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-    receive_loop(
-      port,
-      on_message,
-      Config.settings!().codex.turn_timeout_ms,
-      "",
-      tool_executor,
-      auto_approve_requests
-    )
-  end
-
-  defp receive_loop(
-         port,
-         on_message,
-         timeout_ms,
-         pending_line,
-         tool_executor,
-         auto_approve_requests
-       ) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-
-        handle_incoming(
-          port,
-          on_message,
-          complete_line,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests
-        )
-
-      {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(
-          port,
-          on_message,
-          timeout_ms,
-          pending_line <> to_string(chunk),
-          tool_executor,
-          auto_approve_requests
-        )
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :turn_timeout}
-    end
-  end
-
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
-    payload_string = to_string(data)
-
-    case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
-
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
-
-        {:error, {:turn_failed, Map.get(payload, "params")}}
-
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_cancelled,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
-
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
-
-      {:ok, %{"method" => method} = payload}
-      when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests
-        )
-
-      {:ok, payload} ->
-        emit_message(
-          on_message,
-          :other_message,
-          %{
-            payload: payload,
-            raw: payload_string
-          },
-          metadata_from_message(port, payload)
-        )
-
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
-
-      {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream")
-
-        if protocol_message_candidate?(payload_string) do
-          emit_message(
-            on_message,
-            :malformed,
-            %{
-              payload: payload_string,
-              raw: payload_string
-            },
-            metadata_from_message(port, %{raw: payload_string})
-          )
-        end
-
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
-    end
-  end
-
-  defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
-    emit_message(
-      on_message,
-      event,
-      %{
-        payload: payload,
-        raw: payload_string,
-        details: payload_details
-      },
-      metadata_from_message(port, payload)
-    )
-  end
-
-  defp handle_turn_method(
-         port,
-         on_message,
-         payload,
-         payload_string,
-         method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests
-       ) do
-    metadata = metadata_from_message(port, payload)
-
-    case maybe_handle_approval_request(
-           port,
-           method,
-           payload,
-           payload_string,
-           on_message,
-           metadata,
-           tool_executor,
-           auto_approve_requests
-         ) do
-      :input_required ->
-        emit_message(
-          on_message,
-          :turn_input_required,
-          %{payload: payload, raw: payload_string},
-          metadata
-        )
-
-        {:error, {:turn_input_required, payload}}
-
-      :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
-
-      :approval_required ->
-        emit_message(
-          on_message,
-          :approval_required,
-          %{payload: payload, raw: payload_string},
-          metadata
-        )
-
-        {:error, {:approval_required, payload}}
-
-      :unhandled ->
-        if needs_input?(method, payload) do
-          emit_message(
-            on_message,
-            :turn_input_required,
-            %{payload: payload, raw: payload_string},
-            metadata
-          )
-
-          {:error, {:turn_input_required, payload}}
-        else
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
-
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
-        end
-    end
-  end
-
-  defp maybe_handle_approval_request(
-         port,
-         "item/commandExecution/requestApproval",
-         %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         auto_approve_requests
-       ) do
-    approve_or_require(
-      port,
-      id,
-      "acceptForSession",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
-  end
-
-  defp maybe_handle_approval_request(
-         port,
-         "item/tool/call",
-         %{"id" => id, "params" => params} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         tool_executor,
-         _auto_approve_requests
-       ) do
-    tool_name = tool_call_name(params)
-    arguments = tool_call_arguments(params)
-
-    result =
-      tool_name
-      |> tool_executor.(arguments)
-      |> normalize_dynamic_tool_result()
-
-    send_message(port, %{
-      "id" => id,
-      "result" => result
-    })
-
-    event =
-      case result do
-        %{"success" => true} -> :tool_call_completed
-        _ when is_nil(tool_name) -> :unsupported_tool_call
-        _ -> :tool_call_failed
+  defp pick_token_count(usage, keys) when is_map(usage) and is_list(keys) do
+    Enum.reduce_while(keys, 0, fn key, acc ->
+      case Map.get(usage, key) do
+        value when is_integer(value) and value >= 0 -> {:halt, value}
+        _ -> {:cont, acc}
       end
-
-    emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
-
-    :approved
+    end)
   end
 
-  defp maybe_handle_approval_request(
-         port,
-         "execCommandApproval",
-         %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         auto_approve_requests
-       ) do
-    approve_or_require(
-      port,
-      id,
-      "approved_for_session",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
-  end
+  defp empty_tokens, do: %{input: 0, output: 0, total: 0, cached_input: 0, reasoning_output: 0}
 
-  defp maybe_handle_approval_request(
-         port,
-         "applyPatchApproval",
-         %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         auto_approve_requests
-       ) do
-    approve_or_require(
-      port,
-      id,
-      "approved_for_session",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
-  end
+  defp session_buffer_key(%{stream_buffer_key: ref}) when is_reference(ref), do: ref
+  defp session_buffer_key(session), do: session
 
-  defp maybe_handle_approval_request(
-         port,
-         "item/fileChange/requestApproval",
-         %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         auto_approve_requests
-       ) do
-    approve_or_require(
-      port,
-      id,
-      "acceptForSession",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
-  end
-
-  defp maybe_handle_approval_request(
-         port,
-         "item/tool/requestUserInput",
-         %{"id" => id, "params" => params} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         auto_approve_requests
-       ) do
-    maybe_auto_answer_tool_request_user_input(
-      port,
-      id,
-      params,
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
-  end
-
-  defp maybe_handle_approval_request(
-         _port,
-         _method,
-         _payload,
-         _payload_string,
-         _on_message,
-         _metadata,
-         _tool_executor,
-         _auto_approve_requests
-       ) do
-    :unhandled
-  end
-
-  defp normalize_dynamic_tool_result(%{"success" => success} = result) when is_boolean(success) do
-    output =
-      case Map.get(result, "output") do
-        existing_output when is_binary(existing_output) -> existing_output
-        _ -> dynamic_tool_output(result)
-      end
-
-    content_items =
-      case Map.get(result, "contentItems") do
-        existing_items when is_list(existing_items) -> existing_items
-        _ -> dynamic_tool_content_items(output)
-      end
-
-    result
-    |> Map.put("output", output)
-    |> Map.put("contentItems", content_items)
-  end
-
-  defp normalize_dynamic_tool_result(result) do
-    %{
-      "success" => false,
-      "output" => inspect(result),
-      "contentItems" => dynamic_tool_content_items(inspect(result))
-    }
-  end
-
-  defp dynamic_tool_output(%{"contentItems" => [%{"text" => text} | _]}) when is_binary(text),
-    do: text
-
-  defp dynamic_tool_output(result), do: Jason.encode!(result, pretty: true)
-
-  defp dynamic_tool_content_items(output) when is_binary(output) do
-    [
-      %{
-        "type" => "inputText",
-        "text" => output
-      }
-    ]
-  end
-
-  defp approve_or_require(
-         port,
-         id,
-         decision,
-         payload,
-         payload_string,
-         on_message,
-         metadata,
-         true
-       ) do
-    send_message(port, %{"id" => id, "result" => %{"decision" => decision}})
-
-    emit_message(
-      on_message,
-      :approval_auto_approved,
-      %{payload: payload, raw: payload_string, decision: decision},
-      metadata
-    )
-
-    :approved
-  end
-
-  defp approve_or_require(
-         _port,
-         _id,
-         _decision,
-         _payload,
-         _payload_string,
-         _on_message,
-         _metadata,
-         false
-       ) do
-    :approval_required
-  end
-
-  defp maybe_auto_answer_tool_request_user_input(
-         port,
-         id,
-         params,
-         payload,
-         payload_string,
-         on_message,
-         metadata,
-         true
-       ) do
-    case tool_request_user_input_approval_answers(params) do
-      {:ok, answers, decision} ->
-        send_message(port, %{"id" => id, "result" => %{"answers" => answers}})
-
-        emit_message(
-          on_message,
-          :approval_auto_approved,
-          %{payload: payload, raw: payload_string, decision: decision},
-          metadata
-        )
-
-        :approved
-
-      :error ->
-        reply_with_non_interactive_tool_input_answer(
-          port,
-          id,
-          params,
-          payload,
-          payload_string,
-          on_message,
-          metadata
-        )
-    end
-  end
-
-  defp maybe_auto_answer_tool_request_user_input(
-         port,
-         id,
-         params,
-         payload,
-         payload_string,
-         on_message,
-         metadata,
-         false
-       ) do
-    reply_with_non_interactive_tool_input_answer(
-      port,
-      id,
-      params,
-      payload,
-      payload_string,
-      on_message,
-      metadata
-    )
-  end
-
-  defp tool_request_user_input_approval_answers(%{"questions" => questions})
-       when is_list(questions) do
-    answers =
-      Enum.reduce_while(questions, %{}, fn question, acc ->
-        case tool_request_user_input_approval_answer(question) do
-          {:ok, question_id, answer_label} ->
-            {:cont, Map.put(acc, question_id, %{"answers" => [answer_label]})}
-
-          :error ->
-            {:halt, :error}
-        end
-      end)
-
-    case answers do
-      :error -> :error
-      answer_map when map_size(answer_map) > 0 -> {:ok, answer_map, "Approve this Session"}
-      _ -> :error
-    end
-  end
-
-  defp tool_request_user_input_approval_answers(_params), do: :error
-
-  defp reply_with_non_interactive_tool_input_answer(
-         port,
-         id,
-         params,
-         payload,
-         payload_string,
-         on_message,
-         metadata
-       ) do
-    case tool_request_user_input_unavailable_answers(params) do
-      {:ok, answers} ->
-        send_message(port, %{"id" => id, "result" => %{"answers" => answers}})
-
-        emit_message(
-          on_message,
-          :tool_input_auto_answered,
-          %{payload: payload, raw: payload_string, answer: @non_interactive_tool_input_answer},
-          metadata
-        )
-
-        :approved
-
-      :error ->
-        :input_required
-    end
-  end
-
-  defp tool_request_user_input_unavailable_answers(%{"questions" => questions})
-       when is_list(questions) do
-    answers =
-      Enum.reduce_while(questions, %{}, fn question, acc ->
-        case tool_request_user_input_question_id(question) do
-          {:ok, question_id} ->
-            {:cont, Map.put(acc, question_id, %{"answers" => [@non_interactive_tool_input_answer]})}
-
-          :error ->
-            {:halt, :error}
-        end
-      end)
-
-    case answers do
-      :error -> :error
-      answer_map when map_size(answer_map) > 0 -> {:ok, answer_map}
-      _ -> :error
-    end
-  end
-
-  defp tool_request_user_input_unavailable_answers(_params), do: :error
-
-  defp tool_request_user_input_question_id(%{"id" => question_id}) when is_binary(question_id),
-    do: {:ok, question_id}
-
-  defp tool_request_user_input_question_id(_question), do: :error
-
-  defp tool_request_user_input_approval_answer(%{"id" => question_id, "options" => options})
-       when is_binary(question_id) and is_list(options) do
-    case tool_request_user_input_approval_option_label(options) do
-      nil -> :error
-      answer_label -> {:ok, question_id, answer_label}
-    end
-  end
-
-  defp tool_request_user_input_approval_answer(_question), do: :error
-
-  defp tool_request_user_input_approval_option_label(options) do
-    options
-    |> Enum.map(&tool_request_user_input_option_label/1)
-    |> Enum.reject(&is_nil/1)
-    |> case do
-      labels ->
-        Enum.find(labels, &(&1 == "Approve this Session")) ||
-          Enum.find(labels, &(&1 == "Approve Once")) ||
-          Enum.find(labels, &approval_option_label?/1)
-    end
-  end
-
-  defp tool_request_user_input_option_label(%{"label" => label}) when is_binary(label), do: label
-  defp tool_request_user_input_option_label(_option), do: nil
-
-  defp approval_option_label?(label) when is_binary(label) do
-    normalized_label =
-      label
-      |> String.trim()
-      |> String.downcase()
-
-    String.starts_with?(normalized_label, "approve") or
-      String.starts_with?(normalized_label, "allow")
-  end
-
-  defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
-  end
-
-  defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_response(port, request_id, complete_line, timeout_ms)
-
-      {^port, {:data, {:noeol, chunk}}} ->
-        with_timeout_response(port, request_id, timeout_ms, pending_line <> to_string(chunk))
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :response_timeout}
-    end
-  end
-
-  defp handle_response(port, request_id, data, timeout_ms) do
-    payload = to_string(data)
-
-    case Jason.decode(payload) do
-      {:ok, %{"id" => ^request_id, "error" => error}} ->
-        {:error, {:response_error, error}}
-
-      {:ok, %{"id" => ^request_id, "result" => result}} ->
-        {:ok, result}
-
-      {:ok, %{"id" => ^request_id} = response_payload} ->
-        {:error, {:response_error, response_payload}}
-
-      {:ok, %{} = other} ->
-        log_pre_response_message(other)
-        with_timeout_response(port, request_id, timeout_ms, "")
-
-      {:error, _} ->
-        log_non_json_stream_line(payload, "response stream")
-        with_timeout_response(port, request_id, timeout_ms, "")
-    end
-  end
+  ## ──────────────────────────────────────────────────────────────────────
+  ## Logging + utility
+  ## ──────────────────────────────────────────────────────────────────────
 
   defp log_non_json_stream_line(data, stream_label) do
     text =
@@ -1318,13 +858,6 @@ defmodule SymphonyElixir.Codex.Adapter do
 
     if text != "" do
       cond do
-        config_trust_warning?(text) ->
-          Logger.warning(
-            "Codex #{stream_label} flagged untrusted workspace " <>
-              "(SymphonyElixir.Codex.ProjectTrust auto-trusts on session start; " <>
-              "if you see this message check ~/.codex/config.toml is writable): #{text}"
-          )
-
         String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) ->
           Logger.warning("Codex #{stream_label} output: #{text}")
 
@@ -1334,27 +867,6 @@ defmodule SymphonyElixir.Codex.Adapter do
     end
   end
 
-  defp config_trust_warning?(text) when is_binary(text) do
-    String.contains?(text, "until the project is trusted") or
-      String.contains?(text, "Project-local config, hooks, and exec policies are disabled")
-  end
-
-  defp log_pre_response_message(%{
-         "method" => "remoteControl/status/changed",
-         "params" => %{"status" => "disabled"}
-       }) do
-    Logger.warning(
-      "Codex remoteControl reported status=disabled while awaiting JSON-RPC response. " <>
-        "This typically means the workspace is not listed as a trusted project in " <>
-        "~/.codex/config.toml. SymphonyElixir.Codex.ProjectTrust auto-adds workspaces " <>
-        "on session start; if this message persists the trust write may have failed."
-    )
-  end
-
-  defp log_pre_response_message(payload) do
-    Logger.debug("Ignoring message while waiting for response: #{inspect(payload)}")
-  end
-
   defp protocol_message_candidate?(data) do
     data
     |> to_string()
@@ -1362,27 +874,31 @@ defmodule SymphonyElixir.Codex.Adapter do
     |> String.starts_with?("{")
   end
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
-    "issue_id=#{issue_id} issue_identifier=#{identifier}"
-  end
+  defp issue_context(%{id: issue_id, identifier: identifier}),
+    do: "issue_id=#{issue_id} issue_identifier=#{identifier}"
+
+  defp issue_context(%{"id" => issue_id, "identifier" => identifier}),
+    do: "issue_id=#{issue_id} issue_identifier=#{identifier}"
+
+  defp issue_context(_other), do: "issue_id=unknown issue_identifier=unknown"
 
   defp stop_port(port) when is_port(port) do
     case :erlang.port_info(port) do
-      :undefined ->
-        :ok
-
-      _ ->
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
+      :undefined -> :ok
+      _ -> safe_close(port)
     end
   end
 
-  defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
+  defp safe_close(port) do
+    try do
+      Port.close(port)
+      :ok
+    rescue
+      ArgumentError -> :ok
+    end
+  end
+
+  defp emit(on_message, event, details, metadata) when is_function(on_message, 1) do
     message =
       metadata
       |> Map.merge(details)
@@ -1392,21 +908,9 @@ defmodule SymphonyElixir.Codex.Adapter do
     on_message.(message)
   end
 
-  defp metadata_from_message(port, payload) do
-    port |> port_metadata(nil) |> maybe_set_usage(payload)
-  end
-
-  defp maybe_set_usage(metadata, payload) when is_map(payload) do
-    usage = Map.get(payload, "usage") || Map.get(payload, :usage)
-
-    if is_map(usage) do
-      Map.put(metadata, :usage, usage)
-    else
-      metadata
-    end
-  end
-
-  defp maybe_set_usage(metadata, _payload), do: metadata
+  defp base_metadata(%{worker_host: nil}), do: %{}
+  defp base_metadata(%{worker_host: host}) when is_binary(host), do: %{worker_host: host}
+  defp base_metadata(_), do: %{}
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
@@ -1414,65 +918,11 @@ defmodule SymphonyElixir.Codex.Adapter do
 
   defp default_on_message(_message), do: :ok
 
-  defp tool_call_name(params) when is_map(params) do
-    case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") ||
-           Map.get(params, :name) do
-      name when is_binary(name) ->
-        case String.trim(name) do
-          "" -> nil
-          trimmed -> trimmed
-        end
-
-      _ ->
-        nil
-    end
+  defp default_issue_for_send_turn do
+    %{
+      id: "send-turn-#{System.unique_integer([:positive])}",
+      identifier: "AGENT",
+      title: "send_turn"
+    }
   end
-
-  defp tool_call_name(_params), do: nil
-
-  defp tool_call_arguments(params) when is_map(params) do
-    Map.get(params, "arguments") || Map.get(params, :arguments) || %{}
-  end
-
-  defp tool_call_arguments(_params), do: %{}
-
-  defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
-  end
-
-  defp needs_input?(method, payload)
-       when is_binary(method) and is_map(payload) do
-    String.starts_with?(method, "turn/") && input_required_method?(method, payload)
-  end
-
-  defp needs_input?(_method, _payload), do: false
-
-  defp input_required_method?(method, payload) when is_binary(method) do
-    method in [
-      "turn/input_required",
-      "turn/needs_input",
-      "turn/need_input",
-      "turn/request_input",
-      "turn/request_response",
-      "turn/provide_input",
-      "turn/approval_required"
-    ] || request_payload_requires_input?(payload)
-  end
-
-  defp request_payload_requires_input?(payload) do
-    params = Map.get(payload, "params")
-    needs_input_field?(payload) || needs_input_field?(params)
-  end
-
-  defp needs_input_field?(payload) when is_map(payload) do
-    Map.get(payload, "requiresInput") == true or
-      Map.get(payload, "needsInput") == true or
-      Map.get(payload, "input_required") == true or
-      Map.get(payload, "inputRequired") == true or
-      Map.get(payload, "type") == "input_required" or
-      Map.get(payload, "type") == "needs_input"
-  end
-
-  defp needs_input_field?(_payload), do: false
 end

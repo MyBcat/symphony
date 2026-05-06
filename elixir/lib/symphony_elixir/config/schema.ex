@@ -234,7 +234,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:command, :string, default: "codex app-server")
+      field(:command, :string, default: "codex exec --json")
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -438,7 +438,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(attrs, [:enabled, :port], empty_values: [])
       # M-2 hardening: restrict to valid unprivileged port range. Below 1024
       # would require root; above 65535 is invalid.
-      |> validate_number(:port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65535)
+      |> validate_number(:port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65_535)
     end
   end
 
