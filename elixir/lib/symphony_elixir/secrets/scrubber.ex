@@ -54,9 +54,9 @@ defmodule SymphonyElixir.Secrets.Scrubber do
   these values originate from a trusted source like an env file we just wrote
   ourselves). The list is best-effort and never logged.
   """
-  @spec scrub(binary(), [binary()]) :: binary()
   def scrub(line, additional_values \\ [])
 
+  @spec scrub(binary(), [binary()]) :: binary()
   def scrub(line, additional_values) when is_binary(line) and is_list(additional_values) do
     line
     |> redact_literals(additional_values)
