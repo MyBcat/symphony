@@ -181,6 +181,7 @@ defmodule SymphonyElixir.Monday.Adapter do
   def fetch_candidate_issues_with_phi_findings(opts) do
     cfg = tracker_config()
     eligible_states = cfg.active_states ++ cfg.handoff_states
+
     fetch_issues_filtered_with_phi(
       cfg,
       eligible_states,

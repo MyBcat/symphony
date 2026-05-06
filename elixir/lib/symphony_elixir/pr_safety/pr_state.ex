@@ -176,8 +176,7 @@ defmodule SymphonyElixir.PRSafety.PRState do
   end
 
   defp normalize_record(other) when is_map(other) do
-    %{url: stringify(Map.get(other, "url") || Map.get(other, :url)),
-      sha: stringify(Map.get(other, "sha") || Map.get(other, :sha))}
+    %{url: stringify(Map.get(other, "url") || Map.get(other, :url)), sha: stringify(Map.get(other, "sha") || Map.get(other, :sha))}
   end
 
   defp normalize_record(_other), do: %{url: "", sha: ""}

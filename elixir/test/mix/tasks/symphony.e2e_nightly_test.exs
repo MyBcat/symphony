@@ -109,6 +109,7 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
 
     test "errors with :missing_required when SYMPHONY_E2E_BOARD_ID is unset" do
       deps = stub_deps()
+
       assert {:error, {:missing_required, "SYMPHONY_E2E_BOARD_ID"}} =
                E2eNightly.execute([dry_run: true], deps)
     end
@@ -141,7 +142,13 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
     end
 
     test "tolerates a missing monday token in dry-run mode (uses placeholder)" do
-      deps = stub_deps(%{env_get: fn "SYMPHONY_E2E_BOARD_ID" -> "1234567890"; _ -> nil end})
+      deps =
+        stub_deps(%{
+          env_get: fn
+            "SYMPHONY_E2E_BOARD_ID" -> "1234567890"
+            _ -> nil
+          end
+        })
 
       assert {:ok, %{status: :dry_run}} = E2eNightly.execute([dry_run: true], deps)
       assert_received {:put_env, :symphony_elixir, :test_config_override, _config}
@@ -256,8 +263,7 @@ defmodule Mix.Tasks.Symphony.E2eNightlyTest do
 
       assert {:ok, _} = E2eNightly.execute([dry_run: true], deps)
 
-      assert_received {:fetch_issue_state_result,
-                       {:ok, %{state: "Human Review", pr_url: "https://example.com/pr/1"}}}
+      assert_received {:fetch_issue_state_result, {:ok, %{state: "Human Review", pr_url: "https://example.com/pr/1"}}}
     end
 
     test "fetch_issue_state surfaces :item_not_found when the tracker returns no rows" do

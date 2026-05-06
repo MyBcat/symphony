@@ -102,7 +102,8 @@ defmodule SymphonyElixir.Heartbeat do
             last_success_at_ms: integer(),
             degraded?: boolean(),
             consecutive_failures: non_neg_integer()
-          } | nil
+          }
+          | nil
   def snapshot(server \\ __MODULE__) do
     case resolve_server(server) do
       nil -> nil

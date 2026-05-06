@@ -680,7 +680,9 @@ defmodule SymphonyElixir.Orchestrator do
 
     cond do
       not state.outage_active? and next_count >= threshold ->
-        Logger.error("Symphony tracker: outage entry (#{next_count} consecutive 5xx/timeout responses; latest reason=#{inspect(reason)}); continuing with last-known item set, no new dispatches until recovery")
+        Logger.error(
+          "Symphony tracker: outage entry (#{next_count} consecutive 5xx/timeout responses; latest reason=#{inspect(reason)}); continuing with last-known item set, no new dispatches until recovery"
+        )
 
         %{state | outage_failure_count: next_count, outage_active?: true}
 

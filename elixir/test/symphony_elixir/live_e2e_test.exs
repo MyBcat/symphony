@@ -288,15 +288,21 @@ defmodule SymphonyElixir.LiveE2ETest do
         if status_text(item, column_id) == expected_text do
           true
         else
-          maybe_retry(fn ->
-            do_wait_until_status_is(item_id, column_id, expected_text, deadline)
-          end, deadline)
+          maybe_retry(
+            fn ->
+              do_wait_until_status_is(item_id, column_id, expected_text, deadline)
+            end,
+            deadline
+          )
         end
 
       {:error, _reason} ->
-        maybe_retry(fn ->
-          do_wait_until_status_is(item_id, column_id, expected_text, deadline)
-        end, deadline)
+        maybe_retry(
+          fn ->
+            do_wait_until_status_is(item_id, column_id, expected_text, deadline)
+          end,
+          deadline
+        )
     end
   end
 

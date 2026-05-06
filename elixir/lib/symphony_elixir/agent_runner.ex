@@ -161,17 +161,13 @@ defmodule SymphonyElixir.AgentRunner do
       end
     rescue
       error ->
-        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter,
-          message: format_exception_message(error)
-        )
+        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter, message: format_exception_message(error))
 
         finalize_crash(writer_pid, issue, error)
         reraise error, __STACKTRACE__
     catch
       kind, reason ->
-        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter,
-          message: "uncaught #{kind}: #{inspect(reason)}"
-        )
+        emit_failure_update_via_writer(writer_pid, issue, :exception_in_adapter, message: "uncaught #{kind}: #{inspect(reason)}")
 
         finalize_crash(writer_pid, issue, {kind, reason})
         :erlang.raise(kind, reason, __STACKTRACE__)
@@ -217,9 +213,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp emit_profile_resolution_failure(writer_pid, issue, reason) do
-    emit_failure_update_via_writer(writer_pid, issue, :profile_resolution_failed,
-      message: "profile resolution failed: #{inspect(reason)}"
-    )
+    emit_failure_update_via_writer(writer_pid, issue, :profile_resolution_failed, message: "profile resolution failed: #{inspect(reason)}")
   end
 
   defp reason_atom_for({:port_exit, status}) when is_integer(status) and status != 0,
@@ -344,15 +338,35 @@ defmodule SymphonyElixir.AgentRunner do
     #   Gemini: %{prompt: <int>, candidates: <int>, ...}
     #   Codex/raw JSON: %{"input_tokens" => <int>, "output_tokens" => <int>}
     in_keys = [
-      "input_tokens", :input_tokens, "in_tokens", :in_tokens, "input", :input,
-      "prompt_tokens", :prompt_tokens, "prompt", :prompt,
-      "promptTokens", :promptTokens
+      "input_tokens",
+      :input_tokens,
+      "in_tokens",
+      :in_tokens,
+      "input",
+      :input,
+      "prompt_tokens",
+      :prompt_tokens,
+      "prompt",
+      :prompt,
+      "promptTokens",
+      :promptTokens
     ]
 
     out_keys = [
-      "output_tokens", :output_tokens, "out_tokens", :out_tokens, "output", :output,
-      "candidates_tokens", :candidates_tokens, "candidates", :candidates,
-      "completion_tokens", :completion_tokens, "completionTokens", :completionTokens
+      "output_tokens",
+      :output_tokens,
+      "out_tokens",
+      :out_tokens,
+      "output",
+      :output,
+      "candidates_tokens",
+      :candidates_tokens,
+      "candidates",
+      :candidates,
+      "completion_tokens",
+      :completion_tokens,
+      "completionTokens",
+      :completionTokens
     ]
 
     in_tokens = first_int(usage, in_keys)
@@ -484,7 +498,9 @@ defmodule SymphonyElixir.AgentRunner do
     {:cost_cap_exceeded, scope, current, cap, estimated} = refusal
     issue_id = issue_id(issue)
 
-    Logger.warning("Symphony cost cap exceeded for #{issue_context(issue)} profile=#{profile.name} scope=#{scope} current=$#{:erlang.float_to_binary(current * 1.0, decimals: 2)} cap=$#{:erlang.float_to_binary(cap * 1.0, decimals: 2)} estimated=$#{:erlang.float_to_binary(estimated * 1.0, decimals: 2)}")
+    Logger.warning(
+      "Symphony cost cap exceeded for #{issue_context(issue)} profile=#{profile.name} scope=#{scope} current=$#{:erlang.float_to_binary(current * 1.0, decimals: 2)} cap=$#{:erlang.float_to_binary(cap * 1.0, decimals: 2)} estimated=$#{:erlang.float_to_binary(estimated * 1.0, decimals: 2)}"
+    )
 
     if is_pid(writer_pid) and Process.alive?(writer_pid) and is_binary(issue_id) do
       try do
@@ -974,8 +990,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     {already_emitted?, session} =
       Agent.get_and_update(writer_pid, fn state ->
-        {{state.session_started_emitted?, state.session},
-         %{state | session_started_emitted?: true}}
+        {{state.session_started_emitted?, state.session}, %{state | session_started_emitted?: true}}
       end)
 
     if !already_emitted? and is_binary(issue_id) do

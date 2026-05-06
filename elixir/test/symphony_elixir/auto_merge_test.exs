@@ -82,6 +82,7 @@ defmodule SymphonyElixir.AutoMergeTest do
     @impl true
     def fetch_candidate_issues_with_phi_findings,
       do: {:ok, %{items: [], phi_offenders: []}}
+
     @impl true
     def fetch_issues_by_states(_), do: {:ok, []}
 
@@ -444,9 +445,7 @@ defmodule SymphonyElixir.AutoMergeTest do
     end
 
     test "Codex output without block signal but with pass pattern → merges", %{ctx: ctx} do
-      StubCodexReview.stub_review(
-        {:ok, "Reviewed PR. All looks good. NO BLOCKING ISSUES"}
-      )
+      StubCodexReview.stub_review({:ok, "Reviewed PR. All looks good. NO BLOCKING ISSUES"})
 
       assert {:ok, :merged} = AutoMerge.evaluate_human_review(ctx)
     end

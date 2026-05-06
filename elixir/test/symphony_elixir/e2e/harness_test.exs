@@ -315,8 +315,7 @@ defmodule SymphonyElixir.E2E.HarnessTest do
 
       assert result.status == :failed
 
-      assert {:assertions_failed,
-              %{runner: runner_reason, assertions: assertions}} = result.reason
+      assert {:assertions_failed, %{runner: runner_reason, assertions: assertions}} = result.reason
 
       # Either Task.yield caught the runner's error result, or the polling
       # loop hit deadline first. Both are valid failure paths; both surface

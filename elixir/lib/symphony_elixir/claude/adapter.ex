@@ -78,7 +78,8 @@ defmodule SymphonyElixir.Claude.Adapter do
       # a parent CC session and emits SessionStart hook JSON on every turn
       # instead of making model calls — manifests as turn-cycle loops with
       # input/output tokens stuck at 0.
-      "env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS -u CLAUDE_CODE_DISABLE_1M_CONTEXT -u CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING -u CLAUDE_CODE_EFFORT_LEVEL -u CLAUDE_PLUGIN_DATA -u AI_AGENT " <> flagged
+      "env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS -u CLAUDE_CODE_DISABLE_1M_CONTEXT -u CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING -u CLAUDE_CODE_EFFORT_LEVEL -u CLAUDE_PLUGIN_DATA -u AI_AGENT " <>
+        flagged
     else
       base_cmd
     end

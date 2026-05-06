@@ -926,9 +926,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Handle supported tool calls", issue,
-                 tool_executor: tool_executor
-               )
+               Adapter.run(workspace, "Handle supported tool calls", issue, tool_executor: tool_executor)
 
       assert_received {:tool_called, "legacy_tracker_graphql",
                        %{
@@ -1057,8 +1055,7 @@ defmodule SymphonyElixir.Codex.AdapterTest do
                  tool_executor: tool_executor
                )
 
-      assert_received {:tool_called, "legacy_tracker_graphql",
-                       %{"query" => "query Viewer { viewer { id } }"}}
+      assert_received {:tool_called, "legacy_tracker_graphql", %{"query" => "query Viewer { viewer { id } }"}}
 
       assert_received {:app_server_message,
                        %{
@@ -1276,12 +1273,9 @@ defmodule SymphonyElixir.Codex.AdapterTest do
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               Adapter.run(workspace, "Capture malformed protocol line", issue,
-                 on_message: on_message
-               )
+               Adapter.run(workspace, "Capture malformed protocol line", issue, on_message: on_message)
 
-      assert_received {:app_server_message,
-                       %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
+      assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
 
       assert_received {:app_server_message, %{event: :turn_completed}}
     after

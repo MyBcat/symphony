@@ -1080,8 +1080,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
 
             body = "## Symphony Heartbeat\ntoken: previous-leader::abc123\ntimestamp: #{stale_ts}\n"
 
-            {:ok,
-             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-stale", "body" => body}]}]}}}
+            {:ok, %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-stale", "body" => body}]}]}}}
 
           query =~ "edit_update" ->
             {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
@@ -1138,8 +1137,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
 
             body = "## Symphony Heartbeat\ntoken: test-instance::oldnonce\ntimestamp: #{fresh_ts}\n"
 
-            {:ok,
-             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-self", "body" => body}]}]}}}
+            {:ok, %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-self", "body" => body}]}]}}}
 
           query =~ "edit_update" ->
             {:ok, %{"data" => %{"edit_update" => %{"id" => Map.get(vars, "id")}}}}
@@ -1193,8 +1191,7 @@ defmodule SymphonyElixir.Monday.AdapterTest do
             body =
               "## Symphony Heartbeat\n\ninstance_id: legacy-leader\ntimestamp: #{fresh_ts}\n"
 
-            {:ok,
-             %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-legacy", "body" => body}]}]}}}
+            {:ok, %{"data" => %{"items" => [%{"updates" => [%{"id" => "u-legacy", "body" => body}]}]}}}
 
           true ->
             {:ok, %{"data" => %{}}}
