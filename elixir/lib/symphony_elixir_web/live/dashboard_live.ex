@@ -31,10 +31,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def handle_info(:observability_updated, socket) do
-    {:noreply,
-     socket
-     |> assign(:payload, load_payload())
-     |> assign(:now, DateTime.utc_now())}
+    {:noreply, socket |> assign(:payload, load_payload()) |> assign(:now, DateTime.utc_now())}
   end
 
   @impl true

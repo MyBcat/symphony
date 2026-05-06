@@ -109,10 +109,7 @@ defmodule SymphonyElixir.Secrets.BootCheck do
   end
 
   defp report_failures(missing) do
-    Logger.error(
-      "Symphony secrets boot check FAILED — refusing to start until all paths resolve. " <>
-        "missing=#{format_missing(missing)}"
-    )
+    Logger.error("Symphony secrets boot check FAILED — refusing to start until all paths resolve. missing=#{format_missing(missing)}")
 
     Enum.each(missing, fn
       {repo_key, ref, reason} when is_binary(ref) ->

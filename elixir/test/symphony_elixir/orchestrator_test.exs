@@ -38,7 +38,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     end
 
     on_exit(fn ->
-      Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+      Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
       Application.delete_env(:symphony_elixir, :workflow_file_path)
 
       if pid = Process.whereis(MemoryMonday) do
@@ -298,7 +298,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     setup do
       Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
       MemoryMonday.reset()
-      on_exit(fn -> Application.delete_env(:symphony_elixir, :tracker_adapter_override) end)
+      on_exit(fn -> Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday) end)
       :ok
     end
 
@@ -724,7 +724,7 @@ defmodule SymphonyElixir.OrchestratorTest do
       MemoryMonday.reset()
 
       on_exit(fn ->
-        Application.delete_env(:symphony_elixir, :tracker_adapter_override)
+        Application.put_env(:symphony_elixir, :tracker_adapter_override, MemoryMonday)
       end)
 
       :ok

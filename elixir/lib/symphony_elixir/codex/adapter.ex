@@ -204,13 +204,7 @@ defmodule SymphonyElixir.Codex.Adapter do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+            {:ok, %{result: result, session_id: session_id, thread_id: thread_id, turn_id: turn_id}}
 
           {:error, reason} ->
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")

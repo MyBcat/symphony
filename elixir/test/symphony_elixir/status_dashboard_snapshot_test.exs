@@ -7,13 +7,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
 
   test "snapshot fixture: idle dashboard" do
     snapshot_data =
-      {:ok,
-       %{
-         running: [],
-         retrying: [],
-         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-         rate_limits: nil
-       }}
+      {:ok, %{running: [], retrying: [], codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}, rate_limits: nil}}
 
     Snapshot.assert_dashboard_snapshot!("idle", render_snapshot(snapshot_data, 0.0))
   end
@@ -32,13 +26,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Application.put_env(:symphony_elixir, :server_port_override, 4000)
 
     snapshot_data =
-      {:ok,
-       %{
-         running: [],
-         retrying: [],
-         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-         rate_limits: nil
-       }}
+      {:ok, %{running: [], retrying: [], codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}, rate_limits: nil}}
 
     Snapshot.assert_dashboard_snapshot!("idle_with_dashboard_url", render_snapshot(snapshot_data, 0.0))
   end

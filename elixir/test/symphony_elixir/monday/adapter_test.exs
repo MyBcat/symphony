@@ -845,6 +845,135 @@ defmodule SymphonyElixir.Monday.AdapterTest do
     end
   end
 
+  describe "e2e harness mutations (SYM-11923096576)" do
+    defmodule E2EClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "SymphonyCreateItem" ->
+            {:ok,
+             %{
+               "data" => %{
+                 "create_item" => %{
+                   "id" => "8888888888",
+                   "name" => Map.get(vars, "itemName")
+                 }
+               }
+             }}
+
+          query =~ "SymphonyDeleteItem" ->
+            {:ok, %{"data" => %{"delete_item" => %{"id" => to_string(Map.get(vars, "itemId"))}}}}
+
+          query =~ "SymphonyBoardItemNames" ->
+            {:ok,
+             %{
+               "data" => %{
+                 "boards" => [
+                   %{
+                     "items_page" => %{
+                       "cursor" => nil,
+                       "items" => [
+                         %{"id" => "111", "name" => "[E2E] create hello.txt at 2026-05-05T00:00:00Z"},
+                         %{"id" => "222", "name" => "Untitled item"},
+                         %{"id" => "333", "name" => nil}
+                       ]
+                     }
+                   }
+                 ]
+               }
+             }}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    defmodule E2EHarnessErrorClient do
+      def graphql(_query, _vars, _opts), do: {:error, :rate_limited}
+    end
+
+    defmodule E2EHarnessBadShapeClient do
+      def graphql(_query, _vars, _opts), do: {:ok, %{"data" => %{}}}
+    end
+
+    defmodule E2EHarnessBoardNotFoundClient do
+      def graphql(_query, _vars, _opts), do: {:ok, %{"data" => %{"boards" => []}}}
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EClient)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
+      :ok
+    end
+
+    test "create_item issues a SymphonyCreateItem mutation and returns the new id + name" do
+      assert {:ok, %{id: "8888888888", name: "[E2E] hello"}} =
+               Adapter.create_item(123_456, "[E2E] hello")
+
+      assert_received {:graphql, query, %{"boardId" => 123_456, "itemName" => "[E2E] hello"}}
+      assert query =~ "create_item"
+      assert query =~ "create_labels_if_missing: false"
+    end
+
+    test "create_item propagates client errors" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
+      assert {:error, :rate_limited} = Adapter.create_item(123_456, "[E2E] hello")
+    end
+
+    test "create_item rejects unexpected response shapes" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessBadShapeClient)
+      assert {:error, {:unexpected_response, _}} = Adapter.create_item(123_456, "[E2E] hello")
+    end
+
+    test "delete_item issues a SymphonyDeleteItem mutation" do
+      assert :ok = Adapter.delete_item("8888888888")
+      assert_received {:graphql, query, %{"itemId" => 8_888_888_888}}
+      assert query =~ "delete_item"
+    end
+
+    test "delete_item accepts integer ids without re-parsing them" do
+      assert :ok = Adapter.delete_item(8_888_888_888)
+      assert_received {:graphql, _query, %{"itemId" => 8_888_888_888}}
+    end
+
+    test "delete_item propagates client errors" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
+      assert {:error, :rate_limited} = Adapter.delete_item("8888888888")
+    end
+
+    test "list_board_items returns id+name maps and applies the configured limit" do
+      assert {:ok, items} = Adapter.list_board_items(123_456, limit: 25)
+      assert_received {:graphql, query, %{"boardId" => 123_456, "limit" => 25}}
+      assert query =~ "items_page"
+
+      assert items == [
+               %{id: "111", name: "[E2E] create hello.txt at 2026-05-05T00:00:00Z"},
+               %{id: "222", name: "Untitled item"},
+               %{id: "333", name: ""}
+             ]
+    end
+
+    test "list_board_items defaults to a page size of 50" do
+      assert {:ok, _} = Adapter.list_board_items(123_456)
+      assert_received {:graphql, _query, %{"limit" => 50}}
+    end
+
+    test "list_board_items returns :board_not_found when boards is empty" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessBoardNotFoundClient)
+      assert {:error, :board_not_found} = Adapter.list_board_items(999_999)
+    end
+
+    test "list_board_items propagates client errors" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EHarnessErrorClient)
+      assert {:error, :rate_limited} = Adapter.list_board_items(123_456)
+    end
+  end
+
   describe "heartbeat" do
     defmodule HeartbeatClient do
       def graphql(query, vars, _opts) do
@@ -1149,6 +1278,148 @@ defmodule SymphonyElixir.Monday.AdapterTest do
                {:graphql, query, _vars} -> query =~ "edit_update"
                _ -> false
              end)
+    end
+  end
+
+  describe "e2e CRUD operations" do
+    defmodule E2ECrudClient do
+      def graphql(query, vars, _opts) do
+        send(self_pid(), {:graphql, query, vars})
+
+        cond do
+          query =~ "SymphonyCreateItem" ->
+            name = Map.get(vars, "itemName", "")
+            {:ok, %{"data" => %{"create_item" => %{"id" => "42", "name" => name}}}}
+
+          query =~ "SymphonyDeleteItem" ->
+            {:ok, %{"data" => %{"delete_item" => %{"id" => Map.get(vars, "itemId", "0")}}}}
+
+          query =~ "SymphonyBoardItemNames" ->
+            {:ok,
+             %{
+               "data" => %{
+                 "boards" => [
+                   %{
+                     "items_page" => %{
+                       "cursor" => nil,
+                       "items" => [
+                         %{"id" => "100", "name" => "[E2E] synthetic item"},
+                         %{"id" => "101", "name" => "Regular item"}
+                       ]
+                     }
+                   }
+                 ]
+               }
+             }}
+
+          true ->
+            {:ok, %{"data" => %{}}}
+        end
+      end
+
+      defp self_pid, do: Process.get(:test_pid)
+    end
+
+    defmodule E2EErrorClient do
+      def graphql(_query, _vars, _opts) do
+        {:error, :auth_failed}
+      end
+    end
+
+    defmodule E2EUnexpectedClient do
+      def graphql(_query, _vars, _opts) do
+        {:ok, %{"data" => %{}}}
+      end
+    end
+
+    defmodule EmptyBoardClient do
+      def graphql(_q, _v, _o), do: {:ok, %{"data" => %{"boards" => []}}}
+    end
+
+    setup do
+      Process.put(:test_pid, self())
+      Application.put_env(:symphony_elixir, :monday_client_module, E2ECrudClient)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :monday_client_module) end)
+      :ok
+    end
+
+    test "create_item sends SymphonyCreateItem mutation with board_id and item_name" do
+      assert {:ok, %{id: "42", name: "[E2E] test item"}} =
+               Adapter.create_item(99_999, "[E2E] test item")
+
+      assert_received {:graphql, query, vars}
+      assert query =~ "SymphonyCreateItem"
+      assert vars["boardId"] == 99_999
+      assert vars["itemName"] == "[E2E] test item"
+    end
+
+    test "create_item returns error tuple on transport failure" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      assert {:error, :auth_failed} = Adapter.create_item(99_999, "[E2E] test")
+    end
+
+    test "create_item returns unexpected_response on malformed body" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EUnexpectedClient)
+      assert {:error, {:unexpected_response, _}} = Adapter.create_item(99_999, "[E2E] test")
+    end
+
+    test "delete_item sends SymphonyDeleteItem mutation with item_id" do
+      assert :ok = Adapter.delete_item("9999")
+
+      assert_received {:graphql, query, vars}
+      assert query =~ "SymphonyDeleteItem"
+      assert vars["itemId"] == 9_999
+    end
+
+    test "delete_item accepts integer item_id" do
+      assert :ok = Adapter.delete_item(9_999)
+
+      assert_received {:graphql, _query, vars}
+      assert vars["itemId"] == 9_999
+    end
+
+    test "delete_item returns error tuple on transport failure" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      assert {:error, :auth_failed} = Adapter.delete_item("9999")
+    end
+
+    test "list_board_items returns mapped id/name pairs" do
+      assert {:ok, items} = Adapter.list_board_items(99_999)
+      assert length(items) == 2
+
+      assert Enum.any?(items, fn item ->
+               item.id == "100" and item.name == "[E2E] synthetic item"
+             end)
+
+      assert Enum.any?(items, fn item ->
+               item.id == "101" and item.name == "Regular item"
+             end)
+    end
+
+    test "list_board_items sends SymphonyBoardItemNames query with board_id and limit" do
+      Adapter.list_board_items(99_999, limit: 75)
+
+      assert_received {:graphql, query, vars}
+      assert query =~ "SymphonyBoardItemNames"
+      assert vars["boardId"] == 99_999
+      assert vars["limit"] == 75
+    end
+
+    test "list_board_items defaults limit to 50" do
+      Adapter.list_board_items(99_999)
+
+      assert_received {:graphql, _query, vars}
+      assert vars["limit"] == 50
+    end
+
+    test "list_board_items returns :board_not_found when boards list is empty" do
+      Application.put_env(:symphony_elixir, :monday_client_module, EmptyBoardClient)
+      assert {:error, :board_not_found} = Adapter.list_board_items(99_999)
+    end
+
+    test "list_board_items returns error tuple on transport failure" do
+      Application.put_env(:symphony_elixir, :monday_client_module, E2EErrorClient)
+      assert {:error, :auth_failed} = Adapter.list_board_items(99_999)
     end
   end
 end

@@ -208,10 +208,7 @@ defmodule SymphonyElixir.Heartbeat do
 
   defp record_success(%State{degraded?: was_degraded?} = state) do
     if was_degraded? do
-      Logger.warning(
-        "Symphony heartbeat: exiting degraded mode (renewal succeeded after " <>
-          "#{state.consecutive_failures} consecutive failure(s))"
-      )
+      Logger.warning("Symphony heartbeat: exiting degraded mode (renewal succeeded after #{state.consecutive_failures} consecutive failure(s))")
     end
 
     %{state | last_success_at_ms: System.monotonic_time(:millisecond), degraded?: false, consecutive_failures: 0}
@@ -233,20 +230,12 @@ defmodule SymphonyElixir.Heartbeat do
         %{state | degraded?: true}
 
       state.degraded? ->
-        Logger.warning(
-          "Symphony heartbeat: still degraded (renewal failed; " <>
-            "elapsed_since_success_ms=#{elapsed_ms}; consecutive_failures=#{consecutive}; " <>
-            "reason=#{inspect(reason)})"
-        )
+        Logger.warning("Symphony heartbeat: still degraded (renewal failed; elapsed_since_success_ms=#{elapsed_ms}; consecutive_failures=#{consecutive}; reason=#{inspect(reason)})")
 
         state
 
       true ->
-        Logger.warning(
-          "Symphony heartbeat: renewal failed (consecutive_failures=#{consecutive}; " <>
-            "elapsed_since_success_ms=#{elapsed_ms}; reason=#{inspect(reason)}); " <>
-            "will retry on next interval"
-        )
+        Logger.warning("Symphony heartbeat: renewal failed (consecutive_failures=#{consecutive}; elapsed_since_success_ms=#{elapsed_ms}; reason=#{inspect(reason)}); will retry on next interval")
 
         state
     end

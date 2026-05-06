@@ -15,10 +15,10 @@ defmodule SymphonyElixir.AgentRunner do
     CostMeter,
     Monday.PRDetector,
     Monday.Workpad,
-    PRSafety,
     Profile,
     ProfileResolver,
     PromptBuilder,
+    PRSafety,
     Tracker,
     Workspace
   }

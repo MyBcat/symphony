@@ -1441,13 +1441,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
-        {:noreply,
-         schedule_issue_retry(
-           state,
-           issue_id,
-           attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-         )}
+        {:noreply, schedule_issue_retry(state, issue_id, attempt + 1, Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"}))}
     end
   end
 
@@ -1513,16 +1507,7 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      {:noreply, schedule_issue_retry(state, issue.id, attempt + 1, Map.merge(metadata, %{identifier: issue.identifier, error: "no available orchestrator slots"}))}
     end
   end
 
@@ -1767,13 +1752,7 @@ defmodule SymphonyElixir.Orchestrator do
     coalesced = state.poll_check_in_progress == true or already_due?
     state = if coalesced, do: state, else: schedule_tick(state, 0)
 
-    {:reply,
-     %{
-       queued: true,
-       coalesced: coalesced,
-       requested_at: DateTime.utc_now(),
-       operations: ["poll", "reconcile"]
-     }, state}
+    {:reply, %{queued: true, coalesced: coalesced, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}, state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do

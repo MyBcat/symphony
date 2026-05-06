@@ -67,12 +67,7 @@ defmodule SymphonyElixir.Workflow do
       {:ok, front_matter} ->
         prompt = Enum.join(prompt_lines, "\n") |> String.trim()
 
-        {:ok,
-         %{
-           config: front_matter,
-           prompt: prompt,
-           prompt_template: prompt
-         }}
+        {:ok, %{config: front_matter, prompt: prompt, prompt_template: prompt}}
 
       {:error, :workflow_front_matter_not_a_map} ->
         {:error, :workflow_front_matter_not_a_map}

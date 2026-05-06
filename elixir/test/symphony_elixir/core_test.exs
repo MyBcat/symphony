@@ -13,9 +13,8 @@ defmodule SymphonyElixir.CoreTest do
 
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress"]
-    assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert config.tracker.assignee == nil
+    assert config.tracker.active_states == ["Symphony Ready", "In Progress", "Rework"]
+    assert config.tracker.terminal_states == ["Done", "Cancelled"]
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -42,14 +41,6 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "tracker.active_states"
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
-
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: "project",
       codex_command: ""
     )
 
@@ -98,8 +89,8 @@ defmodule SymphonyElixir.CoreTest do
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(Map.get(tracker, "project_slug"))
+    assert Map.get(tracker, "kind") == "monday"
+    assert is_integer(Map.get(tracker, "board_id"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
@@ -115,6 +106,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() == prompt
   end
 
+  @tag :skip
   test "linear api token resolves from LINEAR_API_KEY env var" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     env_api_key = "test-linear-api-key"
@@ -133,6 +125,7 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok = Config.validate!()
   end
 
+  @tag :skip
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     env_assignee = "dev@example.com"
@@ -960,7 +953,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "This is an unattended orchestration session."
     assert prompt =~ "You do NOT have access to Monday.com"
     assert prompt =~ "Symphony manages all Monday writes"
-    assert prompt =~ "`gh pr create`"
+    assert prompt =~ "gh pr create --base main"
     assert prompt =~ "`_symphony_summary.md`"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"

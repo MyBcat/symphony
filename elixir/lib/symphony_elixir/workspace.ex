@@ -352,18 +352,12 @@ defmodule SymphonyElixir.Workspace do
         {:ok, normalize_after_create_command(command)}
 
       {:error, :no_default_repo} ->
-        Logger.error(
-          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
-            "Symphony Repo column empty AND hooks.after_create unset"
-        )
+        Logger.error("Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: Symphony Repo column empty AND hooks.after_create unset")
 
         {:error, {:no_default_repo, Map.get(issue_context, :issue_identifier)}}
 
       {:error, {:unknown_repo, repo_key}} ->
-        Logger.error(
-          "Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: " <>
-            "Symphony Repo \"#{repo_key}\" has no entry in WORKFLOW.md repos: map"
-        )
+        Logger.error("Workspace dispatch refused for issue_identifier=#{Map.get(issue_context, :issue_identifier)}: Symphony Repo \"#{repo_key}\" has no entry in WORKFLOW.md repos: map")
 
         {:error, {:unknown_repo, repo_key}}
     end

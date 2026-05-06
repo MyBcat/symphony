@@ -205,10 +205,7 @@ defmodule SymphonyElixir.CostMeter do
         {:error, reason} ->
           state = fail_closed_state()
 
-          Logger.warning(
-            "CostMeter: failed to load #{path()}: #{inspect(reason)}; " <>
-              "starting fail-closed at $#{format_usd(state.spend_usd)} today"
-          )
+          Logger.warning("CostMeter: failed to load #{path()}: #{inspect(reason)}; starting fail-closed at $#{format_usd(state.spend_usd)} today")
 
           persist(state)
           state

@@ -1,0 +1,247 @@
+name: nightly-e2e
+
+# SYM-11923096576 / Spec 4 §2.9 / DL-008 — automated nightly smoke that
+# creates a synthetic Monday item on a sandbox board, runs Symphony in
+# headless mode for up to 10 minutes, asserts the agent dispatched + branch
+# created + PR opened + item moved to "Human Review", then tears the
+# synthetic item + workspace + PR back down. The workflow HARD-FAILS if
+# SYMPHONY_E2E_BOARD_ID equals the production board id (8173460438).
+
+on:
+  schedule:
+    # 02:00 UTC every day. Picked because (a) it sits a few hours after the
+    # daily-digest 06:00 ET slot so we don't compete for runner capacity, and
+    # (b) failures show up in the morning when an operator is around to look.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      max_wait_seconds:
+        description: 'Max seconds to wait for Symphony to reach Human Review (default 600)'
+        required: false
+        default: '600'
+      dry_run:
+        description: 'Dry-run only (skip Symphony invocation; exercise setup/teardown)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: nightly-e2e
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: guard board id
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse if SYMPHONY_E2E_BOARD_ID equals production board id
+        env:
+          SYMPHONY_E2E_BOARD_ID: ${{ secrets.SYMPHONY_E2E_BOARD_ID }}
+        run: |
+          if [ -z "$SYMPHONY_E2E_BOARD_ID" ]; then
+            echo "SYMPHONY_E2E_BOARD_ID secret is not set; refusing to run." >&2
+            exit 1
+          fi
+          if [ "$SYMPHONY_E2E_BOARD_ID" = "8173460438" ]; then
+            echo "REFUSED: SYMPHONY_E2E_BOARD_ID equals the production board id 8173460438." >&2
+            exit 1
+          fi
+          echo "Board id guard passed (sandbox=$SYMPHONY_E2E_BOARD_ID)"
+
+  e2e:
+    name: nightly e2e
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: elixir
+    env:
+      SYMPHONY_E2E_BOARD_ID: ${{ secrets.SYMPHONY_E2E_BOARD_ID }}
+      SYMPHONY_E2E_MONDAY_TOKEN: ${{ secrets.SYMPHONY_E2E_MONDAY_TOKEN }}
+      MONDAY_API_TOKEN: ${{ secrets.SYMPHONY_E2E_MONDAY_TOKEN }}
+      SYMPHONY_E2E_HEARTBEAT_ITEM_ID: ${{ secrets.SYMPHONY_E2E_HEARTBEAT_ITEM_ID }}
+      SYMPHONY_E2E_STATUS_COLUMN_ID: ${{ secrets.SYMPHONY_E2E_STATUS_COLUMN_ID }}
+      SYMPHONY_E2E_PR_COLUMN_ID: ${{ secrets.SYMPHONY_E2E_PR_COLUMN_ID }}
+      SYMPHONY_E2E_WORKSPACE_ROOT: ${{ runner.temp }}/symphony-workspaces
+      SYMPHONY_E2E_LOG_PATH: ${{ runner.temp }}/symphony-e2e.log
+      SYMPHONY_E2E_BINARY: ${{ github.workspace }}/elixir/bin/symphony
+      SYMPHONY_E2E_WORKFLOW_PATH: ${{ runner.temp }}/WORKFLOW.e2e.md
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache deps and build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            elixir/deps
+            elixir/_build
+          key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Fetch deps
+        run: mise exec -- mix deps.get
+
+      - name: Build symphony escript
+        run: mise exec -- mix escript.build
+
+      - name: Render sandbox WORKFLOW.md
+        run: |
+          STATUS_COL="${SYMPHONY_E2E_STATUS_COLUMN_ID:-color_mm30c3vb}"
+          PR_COL="${SYMPHONY_E2E_PR_COLUMN_ID:-link_mm30ak49}"
+          cat > "$SYMPHONY_E2E_WORKFLOW_PATH" <<EOF
+          ---
+          cost_cap:
+            daily_usd: 10
+          phi_gate:
+            mode: strict
+          tracker:
+            kind: monday
+            api_token: \$MONDAY_API_TOKEN
+            endpoint: https://api.monday.com/v2
+            board_id: ${SYMPHONY_E2E_BOARD_ID}
+            identifier_prefix: "SYM"
+            symphony_status_column_id: "${STATUS_COL}"
+            pr_column_id: "${PR_COL}"
+            heartbeat_item_id: ${SYMPHONY_E2E_HEARTBEAT_ITEM_ID}
+            heartbeat_ttl_ms: 60000
+            failure_ttl_count: 5
+            outage_threshold: 5
+            description_column_id: null
+            branch_column_id: null
+            labels_column_id: null
+            active_states:
+              - "Symphony Ready"
+              - "In Progress"
+              - "Rework"
+            handoff_states:
+              - "Human Review"
+              - "Merging"
+            terminal_states:
+              - "Done"
+              - "Cancelled"
+          polling:
+            interval_ms: 5000
+          workspace:
+            root: ${SYMPHONY_E2E_WORKSPACE_ROOT}
+          repos:
+            symphony:
+              clone_url: https://github.com/MyBcat/symphony.git
+              auto_merge_on_codex_pass: false
+              allowed_profiles:
+                - claude_sonnet
+              default_branch: main
+          profiles:
+            claude_sonnet:
+              kind: claude
+              max_concurrent: 1
+              cost_per_input_token_usd: 0.000003
+              cost_per_output_token_usd: 0.000015
+              claude:
+                command: "claude --print --output-format stream-json --input-format stream-json"
+                model: "claude-sonnet-4-6"
+                permission_mode: "acceptEdits"
+                allowed_tools: ["Read", "Edit", "Write", "Bash(git:*)", "Bash(gh:*)"]
+          agent:
+            default_profile: claude_sonnet
+            max_concurrent_agents: 1
+            max_turns: 20
+          ---
+
+          You are working on a Monday.com item {{ issue.identifier }}.
+          Title: {{ issue.title }}
+          Description:
+          {{ issue.description }}
+          EOF
+
+      - name: Run e2e harness
+        run: |
+          ARGS=(--max-wait-seconds "${{ github.event.inputs.max_wait_seconds || 600 }}")
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          mise exec -- mix symphony.e2e_nightly "${ARGS[@]}"
+
+      - name: Capture log tail on failure
+        if: failure()
+        id: logtail
+        run: |
+          if [ -f "$SYMPHONY_E2E_LOG_PATH" ]; then
+            tail -n 200 "$SYMPHONY_E2E_LOG_PATH" > "${SYMPHONY_E2E_LOG_PATH}.tail"
+            echo "log_tail_path=${SYMPHONY_E2E_LOG_PATH}.tail" >> "$GITHUB_OUTPUT"
+          else
+            echo "no symphony log file at $SYMPHONY_E2E_LOG_PATH" > "${{ runner.temp }}/empty.tail"
+            echo "log_tail_path=${{ runner.temp }}/empty.tail" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open failure issue
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        env:
+          LOG_TAIL_PATH: ${{ steps.logtail.outputs.log_tail_path }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = process.env.LOG_TAIL_PATH || '';
+            let tail = '';
+            try { tail = fs.readFileSync(path, 'utf8'); } catch (_) { tail = '(no log file)'; }
+
+            // M-9 PHI/secret scrub before posting to a public Issue body. The log
+            // tail may contain Bearer tokens, env-var-style secrets, known token
+            // formats (sk-, ghp_, github_pat_, xox*), home paths, or PHI from
+            // agent stderr. This mirrors the M-4 / M-5 redaction patterns.
+            const scrub = (text) => text
+              .split('\n')
+              .slice(-200)
+              .map(line => line
+                .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]{12,}/gi, 'Bearer [REDACTED-SECRET]')
+                .replace(/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS)[A-Za-z0-9_]*\s*[:=]\s*)\S+/gi, '$1[REDACTED-SECRET]')
+                .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/g, '[REDACTED-SECRET]')
+                .replace(/(?<![A-Za-z0-9._-])\/(?:home|Users)\/[^/\s:]+(?:\/\S*)?/g, '[REDACTED-HOME-PATH]'))
+              .join('\n');
+            tail = scrub(tail);
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `[E2E nightly failed ${today}]`;
+            const body = [
+              `Nightly e2e workflow failed on ${today} (run: ${context.runId}).`,
+              ``,
+              `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              ``,
+              `### Last 200 lines of Symphony log`,
+              ``,
+              '```',
+              tail,
+              '```'
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['e2e-failure']
+            });
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4
+        with:
+          name: symphony-e2e-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/symphony-e2e.log
+            ${{ runner.temp }}/WORKFLOW.e2e.md
+          if-no-files-found: ignore

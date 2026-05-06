@@ -17,22 +17,10 @@ defmodule SymphonyElixir.PRSafety.GH.Default do
     case run_gh(args) do
       {:ok, body} ->
         case Jason.decode(body) do
-          {:ok,
-           %{
-             "baseRefName" => base,
-             "headRefName" => head,
-             "url" => out_url,
-             "headRefOid" => head_sha
-           }}
+          {:ok, %{"baseRefName" => base, "headRefName" => head, "url" => out_url, "headRefOid" => head_sha}}
           when is_binary(base) and is_binary(head) and is_binary(out_url) and
                  is_binary(head_sha) and head_sha != "" ->
-            {:ok,
-             %{
-               base_branch: base,
-               head_branch: head,
-               url: out_url,
-               head_sha: head_sha
-             }}
+            {:ok, %{base_branch: base, head_branch: head, url: out_url, head_sha: head_sha}}
 
           {:ok, _other} ->
             {:error, {:unexpected_gh_payload, :missing_fields}}
