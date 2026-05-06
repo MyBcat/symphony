@@ -1,6 +1,6 @@
 ---
 cost_cap:
-  daily_usd: 50
+  daily_usd: 1000
 dashboard:
   enabled: true
   port: 4000
@@ -290,7 +290,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-opus-4-7"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Task", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
   claude_sonnet:
     kind: claude
     max_concurrent: 6
@@ -300,7 +300,7 @@ profiles:
       command: "claude --print --output-format stream-json --input-format stream-json"
       model: "claude-sonnet-4-6"
       permission_mode: "acceptEdits"
-      allowed_tools: ["Read", "Edit", "Write", "Task", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
+      allowed_tools: ["Read", "Edit", "Write", "Skill", "TodoWrite", "Bash(git:*)", "Bash(gh:*)", "Bash(make:*)", "Bash(mix:*)", "Bash(mise:*)", "Bash(npm:*)", "Bash(pip:*)", "Bash(pytest:*)"]
   codex_gpt55_xhigh:
     kind: codex
     max_concurrent: 4
@@ -409,11 +409,14 @@ Before changing any code:
    - Out of scope (explicit)
    - Risks / unknowns
 
+**Commit and push `_symphony_plan.md` to your work branch BEFORE making any code or test changes.** The plan is the contract — committing it first means the "plan vs reality" delta in the summary is meaningful.
+
 ## Phase 2 — EXECUTE
 
 3. Follow the plan. For new behavior or bug fixes, invoke `superpowers:test-driven-development` — write failing test first, watch it fail, then implement.
-4. **Spawn parallel sub-agents** via the `Task` tool when the work is independent — e.g., implementing 3 unrelated files, writing tests in parallel with implementation, refactoring across modules. Pick the right `subagent_type`: use `general-purpose` for code work, `Explore` for read-only investigation, `code-reviewer` for review passes. Do NOT spawn sub-agents for sequential work or work that needs shared context.
-5. After significant changes, invoke `superpowers:requesting-code-review` to self-review before opening the PR.
+4. After significant changes, invoke `superpowers:requesting-code-review` to self-review before opening the PR.
+
+(Sub-agent spawning via the `Task` tool is intentionally NOT enabled in the agent's allowed_tools allowlist until per-sub-agent workspace sandboxing is verified — Codex review on PR #27 flagged this. Treat all work as single-process for now.)
 
 ## Phase 3 — SHIP
 
