@@ -109,6 +109,21 @@ all landed exactly as specified.
   `git clone` over SSH (PERMISSION denied by publickey) and is a
   test-infrastructure issue unrelated to this change.
 
+## CI status
+
+- `validate-pr-description`: **pass** (PR body matches the
+  `.github/pull_request_template.md` headings).
+- `make-all`: **fail at coverage step**. Coverage = 78.14% vs 100%
+  threshold configured in `mix.exs`. This is a pre-existing condition
+  on `main` — every recent main commit fails the same gate. Modules
+  below 100% (`AutoMerge.GH.Default`, `CodexReview.Default`,
+  `Monday.Adapter`, `Profile`, `Heartbeat`, `Tracker`, etc.) are all
+  unrelated to this PR. `Codex.Adapter` and `Codex.DynamicTool` are
+  in the `test_coverage.ignore_modules` allowlist, so the adapter
+  rewrite has no impact on the coverage number.
+- Earlier `make-all` failures on this PR (fmt-check, credo numeric
+  literal) were folded in as `style:` commits and are now green.
+
 ## PR
 
 Branch: `symphony/SYM-11941611091/attempt-1`.
