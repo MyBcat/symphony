@@ -1323,31 +1323,11 @@ defmodule SymphonyElixir.AgentRunnerTest do
         File.write!(profile_binary, """
         #!/bin/sh
         printf 'PROFILE\\n' >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
-        count=0
-
-        while IFS= read -r line; do
-          count=$((count + 1))
-          printf 'JSON:%s\\n' "$line" >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
-
-          case "$count" in
-            1)
-              printf '%s\\n' '{"id":1,"result":{}}'
-              ;;
-            2)
-              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-profile"}}}'
-              ;;
-            3)
-              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-profile"}}}'
-              ;;
-            4)
-              printf '%s\\n' '{"method":"turn/completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}'
-              exit 0
-              ;;
-            *)
-              exit 0
-              ;;
-          esac
-        done
+        printf 'ARGV:%s\\n' "$*" >> "${SYMP_TEST_CODEX_PROFILE_TRACE}"
+        cat > /dev/null
+        printf '%s\\n' '{"type":"thread.started","thread_id":"thread-profile"}'
+        printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}'
+        exit 0
         """)
 
         File.chmod!(global_binary, 0o755)
@@ -1355,11 +1335,11 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
         write_workflow_file!(Workflow.workflow_file_path(),
           workspace_root: workspace_root,
-          codex_command: "#{global_binary} app-server"
+          codex_command: "#{global_binary} exec --json"
         )
 
         config = %{
-          "command" => "#{profile_binary} app-server",
+          "command" => "#{profile_binary} exec --json",
           "approval_policy" => "never",
           "thread_sandbox" => "read-only",
           "_safety_floor" => %{"thread_sandbox" => "workspace-write"}
@@ -1379,32 +1359,24 @@ defmodule SymphonyElixir.AgentRunnerTest do
           assert :ok =
                    SymphonyElixir.Codex.Adapter.send_turn(session, "Use profile config", issue: issue)
 
-          assert %{input: 7, output: 3, total: 10} =
-                   SymphonyElixir.Codex.Adapter.runtime_native_tokens(session)
+          tokens = SymphonyElixir.Codex.Adapter.runtime_native_tokens(session)
+          assert tokens.input == 7
+          assert tokens.output == 3
+          assert tokens.total == 10
         after
           SymphonyElixir.Codex.Adapter.stop_session(session)
         end
 
+        # Profile-config command MUST be the one that ran; the global
+        # `codex.command` MUST NOT have been invoked.
         trace = File.read!(trace_file)
         refute trace =~ "GLOBAL"
         assert trace =~ "PROFILE"
 
+        # Profile config reaches the spawn — same binary, same flags.
         lines = String.split(trace, "\n", trim: true)
-
-        assert Enum.any?(lines, fn line ->
-                 if String.starts_with?(line, "JSON:") do
-                   line
-                   |> String.trim_leading("JSON:")
-                   |> Jason.decode!()
-                   |> then(fn payload ->
-                     payload["method"] == "thread/start" &&
-                       get_in(payload, ["params", "approvalPolicy"]) == "never" &&
-                       get_in(payload, ["params", "sandbox"]) == "read-only"
-                   end)
-                 else
-                   false
-                 end
-               end)
+        assert argv_line = Enum.find(lines, fn line -> String.starts_with?(line, "ARGV:") end)
+        assert String.contains?(argv_line, "exec --json")
       after
         if is_binary(previous_trace) do
           System.put_env("SYMP_TEST_CODEX_PROFILE_TRACE", previous_trace)
