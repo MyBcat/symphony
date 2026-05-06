@@ -24,10 +24,10 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	$(MIX) test --no-start --cover
 
 test:
-	$(MIX) test
+	$(MIX) test --no-start
 
 dialyzer:
 	$(MIX) deps.get
