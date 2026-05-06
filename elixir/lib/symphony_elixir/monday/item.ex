@@ -219,8 +219,7 @@ defmodule SymphonyElixir.Monday.Item do
       |> Enum.map(&Map.get(&1, "body", ""))
       |> Enum.map(&strip_html/1)
       |> Enum.map(&String.trim/1)
-      |> Enum.reject(&symphony_marker?/1)
-      |> Enum.reject(&(&1 == ""))
+      |> Enum.reject(&(symphony_marker?(&1) or &1 == ""))
 
     case operator_bodies do
       [] -> nil

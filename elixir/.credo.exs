@@ -18,11 +18,9 @@
         {Credo.Check.Readability.PreferImplicitTry, false},
         {Credo.Check.Refactor.CondStatements, false},
         {Credo.Check.Refactor.CyclomaticComplexity, false},
-        {Credo.Check.Refactor.FilterReject, false},
         {Credo.Check.Refactor.FunctionArity, false},
         {Credo.Check.Refactor.MapJoin, false},
-        {Credo.Check.Refactor.Nesting, false},
-        {Credo.Check.Refactor.WithClauses, false}
+        {Credo.Check.Refactor.Nesting, false}
       ]
     }
   ]
