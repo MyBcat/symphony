@@ -186,6 +186,17 @@ repos:
       - claude_sonnet
       - gemini_long_context
     default_branch: main
+  # Alias for the local clone folder /mnt/d_drive/repos/eyecloud_ai and any
+  # Monday Symphony Repo dropdown label that uses underscores instead of the
+  # GitHub repo's hyphenated name.
+  eyecloud_ai:
+    clone_url: https://github.com/MyBcat/eyecloud-ai.git
+    allowed_profiles:
+      - codex_gpt55_xhigh
+      - claude_opus
+      - claude_sonnet
+      - gemini_long_context
+    default_branch: main
   finance_seat:
     clone_url: https://github.com/MyBcat/finance_seat.git
     allowed_profiles:
