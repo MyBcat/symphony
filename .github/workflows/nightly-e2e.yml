@@ -36,7 +36,7 @@ concurrency:
 jobs:
   guard:
     name: guard board id
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Refuse if SYMPHONY_E2E_BOARD_ID equals production board id
         env:
@@ -55,7 +55,7 @@ jobs:
   e2e:
     name: nightly e2e
     needs: guard
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     defaults:
       run:
